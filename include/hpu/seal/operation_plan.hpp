@@ -83,6 +83,7 @@ public:
         std::string step_id,
         const PreparedRnsObject& input,
         std::string output_id);
+    // Default overloads reserve coefficient scratch and preserve input values.
     PreparedRnsObject append_relinearize(
         std::string step_id,
         const PreparedRnsObject& tensor,

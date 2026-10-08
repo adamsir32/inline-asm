@@ -3,7 +3,7 @@
 #include "hpu/seal/ntt_bridge.hpp"
 #include "scheme/bgv/basic_arithmetic.hpp"
 #include "scheme/ckks/basic_arithmetic.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include "assembler.hpp"
@@ -243,6 +243,7 @@ BgvArithmeticApplication build(
                           degree, hpu::runtime::AllocationKind::output);
         }
     }
+    hpu::resource::Recording recording;
     std::string body;
     if (operation == Operation::negate) {
         body = hpu::scheme::bgv::generate_negate_body_asm(
@@ -298,7 +299,8 @@ BgvArithmeticApplication build(
     }
     auto bindings = recipe.finish();
     return {std::move(image), left.parms_id(), balance.output_factor,
-            std::move(instructions), std::move(bindings)};
+            std::move(instructions), std::move(bindings),
+            std::make_shared<hpu::resource::OperatorProgram>(recording.finish())};
 }
 
 } // namespace

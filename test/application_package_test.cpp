@@ -1277,6 +1277,33 @@ void test_request_rejects_partial_dstore_to_read_only_allocation()
         "partial DSTORE into a read_only allocation was accepted");
 }
 
+void test_native_writer_preserves_caller()
+{
+    Fixture fixture;
+    fixture.request.outputs.front().golden_words = {9, 8, 7, 6};
+    const auto original_words = fixture.image.words();
+    const auto original_spans = fixture.request.program.ordered_dma_spans;
+    hpu::resource::Recording recording;
+    hpu::resource::read(hpu::resource::value, hpu::DataType::seg);
+    hpu::resource::publish(hpu::resource::value, 0);
+    hpu::resource::finish_program();
+    fixture.request.program.operator_program =
+        std::make_shared<hpu::resource::OperatorProgram>(recording.finish());
+    fixture.request.program.resource_dma = {
+        {0, "input", original_spans[0], {}, "copy", 0},
+        {1, "result", original_spans[1], {}, "copy", 1}};
+    ScratchDirectory directory;
+    const auto destination = directory.path() / "compiled";
+    hpu::delivery::write_application_package(destination, fixture.request);
+    hpu::delivery::validate_application_package_on_disk(destination);
+    require(fixture.image.words() == original_words && !fixture.request.program.resources_compiled,
+            "resource writer changed caller-owned memory or request");
+    const auto report = read_file(destination / "oracle/report.json");
+    require(report.find("\"ir_source\": \"operator\"") != std::string::npos &&
+            report.find("\"host_instruction_model_verified\":true") != std::string::npos,
+            "writer omitted native resource compilation or strict verification");
+}
+
 template <typename Function>
 void run_test(
     const char* name,
@@ -1297,6 +1324,7 @@ void run_test(
 int main()
 {
     std::vector<std::string> failures;
+    run_test("native writer preserves caller", test_native_writer_preserves_caller, failures);
     run_test("happy path package", test_happy_path_package, failures);
     run_test(
         "deterministic generation", test_deterministic_generation, failures);

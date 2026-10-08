@@ -364,7 +364,8 @@ auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_relin", program);
   指令字、resolved span 数组、`hpu_run_<stem>()` 入口和 DMA manifest。
   `parms_id` 与 `correction_factor` 保持原产品的 host 元数据，不经 PE 更新。
 - 顶层和降一级的镜像内容已在 HPU 物理 NTT 数学模型中与 modified-SEAL
-  Relinearize 逐 limb 对齐；尚无逐指令软件执行或实体 HPU 运行证据。
+  Relinearize 逐 limb 对齐；其原生资源 IR 也参与前端及 Plan 包的严格逐指令
+  host 对拍。实体 HPU 运行证据由 IT 验收提供。
 - `estimate_bgv_keyswitch_image_lines(N, active_q, key_modulus_count)` 给出当前
   all-resident 布局的精确容量，并在构建前检查 `capacity_lines`。例如
   `N=65536,Q=3,P=1` 需 136193 个 256B line，超过旧的 65536-line 软件 profile；
@@ -414,7 +415,7 @@ auto artifacts = render_bgv_arithmetic_runtime_artifacts("bgv_add", add);
 - 每个包含固定 `Qmax|P|t` 模表、canonical HPU NTT 输入、输出和逐条
   resolved DMA；不执行 CPU 密文加减或缩放。Negate 保持 factor 不变。
 - 已对顶层、降一级和不同 factor 组合做 modified-SEAL 逐 limb 差分；
-  尚无逐指令软件执行或实体 HPU 验证。
+  其原生资源 IR 参与前端及 Plan 包的逐指令 host 对拍；实体 HPU 验证由 IT 提供。
 - 明文输入须为有效的系数域 BGV `Plaintext`。构建镜像时将其预制为
   canonical HPU NTT；AddPlain/SubPlain 先按密文 factor 模 `t` 缩放明文，
   然后由 HPU 只更新 `c0` 并复制 `c1`。MultiplyPlain 对两个密文分量
@@ -441,8 +442,8 @@ auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_rows", rows);
   指令流中执行 BGV Galois KeySwitch；不通过 CPU 计算旋转后密文。
   `parms_id` 与 `correction_factor` 保持不变，只有末尾一次 `psync`。
 - 正/负行步长及列交换在顶层和降一级与 modified-SEAL 逐 limb 差分；
-  `N=65536,Q=3,P=1` 估算需 169985 个 256B line。尚无逐指令软件
-  执行或实体 HPU 验证。
+  `N=65536,Q=3,P=1` 估算需 169985 个 256B line。前端及 Plan 包会对其原生资源 IR
+  做严格逐指令 host 对拍，实际优化后的容量以包内报告为准；实体 HPU 验证由 IT 提供。
 
 #### 2.2.10 BGV 跨 level 计算图
 
@@ -890,3 +891,18 @@ runtime、初始镜像、按算子顺序保存的 SEAL ciphertext oracle 和软�
 参数和请求中不包含 SecretKey。三种方案都要求 SEAL oracle 到 golden 的检查为
 `pass`，并要求对应软件执行器与 SEAL 的每一步 HPU 物理输出逐字一致。详见
 [HPU_APPLICATION_PACKAGE_V1.md](../delivery/HPU_APPLICATION_PACKAGE_V1.md)。
+
+### 算子资源 IR 与导出编译
+
+`include/hpu/compiler/operator_resources.hpp` 提供符号操作数、数据端口及算术/变换操作。
+算子发出的 `OperatorProgram` 随 lowering/runtime/application 保留；物理对象编号仅在
+兼容汇编渲染和最终后端编码中出现。`read/publish/discard` 是输入、结果与生命周期
+声明，实际加载、写回、释放及 spill/reload 由公共编译器调度。
+
+`compile_application_resources(request, image, optimize, require_instruction_verification)`
+位于 `hpu/delivery/resource_compiler.hpp`，供前端和旧 Plan 交付导出共同使用。
+`write_application_package()` 自动编译尚未调度的原生请求，在私有镜像上更新最终指令、
+DMA 和 golden 目的地址。已经编译的前端请求直接导出。原始编码请求仍按原路径导出。
+
+CKKS Plan 默认 Relinearize/Rescale 自动声明独立 coefficient workspace，保护输入和
+逐节点 golden；调用者仍可通过已有显式 workspace 重载指定逻辑工作区。

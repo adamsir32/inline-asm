@@ -43,6 +43,7 @@ def main():
         assert report["host_instruction_model"]["hardware_contract_verified"] is False
         assert report["host_instruction_model"]["forward_boundary_conversions"] > 0
         assert report["host_instruction_model"]["inverse_boundary_conversions"] > 0
+        assert report["compiler_resources"]["ir_source"] == "operator"
         assert report["compiler_resources"]["peak_regular_banks"] <= 5
         assert report["compiler_resources"]["peak_object_slots"] <= 8
         buffers = report["compiler_resources"]["logical_buffers"]

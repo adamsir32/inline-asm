@@ -1,6 +1,5 @@
 #include "poly/auto.hpp"
 #include "operator/keyswitch.hpp"
-#include "util/hpu_asm.hpp"
 #include "util/validation.hpp"
 
 #include <sstream>

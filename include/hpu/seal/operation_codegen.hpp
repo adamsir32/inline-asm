@@ -4,6 +4,8 @@
 
 #include <seal/seal.h>
 
+#include "hpu/compiler/operator_resources.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,11 +19,12 @@ struct CkksLoweredOperation {
 struct CkksLoweredProgram {
     std::string body_asm;
     std::vector<CkksLoweredOperation> operations;
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
 };
 
-// Selects an existing CKKS kernel body for every explicit plan step. Object
-// and resource IDs remain in the per-operation manifest for a later relocation
-// backend; the assembly body retains the current generic DMA operand ABI.
+// Emits native operator resource IR alongside a compatibility assembly body.
+// Logical data/resource IDs remain in the per-operation manifest for DMA port
+// binding; the common compiler assigns final object slots and memory spans.
 CkksLoweredProgram lower_ckks_operation_plan(
     const CkksOperationPlan& plan,
     const ::seal::SEALContext& context,

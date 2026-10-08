@@ -1,6 +1,6 @@
 #include "scheme/bfv/basic_arithmetic.hpp"
 
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -9,10 +9,10 @@
 namespace hpu::scheme::bfv {
 namespace {
 
-constexpr int kLeftObject = 0;
-constexpr int kRightObject = 1;
-constexpr int kOutputObject = 2;
-constexpr int kModulusTableObject = 4;
+constexpr auto kLeftObject = hpu::resource::value;
+constexpr auto kRightObject = hpu::resource::auxiliary;
+constexpr auto kOutputObject = hpu::resource::accumulator;
+constexpr auto kModulusTableObject = hpu::resource::modulus_table;
 
 bool valid_config(int num_q)
 {
@@ -30,27 +30,27 @@ std::string generate_ciphertext_binary_body(int num_q, bool subtract, bool appen
     asm_code << "        /* BFV " << (subtract ? "SUB" : "ADD")
              << ": coefficient-domain Q ciphertext operation */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(kModulusTableObject, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
-            asm_code << hpu::pmodld(basis);
-            asm_code << hpu::dload(kLeftObject, hpu::DataType::poly);
-            asm_code << hpu::dload(kRightObject, hpu::DataType::poly);
-            asm_code << (subtract ? hpu::psub(kOutputObject, kLeftObject, kRightObject)
-                                  : hpu::padd(kOutputObject, kLeftObject, kRightObject));
-            asm_code << hpu::pfree(kLeftObject);
-            asm_code << hpu::pfree(kRightObject);
-            asm_code << hpu::dstore(kOutputObject, 1);
+            asm_code << hpu::resource::select_modulus(basis);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+            asm_code << (subtract ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
+                                  : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
+            asm_code << hpu::resource::discard(kLeftObject);
+            asm_code << hpu::resource::discard(kRightObject);
+            asm_code << hpu::resource::publish(kOutputObject, 1);
         }
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -66,29 +66,29 @@ std::string generate_plain_binary_body(int num_q, bool subtract, bool append_psy
     asm_code << "        /* BFV " << (subtract ? "SUB_PLAIN" : "ADD_PLAIN")
              << ": update coefficient-domain c0 with prepared Delta*m; copy c1 */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(kModulusTableObject, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     for (int basis = 0; basis < num_q; ++basis) {
         asm_code << "        /* q_" << basis << ": out0=c0 op prepared_plaintext */\n";
-        asm_code << hpu::pmodld(basis);
-        asm_code << hpu::dload(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::dload(kRightObject, hpu::DataType::poly);
-        asm_code << (subtract ? hpu::psub(kOutputObject, kLeftObject, kRightObject)
-                              : hpu::padd(kOutputObject, kLeftObject, kRightObject));
-        asm_code << hpu::pfree(kLeftObject);
-        asm_code << hpu::pfree(kRightObject);
-        asm_code << hpu::dstore(kOutputObject, 1);
+        asm_code << hpu::resource::select_modulus(basis);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+        asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+        asm_code << (subtract ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
+                              : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
+        asm_code << hpu::resource::discard(kLeftObject);
+        asm_code << hpu::resource::discard(kRightObject);
+        asm_code << hpu::resource::publish(kOutputObject, 1);
 
         asm_code << "        /* q_" << basis << ": out1=c1 */\n";
-        asm_code << hpu::dload(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::dstore(kLeftObject, 1);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+        asm_code << hpu::resource::publish(kLeftObject, 1);
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -127,27 +127,27 @@ std::string generate_multiply_plain_body_asm(int N, int num_q, bool append_psync
     asm_code << "        /* BFV MULTIPLY_PLAIN: coefficient ciphertext -> canonical HPU "
                 "NTT -> pointwise multiply -> coefficient output */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(kModulusTableObject, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
-            asm_code << hpu::pmodld(basis);
-            asm_code << hpu::dload(kLeftObject, hpu::DataType::poly);
-            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, 3, false);
-            asm_code << hpu::dload(kRightObject, hpu::DataType::poly);
-            asm_code << hpu::pmul(kLeftObject, kLeftObject, kRightObject);
-            asm_code << hpu::pfree(kRightObject);
-            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, 3, false);
-            asm_code << hpu::dstore(kLeftObject, 1);
+            asm_code << hpu::resource::select_modulus(basis);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, hpu::resource::transform_table, false);
+            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(kLeftObject, kLeftObject, kRightObject);
+            asm_code << hpu::resource::discard(kRightObject);
+            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, hpu::resource::transform_table, false);
+            asm_code << hpu::resource::publish(kLeftObject, 1);
         }
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -161,25 +161,25 @@ std::string generate_negate_body_asm(int num_q, bool append_psync, bool manage_m
     }
     asm_code << "        /* BFV NEGATE: coefficient-domain out=(c-c)-c */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(kModulusTableObject, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
-            asm_code << hpu::pmodld(basis);
-            asm_code << hpu::dload(kLeftObject, hpu::DataType::poly);
-            asm_code << hpu::psub(kOutputObject, kLeftObject, kLeftObject);
-            asm_code << hpu::psub(kOutputObject, kOutputObject, kLeftObject);
-            asm_code << hpu::pfree(kLeftObject);
-            asm_code << hpu::dstore(kOutputObject, 1);
+            asm_code << hpu::resource::select_modulus(basis);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+            asm_code << hpu::resource::subtract(kOutputObject, kLeftObject, kLeftObject);
+            asm_code << hpu::resource::subtract(kOutputObject, kOutputObject, kLeftObject);
+            asm_code << hpu::resource::discard(kLeftObject);
+            asm_code << hpu::resource::publish(kOutputObject, 1);
         }
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

@@ -1,7 +1,7 @@
 #include "scheme/ckks/relinearize.hpp"
 
 #include "operator/relinearization.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -10,9 +10,9 @@
 namespace hpu::scheme::ckks {
 namespace {
 
-constexpr int kPolynomialObject = 0;
-constexpr int kTwiddleObject = 3;
-constexpr int kModulusTableObject = 4;
+constexpr auto kPolynomialObject = hpu::resource::value;
+constexpr auto kTwiddleObject = hpu::resource::transform_table;
+constexpr auto kModulusTableObject = hpu::resource::modulus_table;
 
 std::string transform(
     int N,
@@ -25,14 +25,14 @@ std::string transform(
     asm_code << "        /* --- " << label << " --- */\n";
     for (int component = 0; component < components; ++component) {
         for (int context : q_contexts) {
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(kPolynomialObject, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
             asm_code << (inverse
                 ? generate_hpu_intt_body_asm(
                     N, kPolynomialObject, kTwiddleObject, false)
                 : generate_hpu_ntt_body_asm(
                     N, kPolynomialObject, kTwiddleObject, false));
-            asm_code << hpu::dstore(kPolynomialObject, 1);
+            asm_code << hpu::resource::publish(kPolynomialObject, 1);
         }
     }
     return asm_code.str();
@@ -60,7 +60,7 @@ std::string generate_relinearize_ntt_body_asm(
     asm_code
         << "        /* CKKS RELINEARIZE NTT: tensor NTT/Q -> ciphertext NTT/Q */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank);
@@ -77,10 +77,10 @@ std::string generate_relinearize_ntt_body_asm(
         N, layout.q_mod_ids, 2, false,
         "Relinearized c0/c1: coefficient domain -> canonical HPU NTT");
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

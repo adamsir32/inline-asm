@@ -1,7 +1,7 @@
 #include "scheme/ckks/rescale.hpp"
 
 #include "operator/rounded_drop_last.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -25,20 +25,20 @@ std::string transform_components(
     bool inverse,
     const char* label)
 {
-    constexpr int polynomial_object = 0;
-    constexpr int twiddle_object = 3;
+    constexpr auto polynomial_object = hpu::resource::value;
+    constexpr auto twiddle_object = hpu::resource::transform_table;
     std::ostringstream asm_code;
     asm_code << "        /* --- " << label << " --- */\n";
     for (int component = 0; component < component_count; ++component) {
         for (int basis = 0; basis < basis_count; ++basis) {
-            asm_code << hpu::pmodld(basis);
-            asm_code << hpu::dload(polynomial_object, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(basis);
+            asm_code << hpu::resource::read(polynomial_object, hpu::DataType::poly);
             asm_code << (inverse
                 ? generate_hpu_intt_body_asm(
                     N, polynomial_object, twiddle_object, false)
                 : generate_hpu_ntt_body_asm(
                     N, polynomial_object, twiddle_object, false));
-            asm_code << hpu::dstore(polynomial_object, 1);
+            asm_code << hpu::resource::publish(polynomial_object, 1);
         }
     }
     return asm_code.str();
@@ -110,11 +110,11 @@ std::string generate_rescale_ntt_body_asm(
         return asm_code.str();
     }
 
-    constexpr int modulus_table_object = 4;
+    constexpr auto modulus_table_object = hpu::resource::modulus_table;
     asm_code
         << "        /* CKKS RESCALE NTT: canonical input -> rounded drop-last -> canonical output */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             modulus_table_object,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank);
@@ -129,10 +129,10 @@ std::string generate_rescale_ntt_body_asm(
         num_components == 2 ? "Rescaled c0/c1: coefficient domain -> canonical HPU NTT"
                             : "Rescaled c0/c1/c2: coefficient domain -> canonical HPU NTT");
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(modulus_table_object);
+        asm_code << hpu::resource::discard(modulus_table_object);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

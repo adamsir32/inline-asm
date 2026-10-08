@@ -6,7 +6,7 @@
 #include "scheme/ckks/relinearize.hpp"
 #include "scheme/ckks/rescale.hpp"
 #include "scheme/ckks/rotate.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <limits>
@@ -16,7 +16,7 @@
 namespace hpu::seal_adapter {
 namespace {
 
-constexpr int kModulusTableObject = 4;
+constexpr auto kModulusTableObject = hpu::resource::modulus_table;
 constexpr auto kCanonicalDomain =
     hpu::runtime::PolynomialDomain::canonical_ntt_physical;
 
@@ -399,10 +399,11 @@ CkksLoweredProgram lower_ckks_operation_plan(
     const int degree = static_cast<int>(
         key_data->parms().poly_modulus_degree());
     const CkksLevelChain level_chain(context);
+    hpu::resource::Recording recording;
     CkksLoweredProgram result;
     result.operations.reserve(plan.steps().size());
     if (manage_modulus_table) {
-        result.body_asm += hpu::dload(
+        result.body_asm += hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank);
@@ -415,11 +416,12 @@ CkksLoweredProgram lower_ckks_operation_plan(
         result.operations.push_back(std::move(lowered));
     }
     if (manage_modulus_table) {
-        result.body_asm += hpu::pfree(kModulusTableObject);
+        result.body_asm += hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        result.body_asm += hpu::psync();
+        result.body_asm += hpu::resource::finish_program();
     }
+    result.operator_program = std::make_shared<hpu::resource::OperatorProgram>(recording.finish());
     return result;
 }
 

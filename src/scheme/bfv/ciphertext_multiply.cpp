@@ -2,7 +2,7 @@
 
 #include "operator/relinearization.hpp"
 #include "util/bconv.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/mm.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
@@ -46,26 +46,26 @@ std::string generate_basis_transform_body_asm(int N, const std::vector<int>& con
                                               const std::string& label, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr int POBJ_POLY = 0;
-    constexpr int POBJ_TWIDDLE = 3;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_POLY = hpu::resource::value;
+    constexpr auto POBJ_TWIDDLE = hpu::resource::transform_table;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* " << label << (inverse ? ": INTT */\n" : ": NTT */\n");
     if (manage_modulus_table) {
-        asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < num_components; ++component) {
         for (int context : contexts) {
             asm_code << "        /* component " << component << ", MOD_ID " << context << " */\n";
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(POBJ_POLY, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
             asm_code << (inverse ? ::generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false)
                                  : ::generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false));
-            asm_code << hpu::dstore(POBJ_POLY, 1);
+            asm_code << hpu::resource::publish(POBJ_POLY, 1);
         }
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
     return asm_code.str();
 }
@@ -74,42 +74,42 @@ std::string generate_tensor_body_asm(const std::vector<int>& contexts, const std
                                      bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr int POBJ_A = 0;
-    constexpr int POBJ_B = 1;
-    constexpr int POBJ_OUT = 2;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_A = hpu::resource::value;
+    constexpr auto POBJ_B = hpu::resource::auxiliary;
+    constexpr auto POBJ_OUT = hpu::resource::accumulator;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* " << label << ": (a0,a1)*(b0,b1) -> (t0,t1,t2) */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
     }
     for (int context : contexts) {
-        asm_code << hpu::pmodld(context);
+        asm_code << hpu::resource::select_modulus(context);
 
-        asm_code << hpu::dload(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_B, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
         asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::pfree(POBJ_A) << hpu::pfree(POBJ_B);
-        asm_code << hpu::dstore(POBJ_OUT, 1);
+        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
+        asm_code << hpu::resource::publish(POBJ_OUT, 1);
 
-        asm_code << hpu::dload(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_B, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
         asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::pfree(POBJ_A) << hpu::pfree(POBJ_B);
-        asm_code << hpu::dload(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_B, hpu::DataType::poly);
-        asm_code << hpu::pmac(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::pfree(POBJ_A) << hpu::pfree(POBJ_B);
-        asm_code << hpu::dstore(POBJ_OUT, 1);
+        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
+        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
+        asm_code << hpu::resource::accumulate(POBJ_OUT, POBJ_A, POBJ_B);
+        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
+        asm_code << hpu::resource::publish(POBJ_OUT, 1);
 
-        asm_code << hpu::dload(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_B, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
         asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::pfree(POBJ_A) << hpu::pfree(POBJ_B);
-        asm_code << hpu::dstore(POBJ_OUT, 1);
+        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
+        asm_code << hpu::resource::publish(POBJ_OUT, 1);
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
     return asm_code.str();
 }
@@ -118,26 +118,26 @@ std::string generate_scalar_multiply_body_asm(const std::vector<int>& contexts, 
                                               const std::string& label, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr int POBJ_VALUE = 0;
-    constexpr int POBJ_SCALAR = 1;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_VALUE = hpu::resource::value;
+    constexpr auto POBJ_SCALAR = hpu::resource::auxiliary;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* " << label << " */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < num_components; ++component) {
         for (int context : contexts) {
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_SCALAR, hpu::DataType::poly);
-            asm_code << hpu::pmul(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
-            asm_code << hpu::pfree(POBJ_SCALAR);
-            asm_code << hpu::dstore(POBJ_VALUE, 1);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
+            asm_code << hpu::resource::discard(POBJ_SCALAR);
+            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
         }
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
     return asm_code.str();
 }
@@ -147,10 +147,10 @@ std::string generate_fast_floor_body_asm(const std::vector<int>& q_contexts,
                                          bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr int POBJ_VALUE = 0;
-    constexpr int POBJ_CONVERTED = 1;
-    constexpr int POBJ_Q_INV = 2;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_VALUE = hpu::resource::value;
+    constexpr auto POBJ_CONVERTED = hpu::resource::auxiliary;
+    constexpr auto POBJ_Q_INV = hpu::resource::accumulator;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* FastFloor component " << component
@@ -158,22 +158,22 @@ std::string generate_fast_floor_body_asm(const std::vector<int>& q_contexts,
         asm_code << ::generate_hpu_bconv_contexts_body_asm(q_contexts, bsk_contexts, false,
                                                            manage_modulus_table);
         if (manage_modulus_table) {
-            asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+            asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                                    hpu::DloadFlag::small_bank);
         }
         for (int context : bsk_contexts) {
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_CONVERTED, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_Q_INV, hpu::DataType::poly);
-            asm_code << hpu::psub(POBJ_VALUE, POBJ_VALUE, POBJ_CONVERTED);
-            asm_code << hpu::pfree(POBJ_CONVERTED);
-            asm_code << hpu::pmul(POBJ_VALUE, POBJ_VALUE, POBJ_Q_INV);
-            asm_code << hpu::pfree(POBJ_Q_INV);
-            asm_code << hpu::dstore(POBJ_VALUE, 1);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_CONVERTED, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_Q_INV, hpu::DataType::poly);
+            asm_code << hpu::resource::subtract(POBJ_VALUE, POBJ_VALUE, POBJ_CONVERTED);
+            asm_code << hpu::resource::discard(POBJ_CONVERTED);
+            asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_Q_INV);
+            asm_code << hpu::resource::discard(POBJ_Q_INV);
+            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
         }
         if (manage_modulus_table) {
-            asm_code << hpu::pfree(POBJ_MOD_CTX);
+            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
         }
     }
     return asm_code.str();
@@ -184,10 +184,10 @@ std::string generate_branchless_sk_body_asm(const std::vector<int>& q_contexts,
                                             int num_components, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr int POBJ_ALPHA = 0;
-    constexpr int POBJ_FACTOR = 1;
-    constexpr int POBJ_DEST = 2;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_ALPHA = hpu::resource::value;
+    constexpr auto POBJ_FACTOR = hpu::resource::auxiliary;
+    constexpr auto POBJ_DEST = hpu::resource::accumulator;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* branchless SK component " << component << " */\n";
@@ -200,20 +200,20 @@ std::string generate_branchless_sk_body_asm(const std::vector<int>& q_contexts,
 
         asm_code << "        /* alpha=(temp-z_msk)*B^-1 mod m_sk */\n";
         if (manage_modulus_table) {
-            asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+            asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                                    hpu::DloadFlag::small_bank);
         }
-        asm_code << hpu::pmodld(msk_context);
-        asm_code << hpu::dload(POBJ_ALPHA, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_FACTOR, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_DEST, hpu::DataType::poly);
-        asm_code << hpu::psub(POBJ_ALPHA, POBJ_ALPHA, POBJ_FACTOR);
-        asm_code << hpu::pfree(POBJ_FACTOR);
-        asm_code << hpu::pmul(POBJ_ALPHA, POBJ_ALPHA, POBJ_DEST);
-        asm_code << hpu::pfree(POBJ_DEST);
-        asm_code << hpu::dstore(POBJ_ALPHA, 1);
+        asm_code << hpu::resource::select_modulus(msk_context);
+        asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly);
+        asm_code << hpu::resource::subtract(POBJ_ALPHA, POBJ_ALPHA, POBJ_FACTOR);
+        asm_code << hpu::resource::discard(POBJ_FACTOR);
+        asm_code << hpu::resource::multiply(POBJ_ALPHA, POBJ_ALPHA, POBJ_DEST);
+        asm_code << hpu::resource::discard(POBJ_DEST);
+        asm_code << hpu::resource::publish(POBJ_ALPHA, 1);
         if (manage_modulus_table) {
-            asm_code << hpu::pfree(POBJ_MOD_CTX);
+            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
         }
 
         asm_code << "        /* broadcast alpha: {m_sk}->Q */\n";
@@ -222,21 +222,21 @@ std::string generate_branchless_sk_body_asm(const std::vector<int>& q_contexts,
 
         asm_code << "        /* out_i=y_i+alpha*(-B mod q_i) */\n";
         if (manage_modulus_table) {
-            asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+            asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                                    hpu::DloadFlag::small_bank);
         }
         for (int context : q_contexts) {
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(POBJ_DEST, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_ALPHA, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_FACTOR, hpu::DataType::poly);
-            asm_code << hpu::pmac(POBJ_DEST, POBJ_ALPHA, POBJ_FACTOR);
-            asm_code << hpu::pfree(POBJ_ALPHA);
-            asm_code << hpu::pfree(POBJ_FACTOR);
-            asm_code << hpu::dstore(POBJ_DEST, 1);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly);
+            asm_code << hpu::resource::accumulate(POBJ_DEST, POBJ_ALPHA, POBJ_FACTOR);
+            asm_code << hpu::resource::discard(POBJ_ALPHA);
+            asm_code << hpu::resource::discard(POBJ_FACTOR);
+            asm_code << hpu::resource::publish(POBJ_DEST, 1);
         }
         if (manage_modulus_table) {
-            asm_code << hpu::pfree(POBJ_MOD_CTX);
+            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
         }
     }
     return asm_code.str();
@@ -324,9 +324,9 @@ std::string generate_multiply_tensor_body_asm(int N, const BfvCiphertextMultiply
         asm_code << "        // Invalid SEAL BFV ciphertext multiply layout\n";
         return asm_code.str();
     }
-    constexpr int modulus_table_object = 4;
+    constexpr auto modulus_table_object = hpu::resource::modulus_table;
     if (manage_modulus_table) {
-        asm_code << hpu::dload(modulus_table_object, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     asm_code << "        /* Explicit SEAL MOD_IDs: fixed P="
@@ -335,10 +335,10 @@ std::string generate_multiply_tensor_body_asm(int N, const BfvCiphertextMultiply
     asm_code << generate_behz_core_body_asm(N, layout.keyswitch_layout.q_mod_ids, layout.b_mod_ids,
                                             layout.m_sk_mod_id, false);
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(modulus_table_object);
+        asm_code << hpu::resource::discard(modulus_table_object);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -352,9 +352,9 @@ std::string generate_ciphertext_multiply_body_asm(int N, const BfvCiphertextMult
         asm_code << "        // Invalid SEAL BFV ciphertext multiply layout\n";
         return asm_code.str();
     }
-    constexpr int modulus_table_object = 4;
+    constexpr auto modulus_table_object = hpu::resource::modulus_table;
     if (manage_modulus_table) {
-        asm_code << hpu::dload(modulus_table_object, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     asm_code << "        /* Explicit SEAL MOD_IDs: fixed P="
@@ -367,10 +367,10 @@ std::string generate_ciphertext_multiply_body_asm(int N, const BfvCiphertextMult
     asm_code << ::generate_hpu_bfv_relinearization_body_asm(N, layout.keyswitch_layout, false,
                                                             false);
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(modulus_table_object);
+        asm_code << hpu::resource::discard(modulus_table_object);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -400,7 +400,7 @@ std::string generate_ciphertext_multiply_body_asm(int N, int num_q, int num_p, i
     asm_code << ::generate_hpu_relinearization_body_asm(N, num_q, num_p, dnum, false, true);
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

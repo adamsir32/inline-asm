@@ -2,23 +2,60 @@
 
 ## 1. 当前实现位置
 
-公共资源编译器位于 `hpu/compiler/resource_ir.hpp/.cpp`。Evaluator 前端通过 `hpu/seal/frontend_package.cpp` 调用它，三个方案使用同一套资源分析、对象调度和 DDR 放置逻辑。
+公共资源编译器位于 `hpu/compiler/resource_ir.hpp/.cpp`，算子资源接口位于
+`hpu/compiler/operator_resources.hpp/.cpp`。CKKS、BFV、BGV 使用相同的对象调度、
+DDR 生命周期复用和交付编译后端。
 
-当前采用渐进迁移：前端先调用各方案已有的 Plan、codegen 与 relocation，得到确定的指令和 DMA 绑定，再导入虚拟资源 IR。已有算子的指令生成及 DMA recipe 仍然存在，尚未全部改为直接生成虚拟 IR。
+算子直接声明 `Operand` 角色并发出 typed `OperatorProgram`：`read` 声明数据输入端口，
+`publish` 声明结果端口，`discard` 给出生命周期提示；算术和变换使用这些虚拟操作数。
+算子中不选择物理 `p0..p7`。同一个角色的不同读入会形成不同的 `VirtualObject`，
+最终对象编号、加载、释放、spill/reload 和可消除的内部写回由公共后端决定。
 
 ```mermaid
 flowchart TD
-    A[Evaluator 调用] --> B[逻辑值与计算图]
-    B --> C[现有方案 Plan 与资源准备]
-    C --> D[原始指令及 resolved DMA]
-    D --> E[虚拟对象与缓冲区 IR]
-    E --> F[对象槽位及 bank 调度]
-    F --> G[DDR 放置与 scratch arena]
-    G --> H[最终指令编码及交付包]
-    H --> I[逐指令 host 验证]
+    A[Evaluator 或现有 Plan] --> B[算子直接发出资源 IR]
+    A --> C[Image 与 DMA 端口绑定]
+    B --> D[VirtualProgram]
+    C --> D
+    D --> E[对象槽位和 bank 容量调度]
+    E --> F[DDR 放置与 scratch arena]
+    F --> G[最终指令、DMA 和交付包]
+    G --> H[与原始流和 SEAL golden 比较]
 ```
 
-这个阶段先把资源优化集中到公共层，并建立优化前后的比较机制。后续算子可逐步直接发出虚拟 IR，进一步减少生成指令和绑定数据的重复逻辑。
+`Recording` 作用域收集嵌套算子发出的 typed 操作；它在线程间隔离，退出和异常展开
+恢复外层作用域。CKKS/BFV lowering 携带原生资源程序；BGV 拼接原生子程序时同步
+拼接资源 IR。原生路径不从汇编字符串或已编码对象字段恢复虚拟数据流。
+
+现有 `generate_*_body_asm` 返回接口保留，资源接口同时渲染兼容汇编作为 NoOpt
+基准。历史对象角色到物理编号的映射只存在于兼容渲染器。原始汇编和现有 DMA
+recipe 继续用于端口绑定与对照验证；本次没有合并所有方案的数据准备 recipe。
+
+Evaluator 在 `compile()` 时调用公共交付编译器。旧 Plan 创建的 application package
+也携带原生资源程序，`write_application_package()` 在私有镜像上自动完成相同的
+资源优化、重定位和严格逐指令对拍，不修改调用者的 Image/Plan。CKKS Plan 的 Relinearize/Rescale 默认声明独立系数工作区，
+保留输入节点的 NTT 数据，这些工作区由后端按生命周期复用。已编译的前端包
+不会再次调度。只含原始编码指令的历史请求保留原有导出方式。
+
+命令行旧 Plan 示例打印的 `--print-asm` 和指令计数属于兼容基准；最终交付指令及
+DMA 地址以包中的 `program/*.asm`、`*.inst32` 和 `resolved_dma.csv` 为准。
+
+### 编写算子
+
+```cpp
+namespace r = hpu::resource;
+// value/auxiliary/accumulator 是算法角色，不是物理寄存器编号。
+code << r::read(r::value, hpu::DataType::poly);
+code << r::read(r::auxiliary, hpu::DataType::poly);
+code << r::multiply(r::accumulator, r::value, r::auxiliary);
+code << r::discard(r::value) << r::discard(r::auxiliary);
+code << r::publish(r::accumulator);
+```
+
+调用方提供每个数据端口的 allocation/span。`bind_program()` 验证端口范围、只读
+属性、长度、定义与使用以及与兼容基准的操作一致性；`compile_resources()` 对直接
+生成的 `VirtualProgram` 分配资源。旧 `optimize_resources()` 保留编码流导入入口，
+用于历史流回放和回归对照。
 
 ## 2. 逻辑值、对象与缓冲区
 
@@ -31,7 +68,7 @@ flowchart TD
 | `VirtualBuffer` | DDR 逻辑分配、读写属性、首次/最后使用及布局标签 |
 | `VirtualInstruction` | 对象 uses/definitions、DDR range、原始指令及算子来源 |
 
-一个逻辑密文含多个分量和 RNS limb，因此会对应多个对象与缓冲区。原来的 `p0..p7` 被导入为对象生命周期，后续调度器重新选择物理槽位。初始化来源由 DLOAD 的 `BufferRange` 记录。
+一个逻辑密文含多个分量和 RNS limb，因此会对应多个对象与缓冲区。算子的符号操作数在每次定义时建立对象生命周期，调度器选择物理槽位。输入端口的 `BufferRange` 记录初始化来源。
 
 内存布局与数学域分别处理。IR 提供 `coefficient_natural`、`coefficient_bit_reversed`、`canonical_ntt_physical`、`unspecified` 标签。`CompileOptions.buffer_layouts` 可按真实 allocation 名称显式标注，NoOpt 与优化模式均保留标签，不据此修改字值。
 
@@ -131,10 +168,11 @@ canonical 与 modified-root 路径。实际测试规模及结果以测试日志�
 
 ## 8. 资源报告
 
-报告写入 `oracle/report.json` → `compiler_resources`，也可通过 `compiled.resource_report_json()` 读取：
+报告写入 `oracle/report.json` → `compiler_resources`，也可通过 `compiled.resource_report_json()` 读取。`ir_source="operator"` 表示来自算子直接发出的资源 IR；历史导入入口记录 `encoded_import`：
 
 | 字段 | 内容 |
 | --- | --- |
+| `ir_source` | `operator` 或 `encoded_import` |
 | `original_ddr_lines` / `allocated_ddr_lines` | 原始与最终 DDR 使用量 |
 | `scratch_arena_lines` | 复用工作区的物理容量 |
 | `original_dma_count` / `dma_count` | 优化前后 DMA 次数 |

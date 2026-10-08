@@ -4,6 +4,8 @@
 
 #include <seal/seal.h>
 
+#include "hpu/compiler/operator_resources.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,8 +19,10 @@ struct BfvLoweredOperation {
 struct BfvLoweredProgram {
     std::string body_asm;
     std::vector<BfvLoweredOperation> operations;
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
 };
 
+// Emits native operator resource IR and compatibility assembly for NoOpt.
 BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
                                            const ::seal::SEALContext& context,
                                            bool append_psync = true,

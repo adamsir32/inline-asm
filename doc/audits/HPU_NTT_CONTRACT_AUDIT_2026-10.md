@@ -150,3 +150,8 @@ random_stress PASS 不能代替完整控制器 NTT 数学闭环。
 前端包的 `host_instruction_model.hardware_contract_verified` 保持 false；所有包的
 `instruction_execution_verified`、`rtl_verified`、`hardware_verified` 保持 false。
 本次工作没有修改飞书、`autotest` 或 `nexus-am`；软件验收不会自动改变目标验证状态。
+
+后续原生算子资源 IR 迁移也通过了 73/73 回归和三方案 N=65536 前端包验收。
+现有 Plan 包导出已接入公共资源编译器并做严格 host 指令对拍；上述首次修复时的
+Plan 验证范围记录保留为验收快照。当前入口及报告字段见
+[编译器资源管理](../architecture/HPU_COMPILER_RESOURCES.md)。

@@ -1,7 +1,7 @@
 #include "scheme/bgv/modswitch.hpp"
 
 #include "util/bconv.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -87,11 +87,11 @@ std::string generate_modswitch_body_asm(
         retained_contexts.push_back(i);
     }
 
-    const int POBJ_VALUE = 0;
-    const int POBJ_CORRECTION = 1;
-    const int POBJ_U = 2;
-    const int POBJ_SCALAR = 3;
-    const int POBJ_MOD_CTX = 4;
+    const auto POBJ_VALUE = hpu::resource::value;
+    const auto POBJ_CORRECTION = hpu::resource::auxiliary;
+    const auto POBJ_U = hpu::resource::accumulator;
+    const auto POBJ_SCALAR = hpu::resource::transform_table;
+    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* BGV MODSWITCH: coefficient/Q -> coefficient/Q_without_last */\n";
     asm_code << "        /* MOD_ID layout: Q[0.." << dropped_context << "], P["
@@ -106,19 +106,19 @@ std::string generate_modswitch_body_asm(
             {dropped_context}, {t_context}, false);
 
         asm_code << "        /* stage-2: u = -c_last * q_last^-1 mod t */\n";
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
-        asm_code << hpu::pmodld(t_context);
+        asm_code << hpu::resource::select_modulus(t_context);
         asm_code << "        // dload zero, BConv(c_last mod t), and q_last^-1 mod t\n";
-        asm_code << hpu::dload(POBJ_VALUE, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_CORRECTION, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_SCALAR, hpu::DataType::poly);
-        asm_code << hpu::psub(POBJ_VALUE, POBJ_VALUE, POBJ_CORRECTION);
-        asm_code << hpu::pfree(POBJ_CORRECTION);
-        asm_code << hpu::pmul(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
-        asm_code << hpu::pfree(POBJ_SCALAR);
-        asm_code << hpu::dstore(POBJ_VALUE, 1);
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_CORRECTION, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly);
+        asm_code << hpu::resource::subtract(POBJ_VALUE, POBJ_VALUE, POBJ_CORRECTION);
+        asm_code << hpu::resource::discard(POBJ_CORRECTION);
+        asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
+        asm_code << hpu::resource::discard(POBJ_SCALAR);
+        asm_code << hpu::resource::publish(POBJ_VALUE, 1);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
 
         asm_code << "        /* stage-3a: exact single-source BConv c_last: q_last -> Q' */\n";
         asm_code << ::generate_hpu_bconv_contexts_body_asm(
@@ -128,33 +128,33 @@ std::string generate_modswitch_body_asm(
             {t_context}, retained_contexts, false);
 
         asm_code << "        /* stage-4: subtract correction and divide by q_last in Q' */\n";
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
         for (int i = 0; i < dropped_context; ++i) {
             asm_code << "        /* component " << component << ", q_" << i << " */\n";
-            asm_code << hpu::pmodld(i);
+            asm_code << hpu::resource::select_modulus(i);
             asm_code << "        // dload c_i, c_last mod q_i, u mod q_i, q_last mod q_i\n";
-            asm_code << hpu::dload(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_CORRECTION, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_U, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_SCALAR, hpu::DataType::poly);
-            asm_code << hpu::pmul(POBJ_U, POBJ_U, POBJ_SCALAR);
-            asm_code << hpu::pfree(POBJ_SCALAR);
-            asm_code << hpu::padd(POBJ_CORRECTION, POBJ_CORRECTION, POBJ_U);
-            asm_code << hpu::pfree(POBJ_U);
-            asm_code << hpu::psub(POBJ_VALUE, POBJ_VALUE, POBJ_CORRECTION);
-            asm_code << hpu::pfree(POBJ_CORRECTION);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_CORRECTION, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_U, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(POBJ_U, POBJ_U, POBJ_SCALAR);
+            asm_code << hpu::resource::discard(POBJ_SCALAR);
+            asm_code << hpu::resource::add(POBJ_CORRECTION, POBJ_CORRECTION, POBJ_U);
+            asm_code << hpu::resource::discard(POBJ_U);
+            asm_code << hpu::resource::subtract(POBJ_VALUE, POBJ_VALUE, POBJ_CORRECTION);
+            asm_code << hpu::resource::discard(POBJ_CORRECTION);
             asm_code << "        // dload q_last^-1 mod q_i and write c_i'\n";
-            asm_code << hpu::dload(POBJ_SCALAR, hpu::DataType::poly);
-            asm_code << hpu::pmul(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
-            asm_code << hpu::pfree(POBJ_SCALAR);
-            asm_code << hpu::dstore(POBJ_VALUE, 1);
+            asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
+            asm_code << hpu::resource::discard(POBJ_SCALAR);
+            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
         }
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
@@ -238,71 +238,71 @@ std::string generate_modswitch_ntt_body_asm(
         return "        /* Invalid SEAL-facing BGV NTT ModSwitch layout */\n";
     }
 
-    constexpr int value = 0;
-    constexpr int auxiliary = 1;
-    constexpr int twiddle = 3;
-    constexpr int modulus_table = 4;
+    constexpr auto value = hpu::resource::value;
+    constexpr auto auxiliary = hpu::resource::auxiliary;
+    constexpr auto twiddle = hpu::resource::transform_table;
+    constexpr auto modulus_table = hpu::resource::modulus_table;
     const int dropped_context = layout.q_mod_ids.back();
     std::ostringstream asm_code;
     asm_code << "        /* BGV MODSWITCH NTT: drop q_last; retain canonical HPU NTT output */\n";
     asm_code << "        /* DMA constants: -q_last^-1 mod t, q_last mod q_i, q_last^-1 mod q_i. */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(modulus_table, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(modulus_table, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
 
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* component " << component << ": only dropped NTT limb -> coefficients */\n";
-        asm_code << hpu::pmodld(dropped_context);
+        asm_code << hpu::resource::select_modulus(dropped_context);
         asm_code << "        // dload c_last in canonical HPU NTT layout\n";
-        asm_code << hpu::dload(value, hpu::DataType::poly);
+        asm_code << hpu::resource::read(value, hpu::DataType::poly);
         asm_code << generate_hpu_intt_body_asm(N, value, twiddle, false);
         asm_code << "        // dstore c_last coefficient scratch (bit-reversed physical order)\n";
-        asm_code << hpu::dstore(value, 1);
+        asm_code << hpu::resource::publish(value, 1);
 
         asm_code << "        /* u_t = -c_last * q_last^-1 mod t; wide PMUL input is legal */\n";
-        asm_code << hpu::pmodld(layout.plaintext_mod_id);
+        asm_code << hpu::resource::select_modulus(layout.plaintext_mod_id);
         asm_code << "        // dload c_last coefficient scratch, then prepared -q_last^-1 mod t\n";
-        asm_code << hpu::dload(value, hpu::DataType::poly);
-        asm_code << hpu::dload(auxiliary, hpu::DataType::poly);
-        asm_code << hpu::pmul(value, value, auxiliary);
-        asm_code << hpu::pfree(auxiliary);
+        asm_code << hpu::resource::read(value, hpu::DataType::poly);
+        asm_code << hpu::resource::read(auxiliary, hpu::DataType::poly);
+        asm_code << hpu::resource::multiply(value, value, auxiliary);
+        asm_code << hpu::resource::discard(auxiliary);
         asm_code << "        // dstore canonical u_t coefficient scratch\n";
-        asm_code << hpu::dstore(value, 1);
+        asm_code << hpu::resource::publish(value, 1);
 
         for (std::size_t index = 0; index + 1 < layout.q_mod_ids.size(); ++index) {
             const int q_context = layout.q_mod_ids[index];
             asm_code << "        /* component " << component << ", retained q MOD_ID "
                      << q_context << ": coefficient correction -> NTT */\n";
-            asm_code << hpu::pmodld(q_context);
+            asm_code << hpu::resource::select_modulus(q_context);
             asm_code << "        // dload u_t and prepared q_last mod q_i; PMUL reduces u_t under q_i\n";
-            asm_code << hpu::dload(value, hpu::DataType::poly);
-            asm_code << hpu::dload(auxiliary, hpu::DataType::poly);
-            asm_code << hpu::pmul(value, value, auxiliary);
-            asm_code << hpu::pfree(auxiliary);
+            asm_code << hpu::resource::read(value, hpu::DataType::poly);
+            asm_code << hpu::resource::read(auxiliary, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(value, value, auxiliary);
+            asm_code << hpu::resource::discard(auxiliary);
             asm_code << "        // dload c_last coefficients and canonicalize under q_i before PADD\n";
-            asm_code << hpu::dload(auxiliary, hpu::DataType::poly);
-            asm_code << hpu::pmul_imm(auxiliary, auxiliary, 1);
-            asm_code << hpu::padd(value, value, auxiliary);
-            asm_code << hpu::pfree(auxiliary);
+            asm_code << hpu::resource::read(auxiliary, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply_immediate(auxiliary, auxiliary, 1);
+            asm_code << hpu::resource::add(value, value, auxiliary);
+            asm_code << hpu::resource::discard(auxiliary);
             asm_code << generate_hpu_ntt_body_asm(N, value, twiddle, false);
             asm_code << "        // dload original retained c_i in canonical HPU NTT layout\n";
-            asm_code << hpu::dload(auxiliary, hpu::DataType::poly);
-            asm_code << hpu::psub(auxiliary, auxiliary, value);
-            asm_code << hpu::pfree(value);
+            asm_code << hpu::resource::read(auxiliary, hpu::DataType::poly);
+            asm_code << hpu::resource::subtract(auxiliary, auxiliary, value);
+            asm_code << hpu::resource::discard(value);
             asm_code << "        // dload prepared q_last^-1 mod q_i and store output NTT limb\n";
-            asm_code << hpu::dload(value, hpu::DataType::poly);
-            asm_code << hpu::pmul(auxiliary, auxiliary, value);
-            asm_code << hpu::pfree(value);
-            asm_code << hpu::dstore(auxiliary, 1);
+            asm_code << hpu::resource::read(value, hpu::DataType::poly);
+            asm_code << hpu::resource::multiply(auxiliary, auxiliary, value);
+            asm_code << hpu::resource::discard(value);
+            asm_code << hpu::resource::publish(auxiliary, 1);
         }
     }
 
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(modulus_table);
+        asm_code << hpu::resource::discard(modulus_table);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

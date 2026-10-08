@@ -2,7 +2,7 @@
 
 #include "operator/relinearization.hpp"
 #include "poly/cmult.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -20,24 +20,24 @@ std::string generate_basis_ntt_body_asm(
 {
     std::ostringstream asm_code;
 
-    const int POBJ_POLY = 0;
-    const int POBJ_TWIDDLE = 3;
-    const int POBJ_MOD_CTX = 4;
+    const auto POBJ_POLY = hpu::resource::value;
+    const auto POBJ_TWIDDLE = hpu::resource::transform_table;
+    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* --- " << label << ": coefficient -> NTT domain --- */\n";
-    asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+    asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* " << label << " component_" << component << " */\n";
         for (int i = 0; i < num_q; ++i) {
             asm_code << "        /* q_" << i << " */\n";
-            asm_code << hpu::pmodld(i);
-            asm_code << hpu::dload(POBJ_POLY, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(i);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
             asm_code << generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false);
-            asm_code << hpu::dstore(POBJ_POLY, 1);
+            asm_code << hpu::resource::publish(POBJ_POLY, 1);
         }
     }
-    asm_code << hpu::pfree(POBJ_MOD_CTX);
+    asm_code << hpu::resource::discard(POBJ_MOD_CTX);
 
     return asm_code.str();
 }
@@ -50,24 +50,24 @@ std::string generate_basis_intt_body_asm(
 {
     std::ostringstream asm_code;
 
-    const int POBJ_POLY = 0;
-    const int POBJ_TWIDDLE = 3;
-    const int POBJ_MOD_CTX = 4;
+    const auto POBJ_POLY = hpu::resource::value;
+    const auto POBJ_TWIDDLE = hpu::resource::transform_table;
+    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* --- " << label << ": NTT -> coefficient domain --- */\n";
-    asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+    asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* " << label << " component_" << component << " */\n";
         for (int i = 0; i < num_q; ++i) {
             asm_code << "        /* q_" << i << " */\n";
-            asm_code << hpu::pmodld(i);
-            asm_code << hpu::dload(POBJ_POLY, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(i);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
             asm_code << generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false);
-            asm_code << hpu::dstore(POBJ_POLY, 1);
+            asm_code << hpu::resource::publish(POBJ_POLY, 1);
         }
     }
-    asm_code << hpu::pfree(POBJ_MOD_CTX);
+    asm_code << hpu::resource::discard(POBJ_MOD_CTX);
 
     return asm_code.str();
 }
@@ -102,7 +102,7 @@ std::string generate_hpu_ciphertext_multiply_body_asm(
         false);
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
     return asm_code.str();

@@ -1,4 +1,5 @@
 #include "hpu/compiler/resource_ir.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 
 #include "encoder.hpp"
 #include "executable.hpp"
@@ -727,7 +728,140 @@ VirtualProgram import_resolved_program(
     return result;
 }
 
+VirtualProgram import_operator_program(
+    const hpu::resource::OperatorProgram& source,
+    const std::vector<hpu::EncodedInstruction>& baseline,
+    const std::vector<ResolvedDma>& dma,
+    const hpu::runtime::HpuMemImage& image)
+{
+    using Role = hpu::resource::Role;
+    if (source.operations.empty() || source.operations.size() != baseline.size())
+        throw std::invalid_argument("operator IR does not cover the complete baseline program");
+    const auto lookup = dma_by_instruction(baseline, dma);
+    const auto pairs = deferred_store_pairs(baseline, dma, image);
+    std::map<std::size_t, ObjectId> pending_reload;
+    std::map<Role, ObjectId> live;
+    std::map<std::string, BufferId> buffer_ids;
+    VirtualProgram result;
+    result.origin = ResourceIrOrigin::operator_emission;
+    for (const auto& allocation : image.allocations()) {
+        VirtualBuffer buffer;
+        buffer.id = allocation.id;
+        buffer.original_span = allocation.span;
+        buffer.word_count = allocation.word_count;
+        buffer.kind = allocation.kind;
+        buffer.read_only = allocation.read_only;
+        buffer_ids.emplace(buffer.id, result.buffers.size());
+        result.buffers.push_back(std::move(buffer));
+    }
+    auto object = [&](hpu::resource::Operand operand) -> ObjectId {
+        const auto found = live.find(operand.role);
+        if (found == live.end()) throw std::invalid_argument("operator IR uses an undefined operand");
+        return found->second;
+    };
+    std::optional<ResolvedDma> origin;
+    for (std::size_t index = 0; index < source.operations.size(); ++index) {
+        const auto& node = source.operations[index];
+        const auto& physical = baseline[index].instruction;
+        const auto& instruction = node.instruction;
+        if (instruction.mnemonic != physical.mnemonic || instruction.imm8 != physical.imm8 ||
+            instruction.mod_id != physical.mod_id || instruction.mode != physical.mode ||
+            instruction.flag != physical.flag || instruction.type != physical.type ||
+            instruction.dma_flag != physical.dma_flag ||
+            ((instruction.mnemonic == hpu::Mnemonic::kPntt ||
+              instruction.mnemonic == hpu::Mnemonic::kPintt) && instruction.idx0 != physical.idx0))
+            throw std::invalid_argument("operator IR disagrees with its compatibility baseline");
+        VirtualInstruction op;
+        op.instruction = instruction;
+        if (lookup[index]) {
+            origin = dma[*lookup[index]];
+            const auto& allocation = image.allocation(origin->allocation_id);
+            if (!contains(allocation.span, origin->span))
+                throw std::invalid_argument("operator DMA range exceeds allocation: " + allocation.id);
+            if (instruction.mnemonic == hpu::Mnemonic::kDstore && allocation.read_only)
+                throw std::invalid_argument("operator output targets read-only allocation: " + allocation.id);
+            origin->allocation_id = allocation.id;
+            op.memory = BufferRange{buffer_ids.at(allocation.id),
+                origin->span.line_offset - allocation.span.line_offset, origin->span.line_count};
+        }
+        op.origin = origin;
+        switch (instruction.mnemonic) {
+        case hpu::Mnemonic::kDload: {
+            const auto reused = pending_reload.find(*lookup[index]);
+            ObjectId id;
+            if (reused != pending_reload.end()) {
+                id = reused->second;
+                op.reload_retained_object = true;
+            } else {
+                id = result.objects.size();
+                result.objects.push_back({op.memory->line_count, instruction.type, instruction.dma_flag});
+            }
+            live[node.outputs.at(0).role] = id;
+            op.definitions.push_back(id);
+            break;
+        }
+        case hpu::Mnemonic::kDstore: {
+            const auto id = object(node.inputs.at(0));
+            if (result.objects[id].line_count != op.memory->line_count)
+                throw std::invalid_argument("operator output has an incompatible length");
+            op.uses.push_back(id);
+            const auto match = pairs.find(*lookup[index]);
+            if (match != pairs.end() && baseline[dma[match->second].instruction_index].instruction.type
+                    == result.objects[id].type &&
+                baseline[dma[match->second].instruction_index].instruction.dma_flag == result.objects[id].dma_flag) {
+                op.required_store = false;
+                pending_reload.emplace(match->second, id);
+            }
+            live.erase(node.inputs.at(0).role);
+            break;
+        }
+        case hpu::Mnemonic::kPfree:
+            op.uses.push_back(object(node.inputs.at(0)));
+            live.erase(node.inputs.at(0).role);
+            break;
+        case hpu::Mnemonic::kPntt:
+        case hpu::Mnemonic::kPintt:
+            op.uses = {object(node.inputs.at(0)), object(node.inputs.at(1))};
+            op.definitions = {object(node.outputs.at(0))};
+            break;
+        case hpu::Mnemonic::kPadd:
+        case hpu::Mnemonic::kPsub:
+        case hpu::Mnemonic::kPmul:
+        case hpu::Mnemonic::kPmac: {
+            for (const auto input : node.inputs) op.uses.push_back(object(input));
+            const auto destination = node.outputs.at(0).role;
+            const auto found = live.find(destination);
+            if (found == live.end() || result.objects[found->second].line_count != result.objects[op.uses.at(0)].line_count) {
+                if (instruction.mnemonic == hpu::Mnemonic::kPmac)
+                    throw std::invalid_argument("operator accumulator shape differs from source");
+                const auto& operand = result.objects[op.uses.at(0)];
+                live[destination] = result.objects.size();
+                result.objects.push_back({operand.line_count, operand.type, 0});
+            }
+            op.definitions = {live.at(destination)};
+            break;
+        }
+        case hpu::Mnemonic::kPmodld: break;
+        case hpu::Mnemonic::kPsync: live.clear(); break;
+        }
+        result.instructions.push_back(std::move(op));
+    }
+    analyze_buffers(result, dma, baseline, image);
+    return result;
+}
+
 CompiledResources optimize_resources(
+    const std::vector<hpu::EncodedInstruction>& instructions,
+    const std::vector<ResolvedDma>& dma,
+    const hpu::runtime::HpuMemImage& image,
+    const CompileOptions& options)
+{
+    return compile_resources(import_resolved_program(instructions, dma, image),
+                             instructions, dma, image, options);
+}
+
+CompiledResources compile_resources(
+    VirtualProgram program,
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image,
@@ -737,7 +871,6 @@ CompiledResources optimize_resources(
         || options.regular_bank_lines == 0 || options.regular_bank_lines > 1024) {
         throw std::invalid_argument("invalid resource limits for HPU ISA");
     }
-    auto program = import_resolved_program(instructions, dma, image);
     for (const auto& annotation : options.buffer_layouts) {
         const auto found = std::find_if(program.buffers.begin(), program.buffers.end(),
             [&](const auto& buffer) { return buffer.id == annotation.first; });
@@ -758,6 +891,7 @@ CompiledResources optimize_resources(
         result.instructions = instructions;
         result.dma = dma;
         result.report = inspect_original(instructions, dma, image, options);
+        result.report.ir_origin = program.origin;
         for (const auto& buffer : program.buffers) {
             result.buffers.push_back({buffer.id, buffer.id, buffer.original_span,
                 buffer.original_span, true, buffer.first_use, buffer.last_use, buffer.layout});
@@ -774,6 +908,7 @@ CompiledResources optimize_resources(
     CompiledResources result(std::max<std::uint64_t>(1, capacity));
     result.instructions = std::move(scheduled.instructions);
     result.report = scheduled.report;
+    result.report.ir_origin = program.origin;
     result.report.original_dma_count = dma.size();
     result.report.original_ddr_lines = image.used_lines();
     result.buffers = place_buffers(program, image, result.image,
@@ -810,6 +945,8 @@ std::string render_resource_report(const CompiledResources& resources)
     const auto& report = resources.report;
     std::ostringstream output;
     output << "{\n  \"original_ddr_lines\": " << report.original_ddr_lines
+           << ",\n  \"ir_source\": " << json_string(
+               report.ir_origin == ResourceIrOrigin::operator_emission ? "operator" : "encoded_import")
            << ",\n  \"allocated_ddr_lines\": " << report.allocated_ddr_lines
            << ",\n  \"scratch_arena_lines\": " << report.scratch_arena_lines
            << ",\n  \"original_dma_count\": " << report.original_dma_count
@@ -839,3 +976,13 @@ std::string render_resource_report(const CompiledResources& resources)
 }
 
 } // namespace hpu::compiler
+
+namespace hpu::resource {
+hpu::compiler::VirtualProgram bind_program(const OperatorProgram& program,
+    const std::vector<hpu::EncodedInstruction>& baseline,
+    const std::vector<hpu::compiler::ResolvedDma>& dma,
+    const hpu::runtime::HpuMemImage& image)
+{
+    return hpu::compiler::import_operator_program(program, baseline, dma, image);
+}
+} // namespace hpu::resource

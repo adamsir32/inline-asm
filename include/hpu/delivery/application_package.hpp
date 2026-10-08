@@ -3,6 +3,8 @@
 #include "hpu/runtime/application.hpp"
 #include "hpu/runtime/memory_image.hpp"
 #include "instruction.hpp"
+#include "hpu/compiler/operator_resources.hpp"
+#include <memory>
 
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +40,11 @@ struct ProgramArtifacts {
     std::string source;
     std::string resolved_dma_manifest;
     std::vector<hpu::runtime::HpuMemSpan> ordered_dma_spans;
+    // In-memory compilation inputs; neither is serialized into package v1.
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
+    std::vector<hpu::compiler::ResolvedDma> resource_dma;
+    // The common exporter must not schedule an already compiled stream again.
+    bool resources_compiled = false;
 };
 
 struct VerifiedOutputLimb {

@@ -3,7 +3,7 @@
 #include "scheme/ckks/galois.hpp"
 
 #include "operator/keyswitch.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -13,9 +13,9 @@
 namespace hpu::scheme::ckks {
 namespace {
 
-constexpr int kPolynomialObject = 0;
-constexpr int kTwiddleObject = 3;
-constexpr int kModulusTableObject = 4;
+constexpr auto kPolynomialObject = hpu::resource::value;
+constexpr auto kTwiddleObject = hpu::resource::transform_table;
+constexpr auto kModulusTableObject = hpu::resource::modulus_table;
 
 bool valid_config(
     int N,
@@ -52,11 +52,11 @@ std::string generate_fused_inverse_body_asm(
             asm_code << "        /* fused component_" << component
                      << ", q MOD_ID " << context << ", key_domain="
                      << galois_element << " */\n";
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(kPolynomialObject, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
             asm_code << generate_hpu_intt_body_asm(
                 N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << hpu::dstore(kPolynomialObject, 1);
+            asm_code << hpu::resource::publish(kPolynomialObject, 1);
         }
     }
     return asm_code.str();
@@ -73,11 +73,11 @@ std::string generate_output_ntt_body_asm(
         for (int context : q_contexts) {
             asm_code << "        /* output component_" << component
                      << ", q MOD_ID " << context << " */\n";
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(kPolynomialObject, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
             asm_code << generate_hpu_ntt_body_asm(
                 N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << hpu::dstore(kPolynomialObject, 1);
+            asm_code << hpu::resource::publish(kPolynomialObject, 1);
         }
     }
     return asm_code.str();
@@ -102,7 +102,7 @@ std::string generate_rotate_body_asm(
         << "        /* CKKS ROTATE: fused automorphism + Galois KeySwitch */\n"
         << "        /* Input/output: canonical HPU NTT; no coefficient permutation. */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank);
@@ -125,10 +125,10 @@ std::string generate_rotate_body_asm(
     asm_code << generate_output_ntt_body_asm(N, layout.q_mod_ids);
 
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(kModulusTableObject);
+        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

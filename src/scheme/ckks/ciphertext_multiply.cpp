@@ -3,7 +3,7 @@
 #include "operator/relinearization.hpp"
 #include "poly/cmult.hpp"
 #include "scheme/ckks/rescale.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/ntt.hpp"
 #include "util/validation.hpp"
 
@@ -27,8 +27,8 @@ std::string generate_basis_transform_body_asm(
     bool inverse,
     const char* label)
 {
-    constexpr int poly_object = 0;
-    constexpr int twiddle_object = 3;
+    constexpr auto poly_object = hpu::resource::value;
+    constexpr auto twiddle_object = hpu::resource::transform_table;
 
     std::ostringstream asm_code;
     asm_code << "        /* --- " << label << " --- */\n";
@@ -36,14 +36,14 @@ std::string generate_basis_transform_body_asm(
         for (int context : contexts) {
             asm_code << "        /* component_" << component
                      << ", MOD_ID " << context << " */\n";
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(poly_object, hpu::DataType::poly);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(poly_object, hpu::DataType::poly);
             asm_code << (inverse
                 ? generate_hpu_intt_body_asm(
                     N, poly_object, twiddle_object, false)
                 : generate_hpu_ntt_body_asm(
                     N, poly_object, twiddle_object, false));
-            asm_code << hpu::dstore(poly_object, 1);
+            asm_code << hpu::resource::publish(poly_object, 1);
         }
     }
     return asm_code.str();
@@ -69,7 +69,7 @@ std::string generate_ciphertext_multiply_body_asm(
         return asm_code.str();
     }
 
-    constexpr int modulus_table_object = 4;
+    constexpr auto modulus_table_object = hpu::resource::modulus_table;
     const int num_q = static_cast<int>(layout.q_mod_ids.size());
 
     asm_code
@@ -79,7 +79,7 @@ std::string generate_ciphertext_multiply_body_asm(
     // The modulus and mu table is application-lifetime state in the small
     // bank. Every nested body is told not to reload or release it.
     if (manage_modulus_table) {
-        asm_code << hpu::dload(
+        asm_code << hpu::resource::read(
             modulus_table_object,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank);
@@ -112,10 +112,10 @@ std::string generate_ciphertext_multiply_body_asm(
         "Rescaled c0/c1: coefficient domain -> canonical HPU NTT");
 
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(modulus_table_object);
+        asm_code << hpu::resource::discard(modulus_table_object);
     }
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

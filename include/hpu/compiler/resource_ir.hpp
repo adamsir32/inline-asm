@@ -16,6 +16,7 @@ using BufferId = std::size_t;
 using ObjectId = std::size_t;
 
 enum class OptimizationMode { no_opt, optimized };
+enum class ResourceIrOrigin { encoded_import, operator_emission };
 enum class MemoryLayout {
     unspecified,
     coefficient_natural,
@@ -81,6 +82,7 @@ struct VirtualInstruction {
 };
 
 struct VirtualProgram {
+    ResourceIrOrigin origin = ResourceIrOrigin::encoded_import;
     std::vector<VirtualBuffer> buffers;
     std::vector<VirtualObject> objects;
     std::vector<VirtualInstruction> instructions;
@@ -98,6 +100,7 @@ struct LogicalBufferPlacement {
 };
 
 struct ResourceReport {
+    ResourceIrOrigin ir_origin = ResourceIrOrigin::encoded_import;
     std::uint64_t original_ddr_lines = 0;
     std::uint64_t allocated_ddr_lines = 0;
     std::uint64_t scratch_arena_lines = 0;
@@ -133,6 +136,15 @@ VirtualProgram import_resolved_program(
 // reuses proven scratch lifetimes, and schedules distinct slots and banks.
 CompiledResources optimize_resources(
     const std::vector<hpu::EncodedInstruction>& instructions,
+    const std::vector<ResolvedDma>& dma,
+    const hpu::runtime::HpuMemImage& image,
+    const CompileOptions& options = {});
+
+// Native operator IR entry. Physical operand fields of virtual instructions
+// are ignored; all final object IDs are chosen by the shared scheduler.
+CompiledResources compile_resources(
+    VirtualProgram program,
+    const std::vector<hpu::EncodedInstruction>& baseline,
     const std::vector<ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image,
     const CompileOptions& options = {});

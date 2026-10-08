@@ -1,21 +1,28 @@
 #include "util/mm.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 
 #include <sstream>
 #include <string>
 
 std::string generate_hpu_mm_body_asm(
-    int obj_a,
-    int obj_b,
-    int obj_c,
+    hpu::resource::Operand obj_a,
+    hpu::resource::Operand obj_b,
+    hpu::resource::Operand obj_c,
     bool append_psync)
 {
     std::ostringstream asm_code;
-    asm_code << hpu::pmul(obj_a, obj_b, obj_c);
+    asm_code << hpu::resource::multiply(obj_a, obj_b, obj_c);
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
+}
+
+std::string generate_hpu_mm_body_asm(int obj_a, int obj_b, int obj_c, bool append_psync)
+{
+    return generate_hpu_mm_body_asm(hpu::resource::compatibility_operand(obj_a),
+        hpu::resource::compatibility_operand(obj_b),
+        hpu::resource::compatibility_operand(obj_c), append_psync);
 }
 
 std::string generate_hpu_mm_asm(
@@ -29,23 +36,23 @@ std::string generate_hpu_mm_asm(
     asm_code << "void hpu_mm_complete(void) {\n";
 
     asm_code << "    __asm__ volatile(\n";
-    asm_code << hpu::dload(mod_ctx_obj, hpu::DataType::mod_ctx,
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(mod_ctx_obj), hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
-    asm_code << hpu::pmodld(0);
-    asm_code << hpu::dload(obj_b, hpu::DataType::poly);
-    asm_code << hpu::dload(obj_c, hpu::DataType::poly);
+    asm_code << hpu::resource::select_modulus(0);
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(obj_b), hpu::DataType::poly);
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(obj_c), hpu::DataType::poly);
     asm_code << generate_hpu_mm_body_asm(obj_a, obj_b, obj_c);
     if (obj_b != obj_a) {
-        asm_code << hpu::pfree(obj_b);
+        asm_code << hpu::resource::discard(hpu::resource::compatibility_operand(obj_b));
     }
     if (obj_c != obj_a && obj_c != obj_b) {
-        asm_code << hpu::pfree(obj_c);
+        asm_code << hpu::resource::discard(hpu::resource::compatibility_operand(obj_c));
     }
-    asm_code << hpu::dstore(obj_a, 1);
-    asm_code << hpu::pfree(mod_ctx_obj);
+    asm_code << hpu::resource::publish(hpu::resource::compatibility_operand(obj_a), 1);
+    asm_code << hpu::resource::discard(hpu::resource::compatibility_operand(mod_ctx_obj));
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
     asm_code << "        : \n";

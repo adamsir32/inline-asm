@@ -9,7 +9,7 @@
 - `Evaluator`：采用 SEAL 风格的方法名和输出参数。
 - `CompiledApplication`：持有编译快照、交付包及验证结果。
 
-context、编码、加密和密钥生成继续使用 native SEAL。前端自动准备应用需要的评估密钥、常量、twiddle 和工作区，应用代码无需手工添加这些资源。原有 `CkksOperationPlan`、`BfvOperationPlan`、`BgvOperationPlan` 接口仍可使用。
+context、编码、加密和密钥生成继续使用 native SEAL。前端自动准备应用需要的评估密钥、常量、twiddle 和工作区，应用代码无需手工添加这些资源。原有 `CkksOperationPlan`、`BfvOperationPlan`、`BgvOperationPlan` 接口仍可使用。它们生成的应用包在导出时也会自动执行相同的资源调度和严格逐指令验证。
 
 ## 2. 最小应用
 
@@ -148,7 +148,7 @@ cmake --build build -j2 --target hpu_frontend_deployment_delivery
 
 C++ 的对应设置为 `CompileOptions.require_instruction_verification=false`；
 `optimize_resources=false` 选择 NoOpt。诊断导出仍执行并记录指令验证，SEAL 与
-算子 SoftwareExecutor 的比较必须通过；资源优化改变基准结果时也会失败。
+算子 SoftwareExecutor 的比较必须通过；资源优化改变基准结果时也会失败。资源编译消费算子直接生成的 typed IR，`oracle/report.json.compiler_resources.ir_source` 为 `operator`。
 
 ### 显式选择回放契约
 

@@ -53,6 +53,12 @@ def main():
             "bfv": "BfvSoftwareExecutor",
             "bgv": "BgvSoftwareExecutor",
         }[scheme]
+        assert report["compiler_resources"]["ir_source"] == "operator"
+        assert report["compiler_resources"]["peak_regular_banks"] <= 5
+        assert report["compiler_resources"]["peak_object_slots"] <= 8
+        assert report["host_instruction_model_verified"] is True
+        assert report["optimization_equivalence_verified"] is True
+        assert report["host_instruction_model"]["required"] is True
         assert report["model_verified"] is True
         assert report["raw_physical_words_equal"] is True
         golden = rows(package / descriptor["golden_manifest"])

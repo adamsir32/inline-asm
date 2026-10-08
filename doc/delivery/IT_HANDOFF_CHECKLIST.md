@@ -17,7 +17,8 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 `instruction_execution_verified`、`rtl_verified` 和 `hardware_verified` 在发布方生成的包中
 固定为 `false`。这些字段说明包尚未取得目标执行证据，不影响 IT 开始接入。
 
-Evaluator 前端生成的包还包含 `host_instruction_model` 和 `compiler_resources`。
+Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `compiler_resources`。
+`compiler_resources.ir_source=operator` 表示资源 IR 由算子直接生成。
 默认编译采用 `natural_coefficient_boundaries`，要求 host 逐指令结果与 golden 一致；
 正常生成使用 `hpu_frontend_delivery`。显式诊断目标
 `hpu_frontend_diagnostic_delivery` 才允许导出带指令模型差异记录的联调包。

@@ -1,7 +1,7 @@
 #include "scheme/bgv/basic_arithmetic.hpp"
 
 #include "scheme/ckks/basic_arithmetic.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 
 #include <numeric>
 #include <sstream>
@@ -66,35 +66,35 @@ std::string generate_binary_body(
     code << "        /* BGV NTT " << (subtract ? "SUB" : "ADD")
          << ": balance correction factors on HPU, then pointwise op */\n";
     if (manage_modulus_table) {
-        code << hpu::dload(4, hpu::DataType::mod_ctx,
+        code << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
             code << "        /* component " << component << ", Q MOD_ID "
                  << basis << " */\n";
-            code << hpu::pmodld(basis);
-            code << hpu::dload(0, hpu::DataType::poly);
+            code << hpu::resource::select_modulus(basis);
+            code << hpu::resource::read(hpu::resource::value, hpu::DataType::poly);
             if (balance.left_scalar != 1) {
                 code << "        // prepared left balancing scalar splat\n";
-                code << hpu::dload(3, hpu::DataType::poly);
-                code << hpu::pmul(0, 0, 3);
-                code << hpu::pfree(3);
+                code << hpu::resource::read(hpu::resource::transform_table, hpu::DataType::poly);
+                code << hpu::resource::multiply(hpu::resource::value, hpu::resource::value, hpu::resource::transform_table);
+                code << hpu::resource::discard(hpu::resource::transform_table);
             }
-            code << hpu::dload(1, hpu::DataType::poly);
+            code << hpu::resource::read(hpu::resource::auxiliary, hpu::DataType::poly);
             if (balance.right_scalar != 1) {
                 code << "        // prepared right balancing scalar splat\n";
-                code << hpu::dload(3, hpu::DataType::poly);
-                code << hpu::pmul(1, 1, 3);
-                code << hpu::pfree(3);
+                code << hpu::resource::read(hpu::resource::transform_table, hpu::DataType::poly);
+                code << hpu::resource::multiply(hpu::resource::auxiliary, hpu::resource::auxiliary, hpu::resource::transform_table);
+                code << hpu::resource::discard(hpu::resource::transform_table);
             }
-            code << (subtract ? hpu::psub(2, 0, 1) : hpu::padd(2, 0, 1));
-            code << hpu::pfree(0) << hpu::pfree(1);
-            code << hpu::dstore(2, 1);
+            code << (subtract ? hpu::resource::subtract(hpu::resource::accumulator, hpu::resource::value, hpu::resource::auxiliary) : hpu::resource::add(hpu::resource::accumulator, hpu::resource::value, hpu::resource::auxiliary));
+            code << hpu::resource::discard(hpu::resource::value) << hpu::resource::discard(hpu::resource::auxiliary);
+            code << hpu::resource::publish(hpu::resource::accumulator, 1);
         }
     }
-    if (manage_modulus_table) code << hpu::pfree(4);
-    if (append_psync) code << hpu::psync();
+    if (manage_modulus_table) code << hpu::resource::discard(hpu::resource::modulus_table);
+    if (append_psync) code << hpu::resource::finish_program();
     return code.str();
 }
 

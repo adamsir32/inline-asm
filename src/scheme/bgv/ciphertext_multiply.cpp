@@ -3,7 +3,7 @@
 #include "operator/ciphertext_multiply.hpp"
 #include "poly/cmult.hpp"
 #include "scheme/bgv/keyswitch.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <sstream>
@@ -43,15 +43,15 @@ std::string generate_ciphertext_multiply_ntt_body_asm(
     std::ostringstream asm_code;
     asm_code << "        /* BGV MULTIPLY NTT: tensor -> BGV special-P KeySwitch */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(4, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     asm_code << ::generate_hpu_cmult_body_asm(
         static_cast<int>(layout.q_mod_ids.size()), false, false);
     asm_code << generate_keyswitch_ntt_body_asm(
         N, layout, plaintext_mod_id, false, false);
-    if (manage_modulus_table) asm_code << hpu::pfree(4);
-    if (append_psync) asm_code << hpu::psync();
+    if (manage_modulus_table) asm_code << hpu::resource::discard(hpu::resource::modulus_table);
+    if (append_psync) asm_code << hpu::resource::finish_program();
     return asm_code.str();
 }
 
@@ -73,7 +73,7 @@ std::string generate_ciphertext_multiply_body_asm(
     asm_code << ::generate_hpu_ciphertext_multiply_body_asm(
         N, num_q, num_p, dnum, false);
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

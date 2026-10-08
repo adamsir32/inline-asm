@@ -603,10 +603,7 @@ void compile_ckks(const State& state, const std::string& stem,
                 const auto constants = cached(switches, tag, [&] {
                     return builder.add_keyswitch_constants("frontend/constants/keyswitch/" + tag, level);
                 });
-                const auto coefficient_workspace = builder.reserve_ciphertext(value.id + "/input_coeff",
-                    a.metadata(), a.components.size(), hpu::runtime::PolynomialDomain::coefficient,
-                    1, hpu::runtime::AllocationKind::workspace);
-                output = plan.append_relinearize(step, a, key, constants, value.id, &coefficient_workspace);
+                output = plan.append_relinearize(step, a, key, constants, value.id);
                 execute.push_back([a, key, constants, output, &tables](auto& e) { e.relinearize(a, key, constants, output, tables); });
                 break;
             }
@@ -615,10 +612,7 @@ void compile_ckks(const State& state, const std::string& stem,
                     return builder.add_rescale_constants("frontend/constants/rescale/" + tag,
                         level, rescale_capacity.at(tag));
                 });
-                const auto coefficient_workspace = builder.reserve_ciphertext(value.id + "/input_coeff",
-                    a.metadata(), a.components.size(), hpu::runtime::PolynomialDomain::coefficient,
-                    1, hpu::runtime::AllocationKind::workspace);
-                output = plan.append_rescale(step, a, constants, value.id, &coefficient_workspace);
+                output = plan.append_rescale(step, a, constants, value.id);
                 execute.push_back([a, constants, output, &tables](auto& e) { e.rescale(a, constants, output, tables); });
                 break;
             }

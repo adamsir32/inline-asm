@@ -155,6 +155,7 @@ CkksRuntimeProgram lower_ckks_runtime_program(
             "cannot lower an incomplete CKKS relocation schedule");
     }
     CkksRuntimeProgram result;
+    result.operator_program = lowered.operator_program;
     result.instructions = hpu::assemble_source(lowered.body_asm);
     hpu::validate_executable_program(result.instructions);
     const auto encoded_dma = hpu::collect_dma_relocations(result.instructions);

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct BfvRuntimeDma {
 struct BfvRuntimeProgram {
     std::vector<hpu::EncodedInstruction> instructions;
     std::vector<BfvRuntimeDma> dma;
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
 
     std::vector<hpu::runtime::HpuMemSpan> spans() const;
 };

@@ -66,16 +66,19 @@ target_include_directories(hpu_runtime_core
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-add_library(hpu_compiler_core STATIC src/hpu/compiler/resource_ir.cpp)
+add_library(hpu_compiler_core STATIC
+        src/hpu/compiler/resource_ir.cpp
+        src/hpu/compiler/operator_resources.cpp)
 target_include_directories(hpu_compiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(hpu_compiler_core PUBLIC hpu_runtime_core hpu_encode)
 
 add_library(hpu_delivery_core STATIC
         src/hpu/delivery/checksum.cpp
         src/hpu/delivery/io.cpp
+        src/hpu/delivery/resource_compiler.cpp
         src/hpu/delivery/application_package.cpp)
 target_include_directories(hpu_delivery_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(hpu_delivery_core PUBLIC hpu_filesystem_compat hpu_runtime_core hpu_encode)
+target_link_libraries(hpu_delivery_core PUBLIC hpu_filesystem_compat hpu_runtime_core hpu_encode hpu_compiler_core hpu_hardware_model)
 add_executable(hpu_validate_package src/hpu/delivery/validate_main.cpp)
 target_link_libraries(hpu_validate_package PRIVATE hpu_delivery_core)
 
@@ -142,6 +145,7 @@ target_include_directories(hpu_fhe_codegen
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_link_libraries(hpu_fhe_codegen PUBLIC hpu_compiler_core)
 
 add_executable(inline_asm_codegen
         src/main.cpp

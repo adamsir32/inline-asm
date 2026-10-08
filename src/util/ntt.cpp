@@ -1,5 +1,5 @@
 #include "util/ntt.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <cmath>
@@ -8,8 +8,8 @@
 
 std::string generate_hpu_ntt_body_asm(
     int N,
-    int obj_poly,
-    int twiddle_obj,
+    hpu::resource::Operand obj_poly,
+    hpu::resource::Operand twiddle_obj,
     bool append_psync)
 {
     std::ostringstream asm_code;
@@ -21,15 +21,15 @@ std::string generate_hpu_ntt_body_asm(
 
     const int logN = static_cast<int>(std::log2(static_cast<double>(N)));
 
-    int data_obj = obj_poly;
+    auto data_obj = obj_poly;
 
     asm_code << "        // modulus table is loaded by the enclosing complete program\n";
     // 假设调用方已经加载过密文模数
     // Negacyclic NTT = pointwise pre-twist followed by a cyclic NTT.
     asm_code << "\n        // Negacyclic pre-twist: explicit PMUL by psi^i\n";
-    asm_code << hpu::dload(twiddle_obj, hpu::DataType::poly);
-    asm_code << hpu::pmul(data_obj, data_obj, twiddle_obj);
-    asm_code << hpu::pfree(twiddle_obj);
+    asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+    asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
+    asm_code << hpu::resource::discard(twiddle_obj);
 
     // obj_poly 是稳定的逻辑对象；控制器为每个 stage 执行物理 out-of-place，
     // 完成后提交新 base。stage 配对由 stream_ctrl 地址与 lane 调度完成。
@@ -37,23 +37,23 @@ std::string generate_hpu_ntt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pntt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::dload(twiddle_obj, hpu::DataType::poly);
-        asm_code << hpu::pntt(data_obj, twiddle_obj, stage, 0);
-        asm_code << hpu::pfree(twiddle_obj);
+        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+        asm_code << hpu::resource::ntt_stage(data_obj, twiddle_obj, stage, 0);
+        asm_code << hpu::resource::discard(twiddle_obj);
     }
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
-    asm_code << "\n        // Final result object slot: " << hpu::pobj(data_obj) << "\n";
+    asm_code << "\n        // Final result object slot: " << hpu::resource::compatibility_name(data_obj) << "\n";
     return asm_code.str();
 }
 
 std::string generate_hpu_intt_body_asm(
     int N,
-    int obj_poly,
-    int twiddle_obj,
+    hpu::resource::Operand obj_poly,
+    hpu::resource::Operand twiddle_obj,
     bool append_psync)
 {
     std::ostringstream asm_code;
@@ -65,7 +65,7 @@ std::string generate_hpu_intt_body_asm(
 
     const int logN = static_cast<int>(std::log2(static_cast<double>(N)));
 
-    int data_obj = obj_poly;
+    auto data_obj = obj_poly;
 
     asm_code << "        // modulus table is loaded by the enclosing complete program\n";
     // 假设调用方已经加载过密文模数
@@ -76,23 +76,37 @@ std::string generate_hpu_intt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pintt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::dload(twiddle_obj, hpu::DataType::poly);
-        asm_code << hpu::pintt(data_obj, twiddle_obj, stage, 0);
-        asm_code << hpu::pfree(twiddle_obj);
+        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+        asm_code << hpu::resource::intt_stage(data_obj, twiddle_obj, stage, 0);
+        asm_code << hpu::resource::discard(twiddle_obj);
     }
 
     // The PE butterfly does not implicitly normalize or apply the inverse twist.
     asm_code << "\n        // INTT normalize and inverse-twist: explicit PMUL by N^-1 * psi^-i\n";
-    asm_code << hpu::dload(twiddle_obj, hpu::DataType::poly);
-    asm_code << hpu::pmul(data_obj, data_obj, twiddle_obj);
-    asm_code << hpu::pfree(twiddle_obj);
+    asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+    asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
+    asm_code << hpu::resource::discard(twiddle_obj);
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
-    asm_code << "\n        // Final result object slot: " << hpu::pobj(data_obj) << "\n";
+    asm_code << "\n        // Final result object slot: " << hpu::resource::compatibility_name(data_obj) << "\n";
     return asm_code.str();
+}
+
+std::string generate_hpu_ntt_body_asm(int N, int obj_poly, int twiddle_obj, bool append_psync)
+{
+    return generate_hpu_ntt_body_asm(N,
+        hpu::resource::compatibility_operand(obj_poly),
+        hpu::resource::compatibility_operand(twiddle_obj), append_psync);
+}
+
+std::string generate_hpu_intt_body_asm(int N, int obj_poly, int twiddle_obj, bool append_psync)
+{
+    return generate_hpu_intt_body_asm(N,
+        hpu::resource::compatibility_operand(obj_poly),
+        hpu::resource::compatibility_operand(twiddle_obj), append_psync);
 }
 
 std::string generate_hpu_ntt_asm(
@@ -113,19 +127,19 @@ std::string generate_hpu_ntt_asm(
     }
 
     asm_code << "    __asm__ volatile(\n";
-    asm_code << hpu::dload(mod_ctx_obj, hpu::DataType::mod_ctx,
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(mod_ctx_obj), hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
-    asm_code << hpu::pmodld(0);
-    asm_code << hpu::dload(obj_poly, hpu::DataType::poly);
+    asm_code << hpu::resource::select_modulus(0);
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(obj_poly), hpu::DataType::poly);
     asm_code << generate_hpu_ntt_body_asm(
         N,
         obj_poly,
         twiddle_obj,
         false);
-    asm_code << hpu::dstore(obj_poly, 1);
-    asm_code << hpu::pfree(mod_ctx_obj);
+    asm_code << hpu::resource::publish(hpu::resource::compatibility_operand(obj_poly), 1);
+    asm_code << hpu::resource::discard(hpu::resource::compatibility_operand(mod_ctx_obj));
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     asm_code << "\n        // 结束\n";
     asm_code << "        : \n";
@@ -155,19 +169,19 @@ std::string generate_hpu_intt_asm(
     }
 
     asm_code << "    __asm__ volatile(\n";
-    asm_code << hpu::dload(mod_ctx_obj, hpu::DataType::mod_ctx,
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(mod_ctx_obj), hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
-    asm_code << hpu::pmodld(0);
-    asm_code << hpu::dload(obj_poly, hpu::DataType::poly);
+    asm_code << hpu::resource::select_modulus(0);
+    asm_code << hpu::resource::read(hpu::resource::compatibility_operand(obj_poly), hpu::DataType::poly);
     asm_code << generate_hpu_intt_body_asm(
         N,
         obj_poly,
         twiddle_obj,
         false);
-    asm_code << hpu::dstore(obj_poly, 1);
-    asm_code << hpu::pfree(mod_ctx_obj);
+    asm_code << hpu::resource::publish(hpu::resource::compatibility_operand(obj_poly), 1);
+    asm_code << hpu::resource::discard(hpu::resource::compatibility_operand(mod_ctx_obj));
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     asm_code << "\n        // 结束\n";
     asm_code << "        : \n";

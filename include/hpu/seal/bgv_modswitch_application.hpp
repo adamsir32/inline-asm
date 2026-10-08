@@ -2,6 +2,8 @@
 
 #include "hpu/runtime/memory_image.hpp"
 #include "instruction.hpp"
+#include "hpu/compiler/operator_resources.hpp"
+#include <memory>
 
 #include <seal/seal.h>
 
@@ -32,6 +34,7 @@ struct BgvModSwitchApplication {
     std::uint64_t correction_factor = 1;
     std::vector<hpu::EncodedInstruction> instructions;
     std::vector<BgvModSwitchDmaBinding> dma;
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
 
     std::vector<hpu::runtime::HpuMemSpan> spans() const;
 };

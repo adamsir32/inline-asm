@@ -260,6 +260,12 @@ ApplicationPackageRequest make_planned(
     auto request = base_request(stem, context, scheme, image);
     request.program = {stem, lowered.body_asm, runtime.instructions, artifacts.header,
                        artifacts.source, artifacts.resolved_dma_manifest, runtime.spans()};
+    request.program.operator_program = runtime.operator_program;
+    for (const auto& entry : runtime.dma) {
+        const auto& binding = entry.binding;
+        request.program.resource_dma.push_back({entry.instruction_index, binding.allocation_id,
+            binding.span, binding.operation_index, binding.operation_id, binding.operation_dma_index});
+    }
     auto graph = stream();
     graph << "{\"operations\":[";
     for (std::size_t i = 0; i < oracles.size(); ++i) {
@@ -336,6 +342,10 @@ hpu::delivery::ApplicationPackageRequest make_bgv_application_package(
     const auto artifacts = render_bgv_keyswitch_runtime_artifacts(stem, application);
     auto& program = request.program;
     program.instructions = application.instructions;
+    program.operator_program = application.operator_program;
+    for (const auto& binding : application.dma)
+        program.resource_dma.push_back({binding.instruction_index, binding.allocation_id,
+            binding.span, binding.operation_index, binding.operation_id, binding.operation_dma_index});
     program.ordered_dma_spans = application.spans();
     program.header = artifacts.header;
     program.source = artifacts.source;

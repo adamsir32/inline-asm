@@ -346,7 +346,16 @@ PreparedRnsObject CkksOperationPlan::append_relinearize(
     step.id = std::move(step_id);
     step.kind = CkksOperationKind::relinearize;
     step.inputs = {describe(tensor)};
-    if (coefficient_workspace) step.workspaces = {describe(*coefficient_workspace)};
+    if (coefficient_workspace) {
+        step.workspaces = {describe(*coefficient_workspace)};
+    } else {
+        // Retained graph values must survive destructive transform stages.
+        const auto scratch = image_builder_.reserve_ciphertext(
+            "workspace/ckks/" + step.id + "/coefficient", tensor.metadata(),
+            tensor.components.size(), hpu::runtime::PolynomialDomain::coefficient,
+            1, hpu::runtime::AllocationKind::workspace);
+        step.workspaces = {describe(scratch)};
+    }
     step.output = describe(output);
     step.resources.requires_canonical_twiddles = true;
     step.resources.evaluation_key_ids = {evaluation_key.id};
@@ -401,7 +410,15 @@ PreparedRnsObject CkksOperationPlan::append_rescale(
     step.id = std::move(step_id);
     step.kind = CkksOperationKind::rescale;
     step.inputs = {describe(input)};
-    if (coefficient_workspace) step.workspaces = {describe(*coefficient_workspace)};
+    if (coefficient_workspace) {
+        step.workspaces = {describe(*coefficient_workspace)};
+    } else {
+        const auto scratch = image_builder_.reserve_ciphertext(
+            "workspace/ckks/" + step.id + "/coefficient", input.metadata(),
+            input.components.size(), hpu::runtime::PolynomialDomain::coefficient,
+            1, hpu::runtime::AllocationKind::workspace);
+        step.workspaces = {describe(scratch)};
+    }
     step.output = describe(output);
     step.resources.requires_canonical_twiddles = true;
     step.resources.constant_ids = {constants.id};

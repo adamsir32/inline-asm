@@ -128,6 +128,7 @@ BfvRuntimeProgram lower_bfv_runtime_program(const BfvLoweredProgram& lowered,
         throw std::invalid_argument("cannot lower an incomplete BFV relocation schedule");
     }
     BfvRuntimeProgram result;
+    result.operator_program = lowered.operator_program;
     result.instructions = hpu::assemble_source(lowered.body_asm);
     hpu::validate_executable_program(result.instructions);
     const auto encoded_dma = hpu::collect_dma_relocations(result.instructions);

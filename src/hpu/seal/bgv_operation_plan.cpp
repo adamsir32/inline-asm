@@ -8,7 +8,7 @@
 #include "scheme/bgv/modswitch.hpp"
 #include "scheme/bfv/galois.hpp"
 #include "scheme/ckks/basic_arithmetic.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 #include "assembler.hpp"
 #include "executable.hpp"
@@ -490,6 +490,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             }
         }
     }
+    auto operator_program = std::make_shared<hpu::resource::OperatorProgram>();
     std::vector<hpu::EncodedInstruction> instructions;
     std::vector<BgvKeySwitchDmaBinding> bindings;
     const auto append_program = [&](const std::vector<hpu::EncodedInstruction>& body,
@@ -504,11 +505,14 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
         }
     };
     {
-        const auto body = hpu::assemble_source(hpu::dload(4, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank));
+        hpu::resource::Recording recording;
+        const auto body = hpu::assemble_source(hpu::resource::read(
+            hpu::resource::modulus_table, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank));
         const auto encoded = hpu::collect_dma_relocations(body);
         DmaRecipe recipe(image, encoded);
         recipe.load(4, "constants/modulus_table", hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
         append_program(body, recipe.finish());
+        operator_program->append(recording.finish());
     }
     ::seal::Evaluator plain_preparer(context_);
     const auto shape = [&](const BgvPlannedValue& value) {
@@ -564,6 +568,10 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             for (std::size_t d = 1; d < standalone.dma.size(); ++d)
                 recipe.replay(standalone.dma[d], relocate(standalone.dma[d].allocation_id));
             append_program(body, recipe.finish());
+            if (!standalone.operator_program)
+                throw std::logic_error("BGV operation lacks native operator IR");
+            operator_program->append(*standalone.operator_program, 1,
+                standalone.operator_program->operations.size() - 2);
         };
         if (step.kind == Kind::rotate_rows || step.kind == Kind::rotate_columns) {
             const auto capacity = estimate_bgv_rotation_image_lines(degree, q_count, key_moduli.size());
@@ -592,6 +600,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             compose(application, step_prefix + "/modswitch", {{"input", input_prefix}});
             continue;
         }
+        hpu::resource::Recording recording;
         std::string assembly;
         hpu::scheme::bgv::CorrectionBalance balance{};
         const bool binary = step.kind == Kind::add_ciphertext || step.kind == Kind::subtract_ciphertext;
@@ -658,14 +667,19 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             }
         }
         append_program(body, recipe.finish());
+        operator_program->append(recording.finish());
     }
-    const auto ending = hpu::assemble_source(hpu::pfree(4) + hpu::psync());
+    hpu::resource::Recording ending_recording;
+    auto ending_assembly = hpu::resource::discard(hpu::resource::modulus_table);
+    ending_assembly += hpu::resource::finish_program();
+    const auto ending = hpu::assemble_source(ending_assembly);
     append_program(ending, {});
+    operator_program->append(ending_recording.finish());
     hpu::validate_executable_program(instructions);
     image.trim_capacity_to_used_lines();
     const auto& output = final_output();
     return {std::move(image), output.parms_id, output.correction_factor,
-            std::move(instructions), std::move(bindings)};
+            std::move(instructions), std::move(bindings), std::move(operator_program)};
 }
 
 } // namespace hpu::seal_adapter

@@ -321,3 +321,15 @@ ctest --test-dir build -L application-delivery --output-on-failure
 CKKS、BFV、BGV 均可在 plan 中分别添加 Multiply（三分量输出）和 Relinearize（二分量输出），
 每个节点都有独立的 `operation_index` 和 golden 对象。BFV 和 BGV 的原有融合乘法接口继续兼容，
 融合节点标记为 `multiply_relinearize`；IT 用例必须提供对应的融合 SEAL oracle 快照。
+
+## 原生算子资源编译
+
+Evaluator 和 CKKS/BFV/BGV Plan 应用携带算子直接生成的资源 IR 与结构化 DMA 端口。
+前端在编译时调度资源，旧 Plan 包在 `write_application_package()` 导出时自动调用
+同一后端。导出在私有镜像中复用 workspace 并重新绑定 DMA 和 golden 目的地址，
+调用者的原始镜像保持不变。最终包保持 v1 文件和二进制格式。
+
+`oracle/report.json.compiler_resources.ir_source="operator"` 标识原生路径；报告还记录
+原始/最终 DDR、DMA、bank 峰值及 spill/reload。导出要求所有保留输出逐字匹配 SEAL
+golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不由 host 对拍置为 true。
+原始 `--print-asm` 可以用于对照，消费最终程序时应使用包内的指令及 DMA 清单。

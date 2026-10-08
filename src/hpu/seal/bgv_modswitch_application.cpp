@@ -3,7 +3,7 @@
 #include "hpu/model/hardware_ntt.hpp"
 #include "hpu/seal/ntt_bridge.hpp"
 #include "scheme/bgv/modswitch.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include "assembler.hpp"
@@ -285,6 +285,7 @@ BgvModSwitchApplication build_bgv_modswitch_application(
         }
     }
 
+    hpu::resource::Recording recording;
     const auto body = hpu::scheme::bgv::generate_modswitch_ntt_body_asm(
         static_cast<int>(degree), layout, static_cast<int>(input.size()), true, true);
     auto instructions = hpu::assemble_source(body);
@@ -331,7 +332,8 @@ BgvModSwitchApplication build_bgv_modswitch_application(
         std::move(image), input.parms_id(), source->next_context_data()->parms_id(),
         hpu::scheme::bgv::modswitch_correction_factor(
             input.correction_factor(), q_moduli.back(), t),
-        std::move(instructions), std::move(bindings)};
+        std::move(instructions), std::move(bindings),
+            std::make_shared<hpu::resource::OperatorProgram>(recording.finish())};
     return result;
 }
 

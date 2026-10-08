@@ -1,5 +1,5 @@
 #include "util/bconv.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 #include <sstream>
 #include <string>
@@ -33,13 +33,12 @@ std::string generate_hpu_bconv_contexts_body_asm(
         return asm_code.str();
     }
 
-    // 根据 HPU 硬件限制，只能存入 3 个多项式对象
-    // 我们将复用固定的 3 个寄存器槽位：0, 1, 2
-    const int POBJ_TMP_A = 0;
-    const int POBJ_TMP_B = 1;
-    const int POBJ_ACC   = 2;
+    // Algorithm roles are virtual; the shared compiler schedules object slots.
+    const auto POBJ_TMP_A = hpu::resource::value;
+    const auto POBJ_TMP_B = hpu::resource::auxiliary;
+    const auto POBJ_ACC = hpu::resource::accumulator;
     // 模表对象通过 small-bank hint 分配到 Bank 5，pmodld 再按 MOD_ID 选择表项。
-    const int POBJ_MOD_CTX = 4;
+    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     // ==========================================
     // 阶段一：预处理 (Pre-multiply)
@@ -48,7 +47,7 @@ std::string generate_hpu_bconv_contexts_body_asm(
     // 一次性加载模表对象；DMA 与后续 pmodld 的一致性由硬件维护。
     if (manage_modulus_table) {
         asm_code << "        // dload the runtime-relocated complete modulus table\n";
-        asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
 
@@ -56,17 +55,17 @@ std::string generate_hpu_bconv_contexts_body_asm(
     for (std::size_t j = 0; j < source_contexts.size(); ++j) {
         asm_code << "        /* Source context " << source_contexts[j]
                  << ", source limb " << j << " */\n";
-        asm_code << hpu::pmodld(source_contexts[j]);
+        asm_code << hpu::resource::select_modulus(source_contexts[j]);
 
         asm_code << "        // dload source limb and runtime-relocated qhat inverse\n";
-        asm_code << hpu::dload(POBJ_TMP_A, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_TMP_B, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly);
 
-        asm_code << hpu::pmul(POBJ_TMP_A, POBJ_TMP_A, POBJ_TMP_B);
-        asm_code << hpu::pfree(POBJ_TMP_B);
+        asm_code << hpu::resource::multiply(POBJ_TMP_A, POBJ_TMP_A, POBJ_TMP_B);
+        asm_code << hpu::resource::discard(POBJ_TMP_B);
 
         asm_code << "        // dstore x_j to runtime-bound scratch span\n";
-        asm_code << hpu::dstore(POBJ_TMP_A, 1);
+        asm_code << hpu::resource::publish(POBJ_TMP_A, 1);
     }
 
     // ==========================================
@@ -77,32 +76,32 @@ std::string generate_hpu_bconv_contexts_body_asm(
     for (std::size_t i = 0; i < target_contexts.size(); ++i) {
         asm_code << "        /* Target context " << target_contexts[i]
                  << ", target limb " << i << " */\n";
-        asm_code << hpu::pmodld(target_contexts[i]);
+        asm_code << hpu::resource::select_modulus(target_contexts[i]);
 
         for (std::size_t j = 0; j < source_contexts.size(); ++j) {
             asm_code << "        // dload x_j and qhat_modp_j_i from runtime-bound spans\n";
-            asm_code << hpu::dload(POBJ_TMP_A, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_TMP_B, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly);
 
             if (j == 0) {
-                asm_code << hpu::pmul(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
+                asm_code << hpu::resource::multiply(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
             } else {
-                asm_code << hpu::pmac(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
+                asm_code << hpu::resource::accumulate(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
             }
-            asm_code << hpu::pfree(POBJ_TMP_A);
-            asm_code << hpu::pfree(POBJ_TMP_B);
+            asm_code << hpu::resource::discard(POBJ_TMP_A);
+            asm_code << hpu::resource::discard(POBJ_TMP_B);
         }
         
         asm_code << "        // dstore accumulator to the resolved target span\n";
-        asm_code << hpu::dstore(POBJ_ACC, 1);
+        asm_code << hpu::resource::publish(POBJ_ACC, 1);
     }
 
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
     return asm_code.str();

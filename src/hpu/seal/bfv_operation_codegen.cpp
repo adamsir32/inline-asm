@@ -6,7 +6,7 @@
 #include "scheme/bfv/galois.hpp"
 #include "scheme/bfv/modswitch.hpp"
 #include "scheme/bfv/rotate.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <limits>
@@ -16,7 +16,7 @@
 namespace hpu::seal_adapter {
 namespace {
 
-constexpr int kModulusTableObject = 4;
+constexpr auto kModulusTableObject = hpu::resource::modulus_table;
 
 const BfvLevelDescriptor& require_value_shape(const BfvLevelChain& level_chain,
                                               const BfvPlannedValue& value, std::size_t components,
@@ -232,11 +232,12 @@ BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
     }
 
     const BfvLevelChain level_chain(context);
+    hpu::resource::Recording recording;
     BfvLoweredProgram result;
     result.operations.reserve(plan.steps().size());
     if (manage_modulus_table) {
         result.body_asm +=
-            hpu::dload(kModulusTableObject, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+            hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
     }
     for (const auto& step : plan.steps()) {
         BfvLoweredOperation lowered;
@@ -247,11 +248,12 @@ BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
         result.operations.push_back(std::move(lowered));
     }
     if (manage_modulus_table) {
-        result.body_asm += hpu::pfree(kModulusTableObject);
+        result.body_asm += hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
-        result.body_asm += hpu::psync();
+        result.body_asm += hpu::resource::finish_program();
     }
+    result.operator_program = std::make_shared<hpu::resource::OperatorProgram>(recording.finish());
     return result;
 }
 

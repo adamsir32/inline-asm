@@ -1,7 +1,7 @@
 #include "operator/relinearization.hpp"
 
 #include "operator/keyswitch.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <sstream>
@@ -15,28 +15,28 @@ std::string generate_add_second_component_body_asm(
 {
     std::ostringstream asm_code;
 
-    const int POBJ_T1 = 0;
-    const int POBJ_KS1 = 1;
-    const int POBJ_OUT1 = 2;
-    const int POBJ_MOD_CTX = 4;
+    const auto POBJ_T1 = hpu::resource::value;
+    const auto POBJ_KS1 = hpu::resource::auxiliary;
+    const auto POBJ_OUT1 = hpu::resource::accumulator;
+    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     asm_code << "        /* --- Relinearization final merge: out1 = t1 + ks1 --- */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::dload(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     for (int context : q_contexts) {
         asm_code << "        /* q MOD_ID " << context << " */\n";
-        asm_code << hpu::pmodld(context);
-        asm_code << hpu::dload(POBJ_T1, hpu::DataType::poly);
-        asm_code << hpu::dload(POBJ_KS1, hpu::DataType::poly);
-        asm_code << hpu::padd(POBJ_OUT1, POBJ_T1, POBJ_KS1);
-        asm_code << hpu::pfree(POBJ_T1);
-        asm_code << hpu::pfree(POBJ_KS1);
-        asm_code << hpu::dstore(POBJ_OUT1, 1);
+        asm_code << hpu::resource::select_modulus(context);
+        asm_code << hpu::resource::read(POBJ_T1, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_KS1, hpu::DataType::poly);
+        asm_code << hpu::resource::add(POBJ_OUT1, POBJ_T1, POBJ_KS1);
+        asm_code << hpu::resource::discard(POBJ_T1);
+        asm_code << hpu::resource::discard(POBJ_KS1);
+        asm_code << hpu::resource::publish(POBJ_OUT1, 1);
     }
     if (manage_modulus_table) {
-        asm_code << hpu::pfree(POBJ_MOD_CTX);
+        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
 
     return asm_code.str();
@@ -73,7 +73,7 @@ std::string generate_relinearization_body_asm_impl(
         layout.q_mod_ids, manage_modulus_table);
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
 
     return asm_code.str();
@@ -122,7 +122,7 @@ std::string generate_hpu_bfv_relinearization_body_asm(
         layout.q_mod_ids, manage_modulus_table);
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }

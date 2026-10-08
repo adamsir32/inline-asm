@@ -1,4 +1,5 @@
 #include "hpu/compiler/resource_ir.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "assembler.hpp"
 #include "executable.hpp"
 
@@ -350,11 +351,103 @@ void test_partial_initialization_and_overlapping_lifetimes()
     }
 }
 
+void test_native_operator_resources()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(32);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("a", std::vector<std::uint32_t>(128, 2), AllocationKind::ciphertext);
+    image.add("b", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    for (const std::string name : {"first", "second"}) {
+        image.reserve("scratch/" + name, 128, AllocationKind::workspace);
+        image.reserve("output/" + name, 128, AllocationKind::output);
+    }
+    r::Recording recording;
+    auto assembly = r::read(r::modulus_table, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+    assembly += r::select_modulus(0);
+    for (int branch = 0; branch < 2; ++branch) {
+        assembly += r::read(r::value, hpu::DataType::poly);
+        assembly += r::read(r::auxiliary, hpu::DataType::poly);
+        assembly += r::add(r::accumulator, r::value, r::auxiliary);
+        assembly += r::discard(r::value);
+        assembly += r::discard(r::auxiliary);
+        assembly += r::publish(r::accumulator);
+        assembly += r::read(r::value, hpu::DataType::poly);
+        assembly += r::multiply_immediate(r::value, r::value, branch + 2);
+        assembly += r::publish(r::value);
+    }
+    assembly += r::discard(r::modulus_table);
+    assembly += r::finish_program();
+    const auto source = recording.finish();
+    const auto baseline = hpu::assemble_source(assembly);
+    const auto dma = bindings(baseline, image, {"moduli", "a", "b", "scratch/first",
+        "scratch/first", "output/first", "a", "b", "scratch/second", "scratch/second", "output/second"});
+    auto native = r::bind_program(source, baseline, dma, image);
+    // The native path must not inherit any physical allocation choices.
+    for (auto& node : native.instructions) {
+        node.instruction.pdst = node.instruction.psrc1 = node.instruction.psrc2 = 99;
+        node.instruction.obj_id = 99;
+    }
+    const auto compiled = hpu::compiler::compile_resources(native, baseline, dma, image);
+    require(compiled.report.ir_origin == hpu::compiler::ResourceIrOrigin::operator_emission,
+            "native operator resource IR was not used");
+    require(compiled.report.deferred_scratch_stores == 2 && compiled.dma.size() == dma.size() - 4,
+            "native operator scratch traffic was not eliminated");
+    const auto a = hpu::compiler::relocate_span(compiled, "scratch/first", image.allocation("scratch/first").span);
+    const auto b = hpu::compiler::relocate_span(compiled, "scratch/second", image.allocation("scratch/second").span);
+    require(a.line_offset == b.line_offset, "native disjoint workspaces were not reused");
+    const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+    require(allocation_words(actual, compiled.image, "output/first") == std::vector<std::uint32_t>(128, 10),
+            "native first branch differs from independent arithmetic");
+    require(allocation_words(actual, compiled.image, "output/second") == std::vector<std::uint32_t>(128, 15),
+            "native second branch differs from independent arithmetic");
+    hpu::compiler::CompileOptions no_opt;
+    no_opt.optimization = hpu::compiler::OptimizationMode::no_opt;
+    const auto original = hpu::compiler::compile_resources(r::bind_program(source, baseline, dma, image),
+                                                          baseline, dma, image, no_opt);
+    require(original.image.words() == image.words(), "native NoOpt altered memory");
+    for (std::size_t i = 0; i < baseline.size(); ++i)
+        require(original.instructions[i].word == baseline[i].word, "native NoOpt altered baseline instructions");
+    auto incomplete = source;
+    incomplete.operations.pop_back();
+    require_throws([&] { r::bind_program(incomplete, baseline, dma, image); }, "incomplete native coverage was accepted");
+    auto corrupt = source;
+    for (auto& node : corrupt.operations)
+        if (node.instruction.mnemonic == hpu::Mnemonic::kPmul) { ++node.instruction.imm8; break; }
+    require_throws([&] { r::bind_program(corrupt, baseline, dma, image); }, "native arithmetic divergence was accepted");
+    auto invalid_dma = dma;
+    invalid_dma[3].allocation_id = "a";
+    invalid_dma[3].span = image.allocation("a").span;
+    require_throws([&] { r::bind_program(source, baseline, invalid_dma, image); }, "native read-only write accepted");
+}
+
+void test_nested_recording()
+{
+    namespace r = hpu::resource;
+    r::Recording outer;
+    r::read(r::value, hpu::DataType::poly);
+    {
+        r::Recording inner;
+        r::read(r::auxiliary, hpu::DataType::poly);
+        r::discard(r::auxiliary);
+        require(inner.finish().operations.size() == 2, "nested recorder lost its fragment");
+    }
+    try {
+        r::Recording interrupted;
+        r::discard(r::value);
+        throw std::runtime_error("test unwind");
+    } catch (const std::runtime_error&) {}
+    r::discard(r::value);
+    require(outer.finish().operations.size() == 2, "nested recorder contaminated its parent or failed to restore it");
+}
+
 } // namespace
 
 int main()
 {
     try {
+        test_native_operator_resources();
+        test_nested_recording();
         test_scratch_reuse();
         test_dirty_spill();
         test_stage_bank_and_multiple_readers();

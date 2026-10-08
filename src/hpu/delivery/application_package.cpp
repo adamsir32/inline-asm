@@ -4,6 +4,7 @@
 #include "executable.hpp"
 #include "hpu/delivery/checksum.hpp"
 #include "hpu/delivery/io.hpp"
+#include "hpu/delivery/resource_compiler.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -2007,9 +2008,9 @@ void validate_application_package_request(
 
 ApplicationPackageReport write_application_package(
     const std::filesystem::path& output_root,
-    const ApplicationPackageRequest& request)
+    const ApplicationPackageRequest& original_request)
 {
-    validate_application_package_request(request);
+    validate_application_package_request(original_request);
     if (output_root.empty()) {
         throw std::invalid_argument("application package output root is empty");
     }
@@ -2027,6 +2028,13 @@ ApplicationPackageReport write_application_package(
         throw std::invalid_argument(
             "application package target '" + output_root.string()
             + "' already exists; v1 never removes or overwrites a target");
+    }
+
+    auto request = original_request;
+    std::optional<hpu::runtime::HpuMemImage> compiled_image;
+    if (request.program.operator_program && !request.program.resources_compiled) {
+        compiled_image = *request.initial_image;
+        compile_application_resources(request, *compiled_image);
     }
 
     const auto& image = *request.initial_image;

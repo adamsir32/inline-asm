@@ -2,7 +2,7 @@
 
 #include "operator/rns_layout.hpp"
 #include "poly/moddown.hpp"
-#include "util/hpu_asm.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "util/validation.hpp"
 
 #include <algorithm>
@@ -26,9 +26,9 @@ std::string generate_hpu_rounded_single_p_moddown_contexts_body_asm(
         return asm_code.str();
     }
 
-    constexpr int POBJ_VALUE = 0;
-    constexpr int POBJ_HALF = 1;
-    constexpr int POBJ_MOD_CTX = 4;
+    constexpr auto POBJ_VALUE = hpu::resource::value;
+    constexpr auto POBJ_HALF = hpu::resource::auxiliary;
+    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
 
     std::vector<int> full_contexts = q_contexts;
     full_contexts.push_back(p_context);
@@ -41,29 +41,29 @@ std::string generate_hpu_rounded_single_p_moddown_contexts_body_asm(
         asm_code << "        /* component " << component
                  << " stage-1: add floor(P/2) in Q union P */\n";
         if (manage_modulus_table) {
-            asm_code << hpu::dload(
+            asm_code << hpu::resource::read(
                 POBJ_MOD_CTX, hpu::DataType::mod_ctx,
                 hpu::DloadFlag::small_bank);
         }
         for (int context : full_contexts) {
             asm_code << "        /* component " << component
                      << ", MOD_ID " << context << " */\n";
-            asm_code << hpu::pmodld(context);
-            asm_code << hpu::dload(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::dload(POBJ_HALF, hpu::DataType::poly);
-            asm_code << hpu::padd(POBJ_VALUE, POBJ_VALUE, POBJ_HALF);
-            asm_code << hpu::pfree(POBJ_HALF);
-            asm_code << hpu::dstore(POBJ_VALUE, 1);
+            asm_code << hpu::resource::select_modulus(context);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
+            asm_code << hpu::resource::read(POBJ_HALF, hpu::DataType::poly);
+            asm_code << hpu::resource::add(POBJ_VALUE, POBJ_VALUE, POBJ_HALF);
+            asm_code << hpu::resource::discard(POBJ_HALF);
+            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
         }
         if (manage_modulus_table) {
-            asm_code << hpu::pfree(POBJ_MOD_CTX);
+            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
         }
         asm_code << ::generate_hpu_moddown_contexts_body_asm(
             q_contexts, {p_context}, false, manage_modulus_table);
     }
 
     if (append_psync) {
-        asm_code << hpu::psync();
+        asm_code << hpu::resource::finish_program();
     }
     return asm_code.str();
 }
