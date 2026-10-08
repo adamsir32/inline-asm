@@ -87,7 +87,14 @@ ApplicationPackageRequest base_request(
         if (i) out << ',';
         out << key->parms().coeff_modulus()[i].value();
     }
-    out << "],\"levels\":[";
+    out << "],\"ntt_table_abi\":{\"version\":1,"
+           "\"coefficient_order\":\"natural\","
+           "\"pre_twist_order\":\"natural\","
+           "\"post_factor_order\":\"natural\","
+           "\"stage_twiddle_order\":\"reference_loader_batch_lane\","
+           "\"canonical_ntt_layout\":\"reference_forward_layout\","
+           "\"normalization\":\"explicit_post_pmul\","
+           "\"twist_fused\":false},\"levels\":[";
     bool first = true;
     for (auto level = context.first_context_data(); level; level = level->next_context_data()) {
         if (!first) out << ',';

@@ -9,16 +9,6 @@
 namespace hpu::seal_adapter {
 namespace {
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::uint32_t multiply_mod(
     std::uint32_t left,
     std::uint32_t right,
@@ -407,8 +397,8 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
         for (const auto& span : prepared.inverse_stages) {
             inverse_tables.stages.push_back(memory_.read(span, degree / 2));
         }
-        inverse_tables.post_scale = memory_.read(
-            prepared.post_untwist_scale, degree);
+        inverse_tables.set_natural_post_scale(memory_.read(
+            prepared.post_untwist_scale, degree));
         return model.inverse(words, inverse_tables);
     }
 
@@ -424,7 +414,7 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
             throw std::invalid_argument("CKKS coefficient is not reduced modulo q");
         }
         coefficients[index] = multiply_mod(
-            coefficients[index], pre_twist[bit_reverse(index, degree)], q);
+            coefficients[index], pre_twist[index], q);
     }
     return model.forward(coefficients, forward_tables);
 }
@@ -779,8 +769,8 @@ void CkksSoftwareExecutor::rotate(
             for (const auto& span : fused.inverse_stages) {
                 inverse_tables.stages.push_back(memory_.read(span, degree / 2));
             }
-            inverse_tables.post_scale = memory_.read(
-                fused.post_untwist_scale, degree);
+            inverse_tables.set_natural_post_scale(memory_.read(
+                fused.post_untwist_scale, degree));
             const auto transformed = model.inverse(
                 memory_.read(source.limbs[basis], degree), inverse_tables);
             memory_.write(workspace.limbs[basis], transformed);

@@ -19,6 +19,11 @@ struct InverseNttTables {
     // Per physical coefficient position after the last inverse stage.
     // Includes lazy-scale cancellation and N^-1 normalization.
     std::vector<std::uint32_t> post_scale;
+
+    // Application images store the explicit post PMUL factor at natural
+    // coefficient positions. Adapt that factor to this model's raw inverse
+    // layout; the caller includes normalization/untwist exactly once.
+    void set_natural_post_scale(std::vector<std::uint32_t> factors);
 };
 
 // Bit-accurate software model of hw_ntt_intt_complete.py. This class models
@@ -62,6 +67,16 @@ private:
     std::uint32_t omega_;
     std::size_t log_degree_;
 };
+
+// Executes exactly one loader/BF/P stage with the supplied DMA twiddles. No
+// input/output bit reversal, pre-twist, inverse normalization, or table
+// generation is performed. Inverse stage k uses forward loader log2(N)-1-k.
+std::vector<std::uint32_t> execute_ntt_stage(
+    const std::vector<std::uint32_t>& input,
+    const std::vector<std::uint32_t>& stage_twiddles,
+    std::uint32_t modulus,
+    std::size_t stage,
+    bool inverse = false);
 
 std::uint32_t pow_mod(
     std::uint32_t base,

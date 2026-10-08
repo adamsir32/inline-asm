@@ -6,10 +6,12 @@
 
 | 目标 | 建议阅读顺序 |
 | --- | --- |
+| 使用 SEAL 风格 Evaluator 编写三方案应用 | [Evaluator 前端入门](getting-started/HPU_EVALUATOR_FRONTEND.md) → [编译器资源管理](architecture/HPU_COMPILER_RESOURCES.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) |
 | 使用 CKKS API 编写应用 | [CKKS 入门](getting-started/CKKS_HPU_GETTING_STARTED.md) → [CKKS 复合应用](examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
 | 为 IT 编写应用测试 | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [应用示例](examples/) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
 | 对接 Nexus-AM 或 HPU runtime | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) → [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) |
 | 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
+| 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [编译器资源管理](architecture/HPU_COMPILER_RESOURCES.md) |
 | 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
 
@@ -17,6 +19,7 @@
 
 ### `getting-started/`
 
+- [HPU_EVALUATOR_FRONTEND.md](getting-started/HPU_EVALUATOR_FRONTEND.md)：三方案统一句柄和 Evaluator、自动验证、严格编译与诊断导出。
 - [CKKS_HPU_GETTING_STARTED.md](getting-started/CKKS_HPU_GETTING_STARTED.md)：从 SEAL context、应用镜像和 operation plan 到 HPU 交付包的入门流程。
 
 ### `examples/`
@@ -33,6 +36,7 @@
 
 ### `architecture/`
 
+- [HPU_COMPILER_RESOURCES.md](architecture/HPU_COMPILER_RESOURCES.md)：虚拟资源 IR、DDR workspace 复用、对象与 bank 调度、NoOpt 比较及当前迁移边界。
 - [HPU_SEAL_INTEGRATION.md](architecture/HPU_SEAL_INTEGRATION.md)：modified-SEAL 依赖、NTT 物理模型、模数链和三方案适配设计。
 
 ### `delivery/`
@@ -44,6 +48,7 @@
 ### `audits/`
 
 - [HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md)：2026 年 8 月硬件文档符合性审计快照。它记录当时的修复依据和遗留项，不代替当前接口规范。
+- [HPU_NTT_CONTRACT_AUDIT_2026-10.md](audits/HPU_NTT_CONTRACT_AUDIT_2026-10.md)：自然系数边界、独立数学反例、CKKS 舍入修复及软件验收快照；当前接口以编程手册和应用包 V1 为准。
 
 ## 文档状态约定
 

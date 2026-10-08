@@ -93,8 +93,8 @@ void check(const seal::SEALContext& context, seal::Evaluator& evaluator,
             tables.stages.push_back(words(package.image,
                 prefix + "/stage" + std::to_string(stage)));
         }
-        tables.post_scale = words(package.image,
-            prefix + "/post_untwist_scale");
+        tables.set_natural_post_scale(words(package.image,
+            prefix + "/post_untwist_scale"));
         for (std::size_t component = 0; component < 2; ++component) {
             const auto original = words(package.image,
                 mod_id("input/original/c" + std::to_string(component), basis));

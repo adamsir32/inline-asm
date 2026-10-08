@@ -14,16 +14,6 @@ std::string mod_id(const std::string& prefix, std::size_t id)
     return prefix + "/mod" + std::to_string(id);
 }
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::uint32_t add_mod(
     std::uint32_t left, std::uint32_t right, std::uint32_t modulus)
 {
@@ -159,8 +149,8 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::inverse_ntt(
             twiddle_prefix + "/intt/stage" + std::to_string(stage));
         tables.stages.push_back(memory_.read(item.span, degree_ / 2));
     }
-    tables.post_scale = read(
-        twiddle_prefix + "/intt/post_untwist_scale");
+    tables.set_natural_post_scale(read(
+        twiddle_prefix + "/intt/post_untwist_scale"));
     return model.inverse(words, tables);
 }
 
@@ -193,7 +183,7 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::forward_ntt(
                 "BGV forward NTT input is not reduced modulo q");
         }
         prepared[index] = multiply_mod(
-            prepared[index], pre_twist[bit_reverse(index, degree_)], modulus);
+            prepared[index], pre_twist[index], modulus);
     }
     return model.forward(prepared, stages);
 }

@@ -365,8 +365,7 @@ for i = 0 .. L-1:
 
 PE 算术路径允许两个乘数分别为任意 `uint32`，结果仍归一化到 `[0,q)`。
 跨模数读取的系数可先执行 `pmul pdst, psrc, 1`，再交给要求规范余数的
-`padd`、`psub` 或 NTT。该能力已由 PE 边界仿真及编码指令链临时验证；
-CPU 取指和实体 DMA 不在该验证范围内。
+`padd`、`psub` 或 NTT。
 
 **立即数模式操作**
 
@@ -461,13 +460,24 @@ pntt  p0, p3, 0, 0, 0
 pfree p3
 ```
 
-完整 negacyclic NTT 在 stage 0 前还会显式加载 `pre_twist.u32.bin`，并执行
-`pmul pdata, pdata, ptwiddle`，实现逐系数乘 `psi^i`。该步骤不是
-`pntt stage=0` 的隐含行为。
+完整 negacyclic NTT 在 stage 0 前显式加载 pre-twist 表，并执行
+`pmul pdata, pdata, ptwiddle`。新 BFV、CKKS、BGV 应用 builder 以自然位置保存
+系数，表为 `pre_twist[i] = psi^i mod q`；PMUL 逐位置消费原表，不隐式重索引。
+twist 不是 `pntt stage=0` 的隐含行为。
 
-硬件镜像遵循硬件组 `autotest/hw_ntt_intt_complete.py` 的物理执行模型。
-系数域多项式先按 `memory[p] = coefficient[bit_reverse(p)]` 排列，因此
-`pre_twist[p] = psi^bit_reverse(p)`。每个 stage 处理 `N/128` 个 batch；每个
+默认逐指令功能软件契约为 `natural_coefficient_boundaries`。它在 PNTT stage 0
+的 raw stage 前执行数学边界 BR，使自然系数进入递增 m 的 raw DIT schedule。
+这个整体边界转换不对应额外编码指令，也不声称复现 RTL 每个 stage 的地址。
+软件报告继续记录 `hardware_contract_verified=false`。
+
+`test/reference/main.cpp` 的历史固定 profile 算子包仍使用
+`memory[p] = coefficient[bit_reverse(p)]` 和 `pre_twist[p] = psi^bit_reverse(p)`；
+使用 `legacy_raw_stage` 回放，不增加整体边界转换。选择契约不会修改镜像或表，
+新自然镜像使用 legacy profile 可能比较失败。独立反例及修复验收见
+[2026-10 审计](../audits/HPU_NTT_CONTRACT_AUDIT_2026-10.md)。
+
+raw stage 模型沿用 `autotest/hw_ntt_intt_complete.py` 的 loader/BF/P 规则。
+每个 stage 处理 `N/128` 个 batch；每个
 batch 装入 128 个寄存器，由 64 个 BF lane 顺序消费 64 个 twiddle，BF 后
 对 7-bit 寄存器索引执行一次 P 网络，再写回本 batch。`m=2^stage < 128`
 时 loader 连续装入 128 words；`m >= 128` 时从蝶形的上下两半各取 64 words
@@ -504,18 +514,31 @@ pintt pdata, ptwiddle, stage, 0, 0
 pfree ptwiddle
 ```
 
-硬件 PINTT 使用与前向变换严格对偶的 schedule。指令的 `stage=k` 对应前向
+raw PINTT 软件 stage 使用与前向变换严格对偶的 schedule。指令的 `stage=k` 对应前向
 `stage=log2(N)-1-k` 的 loader；每个 batch 先执行一次 P 的逆网络 `P^-1`，
 再进入 64 个 BF lane。逆表不是简单的自然顺序 `omega^-j` 表，而是由 dual
 schedule 跟踪每个物理位置的 lazy scale，逐 lane 生成
-`w_bf = alpha * beta^-1 mod q`。这样全部 PINTT stage 结束后，物理布局和
-lazy scale 都恢复到系数域约定。
+`w_bf = alpha * beta^-1 mod q`。stage 表始终按 loader batch、batch 内 lane
+顺序保存，不随完整变换边界做 BR。
 
-随后显式加载 `post_untwist_scale.u32.bin` 并执行
-`dload + pmul + pfree`。物理位置 `p` 的值为
-`N^-1 * psi^-bit_reverse(p) mod q`，同时完成归一化和 negacyclic inverse
-twist。完整的 `PNTT -> pointwise multiply -> PINTT` 已由 reference 与硬件
-schedule 模型逐字比较，结果对应系数域的 negacyclic convolution。
+默认 `natural_coefficient_boundaries` 在最后一个 PINTT raw stage 后执行数学
+边界 BR，将 raw 系数位置转换到自然位置；随后显式加载 post 表并执行
+`dload + pmul + pfree`。新应用镜像在自然位置 `i` 的表值为
+`post_untwist_scale[i] = raw_inverse.post_scale[bit_reverse(i)] * psi^-i mod q`，
+其中 raw post scale 已包含 lazy scale 抵消和 `N^-1`。最后 PINTT 的软件边界
+转换不执行 normalization 或 untwist，这些乘法仍由显式 PMUL 完成。
+modified-root INTT 使用对应 root 的 raw scale，并将 `psi` 换成 modified root。
+`raw_inverse.post_scale[BR(i)]` 必须保留，即使生成的 raw scale 恰好全部为 `N^-1`。
+公开 `HardwareNttModel::inverse` 按 raw 位置消费 supplied post scale 后再做 BR；
+高层适配器用 `InverseNttTables::set_natural_post_scale()` 将自然 post 表映射给该
+数学 API，避免重复 normalization 或错用 untwist 索引。公共
+`create_fused_inverse_automorphism_tables()` 保留 raw post 输出，应用 builder
+在导入 modified-root 表时转为自然 post。
+
+旧固定 profile reference 包保留 raw 位置 `p` 的 post 因子
+`lazy_scale[p]^-1 * N^-1 * psi^-bit_reverse(p)`，输出为 BR 系数镜像。
+其历史验证与新自然边界契约的验证分别记录；新默认契约的实际测试规模和结果以
+测试日志、应用包报告为准，host 对拍不构成 RTL 每 stage 地址或目标执行证据。
 runtime 按 `twiddle_map.csv` 绑定 pre-twist、各 stage twiddle 和 post factor
 的 line offset/count。
 
@@ -741,7 +764,8 @@ pmac p2, p6, 7             # p2 += p6 * 7
 
 ### 8.3 完整 NTT
 
-对于 `N=4096`，当前生成器发出 12 个 stage：
+对于 `N=4096`，当前生成器发出 12 个 stage。下面使用新应用镜像的自然系数表；
+默认软件契约的 stage 0 边界 BR 由逐指令模型执行，不额外发出汇编指令：
 
 ```asm
 # q already selected with pmodld
@@ -764,8 +788,10 @@ dstore x16, x17, p0, 1
 psync
 ```
 
-完整 INTT 在最后一个 `pintt` 后还必须加载
-`post_untwist_scale = N^-1 * psi^-i` 并显式 `pmul`，再执行 `dstore`。
+完整 INTT 在最后一个 `pintt` 的软件边界 BR 后还必须加载
+`post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i` 并显式 `pmul`，
+再执行 `dstore`。生成的 raw scale 若全部为 `N^-1`，此表才可简写为
+`N^-1 * psi^-i`。历史 raw reference 包继续按 BR 系数位置准备 pre/post 表。
 
 ### 8.4 RNS 循环
 
@@ -1083,8 +1109,8 @@ BFV Rotation 的预制资源层支持任意预定 RotateRows 步长和 RotateCol
 左移、负向步长和 `k=2N-1` 列交换与系数域 `X->X^k` oracle 对拍；本段只描述资源准备，
 后续 BFV Rotation kernel 负责 canonical PNTT、modified-root PINTT 和 rounded KeySwitch。
 
-生产密钥生成、安全参数选择、随机数接口、其余 BFV planner/codegen 以及噪声预算仍属于
-后续 host runtime/compiler 工作。Encode/Decode 是自包含的功能实现，
+生产密钥生成、安全参数选择、随机数接口与噪声预算管理由 host runtime 负责。
+Encode/Decode 是自包含的功能实现，
 不承担生产参数选择或密文元数据持久化。当前主硬件测试使用确定性零噪声、P 可整除的功能 fixture，必须标记为
 `TEST_VECTOR_SCOPE=FUNCTIONAL_ONLY`。
 
@@ -1170,6 +1196,9 @@ ctest --test-dir build --output-on-failure
 - 组合算子 body 不发 `psync`，只有最外层完整程序在末尾发出一次。
 - NTT stage 0 前显式加载并乘 `pre_twist`；INTT 结束后显式加载并乘
   `post_untwist_scale`。每个 stage 都重新加载该 stage 的 twiddle。
+- 新应用镜像的完整变换以自然系数位置为边界；默认软件 profile 在 PNTT stage 0
+  前、最后 PINTT raw stage 后执行 BR。跨系数域、NTT 域的编译器 workspace 可保持
+  `unspecified` 布局标签，不能只根据 allocation 名称推测内部 stage 排列。
 
 | 槽位 | 当前生成器的常见角色 |
 | --- | --- |
@@ -1226,15 +1255,17 @@ ModDown 的 source context 是 P，target context 是 Q：
 NTT/INTT body 假定数据对象和活动模上下文已由外层准备。独立用例使用 `p0` 作为
 数据、`p1` 作为 twiddle；复合算子使用 `p0` 和 `p3`。
 
-| 顺序 | NTT dload | INTT dload | 使用后动作 |
+| 阶段 | NTT dload | INTT dload | 使用后动作 |
 | --- | --- | --- | --- |
-| 1 | `pre_twist=psi^i` | stage 0 twiddle | `pmul` / `pintt` 后 `pfree twiddle` |
-| 2..logN | 当前 stage twiddle | 后续每个 stage twiddle | 每 stage 后 `pfree twiddle` |
-| 最后 | - | `post_untwist_scale=N^-1*psi^-i` | `pmul` 后 `pfree twiddle` |
+| 变换前 | `pre_twist=psi^i` | - | 显式 `pmul` 后 `pfree twiddle` |
+| 每个 stage 0..logN-1 | 当前 stage twiddle | 当前 stage twiddle | `pntt` / `pintt` 后 `pfree twiddle` |
+| 变换后 | - | `post[i]=raw_inverse.post_scale[BR(i)]*psi^-i` | 最后逆向软件边界 BR 后显式 `pmul`，再 `pfree twiddle` |
 
 每个 stage 都重新执行一次 twiddle `dload`，不会由硬件从上一 stage 自动更新。
 每份 stage 表固定包含 `N/2` 个 `uint32`。数据对象 `p0` 跨 stage 保持同一逻辑
 OBJ_ID，但控制器可按 out-of-place 协议提交新的物理 base。
+上表使用新 builder 的自然系数索引。历史 `test/reference/main.cpp` raw 算子包的
+pre/post 表继续使用 BR 系数位置；软件 profile 的选择不转换这些表或镜像。
 
 CKKS Encode 的 host 顺序是：generator-3 槽位映射、填充共轭半区、复数逆嵌入、
 乘 scale 并舍入为 `int64`。BGV coefficient
@@ -1342,7 +1373,9 @@ DMA 进入 HPU，由软件更新为 `scale_out=scale_a*scale_b/q_last`、
 
 CKKS Rotate 对每个活动 `q_i` 预计算 `psi'=psi^(1/k)` 的 HPU PINTT stage 与
 post-untwist 表。两个 canonical HPU NTT 输入分别执行一次 modified-root INTT 后，
-直接得到 `sigma_k(c0),sigma_k(c1)` 的系数域表示，不需要 CPU 系数置换；随后以
+在新软件契约下经过最后 stage 的边界 BR 和显式 post-PMUL，得到自然系数位置的
+`sigma_k(c0),sigma_k(c1)`。对应表为
+`raw_modified_inverse.post_scale[BR(i)] * (psi')^-i`；随后以
 SEAL Galois key 执行 KeySwitch，并将两个 Q 输出恢复为 canonical HPU NTT。若调度
 器把 fused INTT 与 KeySwitch 拆成两个 kernel，边界只需保留
 `domain=coefficient,key_domain=k`，不需要保存 modified-root NTT 状态。

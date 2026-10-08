@@ -388,7 +388,8 @@ void bind_transform_limb(
     const std::string& data_id,
     int modulus_id,
     std::size_t degree,
-    bool inverse)
+    bool inverse,
+    const std::string& output_id = {})
 {
     bindings.load(0, data_id);
     const std::size_t stages = ntt_stage_count(degree);
@@ -411,7 +412,7 @@ void bind_transform_limb(
                 modulus_id, true, "post_untwist_scale"),
             degree);
     }
-    bindings.store(0, data_id);
+    bindings.store(0, output_id.empty() ? data_id : output_id);
 }
 
 void bind_fused_inverse_limb(
@@ -547,6 +548,16 @@ void bind_keyswitch_core(
     for (int component = 0; component < 2; ++component) {
         const std::string accumulator_role =
             "accumulator/c" + std::to_string(component);
+        // Match the rounded single-P KeySwitch core: add floor(P/2) to QP
+        // scratch in place, never to an imported ciphertext or constant.
+        for (int context : full_contexts) {
+            const auto accumulator = workspace_mod_id(
+                hardware_prefix, accumulator_role, context);
+            bindings.load(0, accumulator);
+            bindings.load(
+                1, hardware_prefix + "/half/mod" + std::to_string(context));
+            bindings.store(0, accumulator);
+        }
         for (std::size_t source_index = 0;
              source_index < layout.p_mod_ids.size(); ++source_index) {
             const int source = layout.p_mod_ids[source_index];
@@ -609,7 +620,7 @@ void bind_relinearize(
     std::size_t degree)
 {
     if (step.inputs.size() != 1 || step.inputs[0].component_count != 3
-        || !step.workspaces.empty()
+        || step.workspaces.size() > 1
         || step.output.component_count != 2
         || step.resources.evaluation_key_ids.size() != 1
         || step.resources.constant_ids.size() != 1
@@ -618,6 +629,7 @@ void bind_relinearize(
             "invalid Relinearize relocation manifest");
     }
     const auto& tensor = step.inputs[0];
+    const auto& coefficients = step.workspaces.empty() ? tensor : step.workspaces.front();
     const auto& layout = level.rns_layout;
     const std::string hardware_prefix =
         step.resources.constant_ids[0] + "/hardware";
@@ -626,17 +638,17 @@ void bind_relinearize(
         for (int context : layout.q_mod_ids) {
             bind_transform_limb(
                 bindings, limb_id(tensor, component, context),
-                context, degree, true);
+                context, degree, true, limb_id(coefficients, component, context));
         }
     }
 
     bind_keyswitch_core(
-        bindings, tensor, 2, tensor, 0, step.output, layout,
+        bindings, coefficients, 2, coefficients, 0, step.output, layout,
         step.resources.evaluation_key_ids[0], hardware_prefix,
         degree, false);
 
     for (int context : layout.q_mod_ids) {
-        bindings.load(0, limb_id(tensor, 1, context));
+        bindings.load(0, limb_id(coefficients, 1, context));
         bindings.load(
             1, workspace_mod_id(
                 hardware_prefix, "accumulator/c1", context));
@@ -715,8 +727,10 @@ void bind_rescale(
     const CkksLevelDescriptor& destination_level,
     std::size_t degree)
 {
-    if (step.inputs.size() != 1 || step.inputs[0].component_count != 2
-        || step.output.component_count != 2
+    if (step.inputs.size() != 1
+        || step.workspaces.size() > 1
+        || (step.inputs[0].component_count != 2 && step.inputs[0].component_count != 3)
+        || step.output.component_count != step.inputs[0].component_count
         || step.resources.constant_ids.size() != 1
         || !step.resources.evaluation_key_ids.empty()
         || !step.resources.requires_canonical_twiddles
@@ -730,6 +744,7 @@ void bind_rescale(
         throw std::invalid_argument("invalid Rescale relocation manifest");
     }
     const auto& input = step.inputs[0];
+    const auto& coefficients = step.workspaces.empty() ? input : step.workspaces.front();
     const auto& source_contexts = source_level.rns_layout.q_mod_ids;
     const auto& destination_contexts =
         destination_level.rns_layout.q_mod_ids;
@@ -737,19 +752,19 @@ void bind_rescale(
     const std::string hardware_prefix =
         step.resources.constant_ids[0] + "/hardware";
 
-    for (std::size_t component = 0; component < 2; ++component) {
+    for (std::size_t component = 0; component < input.component_count; ++component) {
         for (int context : source_contexts) {
             bind_transform_limb(
                 bindings, limb_id(input, component, context),
-                context, degree, true);
+                context, degree, true, limb_id(coefficients, component, context));
         }
     }
 
-    for (std::size_t component = 0; component < 2; ++component) {
+    for (std::size_t component = 0; component < input.component_count; ++component) {
         const std::string rounded_role =
             "rounded/c" + std::to_string(component);
         for (int context : source_contexts) {
-            bindings.load(0, limb_id(input, component, context));
+            bindings.load(0, limb_id(coefficients, component, context));
             bindings.load(
                 1, hardware_prefix + "/half/mod"
                     + std::to_string(context));
@@ -791,7 +806,7 @@ void bind_rescale(
         }
     }
 
-    for (std::size_t component = 0; component < 2; ++component) {
+    for (std::size_t component = 0; component < input.component_count; ++component) {
         for (int context : destination_contexts) {
             bind_transform_limb(
                 bindings, limb_id(step.output, component, context),

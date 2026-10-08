@@ -76,7 +76,7 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
     std::vector<std::uint32_t> pre_twist(degree);
     for (std::size_t index = 0; index < degree; ++index) {
         pre_twist[index] = hpu::model::pow_mod(
-            psi, bit_reverse(index, degree), modulus);
+            psi, index, modulus);
     }
     image.add(prefix + "/ntt/pre_twist", pre_twist,
               hpu::runtime::AllocationKind::twiddle);
@@ -94,9 +94,11 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
     std::vector<std::uint32_t> post(degree);
     for (std::size_t index = 0; index < degree; ++index) {
         const std::uint32_t untwist = hpu::model::pow_mod(
-            inverse_psi, bit_reverse(index, degree), modulus);
+            inverse_psi, index, modulus);
+        // PINTT restores natural coefficient order before the explicit PMUL.
         post[index] = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(inverse.post_scale[index]) * untwist) % modulus);
+            (static_cast<std::uint64_t>(inverse.post_scale[bit_reverse(index, degree)]) *
+             untwist) % modulus);
     }
     image.add(prefix + "/intt/post_untwist_scale", post,
               hpu::runtime::AllocationKind::twiddle);

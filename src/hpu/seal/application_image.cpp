@@ -129,7 +129,7 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
         std::vector<std::uint32_t> pre_twist(degree);
         for (std::size_t position = 0; position < degree; ++position) {
             pre_twist[position] = hpu::model::pow_mod(
-                psi, bit_reverse(position, degree), prepared.modulus);
+                psi, position, prepared.modulus);
         }
         prepared.pre_twist = image_.add(
             prefix + "/ntt/pre_twist", pre_twist,
@@ -155,9 +155,13 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
             psi, prepared.modulus);
         for (std::size_t position = 0; position < degree; ++position) {
             const std::uint32_t untwist = hpu::model::pow_mod(
-                inverse_psi, bit_reverse(position, degree), prepared.modulus);
+                inverse_psi, position, prepared.modulus);
+            // The last inverse stage exposes natural coefficients. Move the
+            // raw stage's lazy-scale factor to that same position before the
+            // explicit post-untwist PMUL consumes this table.
             post[position] = multiply_mod(
-                inverse.post_scale[position], untwist, prepared.modulus);
+                inverse.post_scale[bit_reverse(position, degree)],
+                untwist, prepared.modulus);
         }
         prepared.post_untwist_scale = image_.add(
             prefix + "/intt/post_untwist_scale", post,
@@ -336,6 +340,15 @@ PreparedKeySwitchConstants CkksApplicationImageBuilder::add_keyswitch_constants(
         full_contexts.end(), authoritative.rns_layout.p_mod_ids.begin(),
         authoritative.rns_layout.p_mod_ids.end());
 
+    // The compact KSW1 half-P value is a software record, not a DMA operand.
+    // Rounded hardware ModDown adds its polynomial-sized residue to each
+    // mutable Q/P accumulator before the existing BConv/subtract/divide core.
+    for (int context : full_contexts) {
+        add_constant_polynomial(
+            mod_id(result.hardware_prefix + "/half", context),
+            (p >> 1U) % modulus(context));
+    }
+
     // Generic BConv consumes polynomial-sized scalar objects. Keep these
     // separate from the compact KSW1 record used by the software executor.
     for (std::size_t digit = 0;
@@ -451,8 +464,12 @@ PreparedKeySwitchConstants CkksApplicationImageBuilder::add_keyswitch_constants(
 
 PreparedRescaleConstants CkksApplicationImageBuilder::add_rescale_constants(
     std::string id,
-    const CkksLevelDescriptor& source_level)
+    const CkksLevelDescriptor& source_level,
+    std::size_t component_capacity)
 {
+    if (component_capacity != 2 && component_capacity != 3) {
+        throw std::invalid_argument("CKKS Rescale supports two/three components");
+    }
     constexpr std::uint32_t format_magic = 0x52534331U; // "RSC1"
     const CkksLevelDescriptor& source = require_level(source_level.parms_id);
     if (source.q_moduli.size() < 2
@@ -516,7 +533,7 @@ PreparedRescaleConstants CkksApplicationImageBuilder::add_rescale_constants(
     };
 
     result.hardware_prefix = id + "/hardware";
-    result.hardware_component_capacity = 2;
+    result.hardware_component_capacity = component_capacity;
     const int dropped_id = source.rns_layout.q_mod_ids.back();
     for (std::size_t basis = 0; basis < source.q_moduli.size(); ++basis) {
         add_constant_polynomial(
@@ -641,9 +658,19 @@ CkksApplicationImageBuilder::add_fused_automorphism_twiddles(
                 stage_id(prefix, stage), tables[basis].stages[stage],
                 hpu::runtime::AllocationKind::twiddle, true).span);
         }
+        // The mathematical table generator supplies the raw-stage factor.
+        // The application image ABI places post factors after the inverse
+        // boundary permutation, in natural coefficient order.
+        auto post = tables[basis].post_untwist_scale;
+        for (std::size_t position = 0; position < post.size(); ++position) {
+            const auto reversed = bit_reverse(position, post.size());
+            if (position < reversed) {
+                std::swap(post[position], post[reversed]);
+            }
+        }
         prepared.post_untwist_scale = image_.add(
             prefix + "/post_untwist_scale",
-            tables[basis].post_untwist_scale,
+            post,
             hpu::runtime::AllocationKind::twiddle, true).span;
         result.push_back(std::move(prepared));
     }

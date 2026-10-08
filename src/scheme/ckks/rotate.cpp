@@ -115,8 +115,13 @@ std::string generate_rotate_body_asm(
         N, layout.q_mod_ids, galois_element);
     asm_code
         << "        /* --- Galois KeySwitch: key_domain k -> canonical secret-key domain --- */\n";
-    asm_code << ::generate_hpu_keyswitch_body_asm(
-        N, layout, false, false);
+    // Native SEAL keys use one ordered singleton digit per Q and a single
+    // special prime. Its centered remainder requires rounded ModDown.
+    asm_code << (hpu::is_seal_single_p_rns_decomposition_layout(N, layout)
+        ? ::generate_hpu_rounded_single_p_keyswitch_body_asm(
+            N, layout, false, false)
+        : ::generate_hpu_keyswitch_body_asm(
+            N, layout, false, false));
     asm_code << generate_output_ntt_body_asm(N, layout.q_mod_ids);
 
     if (manage_modulus_table) {

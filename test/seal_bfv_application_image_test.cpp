@@ -93,7 +93,7 @@ void require_fused_automorphism(
     for (const auto& stage : table.inverse_stages) {
         inverse.stages.push_back(span_words(image, stage, degree / 2));
     }
-    inverse.post_scale = span_words(image, table.post_untwist_scale, degree);
+    inverse.set_natural_post_scale(span_words(image, table.post_untwist_scale, degree));
     const auto actual = model.inverse(canonical_ntt, inverse);
     const auto expected =
         hpu::model::automorphism_coefficients(coefficients, galois_element, table.modulus);

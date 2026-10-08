@@ -17,6 +17,31 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 `instruction_execution_verified`、`rtl_verified` 和 `hardware_verified` 在发布方生成的包中
 固定为 `false`。这些字段说明包尚未取得目标执行证据，不影响 IT 开始接入。
 
+Evaluator 前端生成的包还包含 `host_instruction_model` 和 `compiler_resources`。
+默认编译采用 `natural_coefficient_boundaries`，要求 host 逐指令结果与 golden 一致；
+正常生成使用 `hpu_frontend_delivery`。显式诊断目标
+`hpu_frontend_diagnostic_delivery` 才允许导出带指令模型差异记录的联调包。
+诊断包的 `overall_status=pass` 表示必选的 SEAL 与算子软件模型检查通过，
+不能据此声明 host 指令模型通过。接收时同时记录
+`host_instruction_model_verified` 和 `optimization_equivalence_verified`。
+前端的命令及当前验证边界见 [Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
+
+新应用 builder 为三个方案统一保存自然系数位置。完整变换的软件契约见
+[编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)，表 ABI 和迁移
+要求见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
+该契约不声称复现 RTL 每 stage 地址。接收时记录
+`forward_boundary_conversions`、`inverse_boundary_conversions` 及
+`hardware_contract_verified=false`。
+
+`legacy_raw_stage` 用于回放历史 raw 镜像。选择 profile 不修改镜像或指令；
+新自然镜像使用 legacy profile 可能比较失败。
+`test/reference/main.cpp` 的历史固定 profile 算子包仍是 BR 系数镜像，不能套用
+新应用镜像的自然位置表约定。
+
+新包的固定表 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
+回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
+完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
+
 ## 2. 发布方生成步骤
 
 从干净工作区重新配置构建目录。CMake 在配置时记录源码 commit 和工作区状态，因此
@@ -28,6 +53,8 @@ cmake -S . -B build-delivery \
   -DHPU_ENABLE_SEAL_INTEGRATION=ON \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build-delivery -j --target hpu_fhe_delivery
+# 如交接 Evaluator 前端包，使用默认严格目标
+cmake --build build-delivery -j2 --target hpu_frontend_delivery
 ctest --test-dir build-delivery -L application-delivery --output-on-failure
 ```
 
@@ -129,3 +156,5 @@ N=65536 配置也必须完成 oracle 对拍、包校验和目标执行证据。�
 `capacity_lines` 配置内存与目标超时；当前示例会把容量收紧到实际 `used_lines`，
 不再要求目标分配构建时的预留上限。软件生成成功仍不代表平台已支持相应窗口。
 部署包可以单独归档，也可以加入默认八包归档；保存归档 SHA-256 和完整案例清单。
+新自然边界 profile 的 N=65536 结果以当次测试与包报告为准，本文列出生成入口和
+验收要求，不将历史 raw profile 的通过结果视为新 profile 已通过。

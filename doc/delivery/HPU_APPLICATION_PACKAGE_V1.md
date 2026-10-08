@@ -18,6 +18,9 @@ cmake --build build -j --target hpu_ckks_delivery
 cmake --build build -j --target hpu_bfv_delivery
 cmake --build build -j --target hpu_bgv_delivery
 
+# Evaluator 前端使用默认严格验证，不需要诊断选项
+cmake --build build -j2 --target hpu_frontend_delivery
+
 # 独立静态校验器，不会重新执行 SEAL
 ./build/hpu_validate_package outputs/bfv_rotation_application
 ```
@@ -124,7 +127,7 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   恰有一个 golden limb。当前输出包括每个算子的结果；内部 scratch 的每次 dstore
   不一定有独立 golden。`step_<index>` 与计算图中的 `golden_object_id` 相连。
 - BFV golden 为 `coefficient`；CKKS/BGV 为 `canonical_ntt_physical`。
-  所有 word 均为 `[0,q)` 的 residue，文件补零到完整 HPU line。
+  新应用包的系数域使用自然系数位置。所有 word 均为 `[0,q)` 的 residue，文件补零到完整 HPU line。
 - `parameters.json` 保存 N、plain modulus、安全等级、key-context 模数及各 level
   的 `parms_id`、Q 和 chain index。`operation_graph.json` 保存节点、输入引用、
   输出、level、scale/correction factor。节点的 `operation_index` 从 0 连续编号，
@@ -140,6 +143,56 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
 入口，再按 golden 清单读回对应 span，比较有效 word 和补齐区域。
 `.inst32`/`.cmd26` 本身不携带完整 CPU DMA sideband，也不是 ELF/BIN；可执行运行
 需要使用 C wrapper 中的 span 设置，或等效实现 resolved DMA 清单。
+
+### 新应用镜像的 NTT 表与软件边界
+
+BFV、CKKS、BGV 的新 builder 使用相同的自然系数表约定：
+
+```text
+pre_twist[i] = psi^i mod q
+post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i mod q
+```
+
+`i` 为自然系数位置，`raw_inverse.post_scale` 已包含 lazy scale 抵消和 `N^-1`。
+modified-root INTT 使用该 root 的 raw inverse 表，并以 modified psi 代替 psi。
+各 stage 的 `N/2` 个 twiddle word 始终按 loader batch、batch 内 BF lane 顺序
+准备，不对 stage 表做 BR。NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
+
+Evaluator 前端默认的 `InstructionNttContract::natural_coefficient_boundaries` 在
+PNTT stage 0 的 raw stage 前做数学边界 BR，在最后 PINTT raw stage 后做数学边界
+BR；pre-twist 和 post-PMUL 仍显式执行。这是完整变换的功能软件契约，不声称复现
+RTL 每 stage 的地址。两个软件转换次数分别记录为
+`forward_boundary_conversions`、`inverse_boundary_conversions`，
+`hardware_contract_verified` 继续为 false。
+
+`legacy_raw_stage` 可回放历史 raw 镜像。选择 profile 不修改数据、DMA 或指令，
+新自然镜像使用 legacy profile 可能
+比较失败。历史 `test/reference/main.cpp` 固定 profile 算子包仍使用 BR 系数镜像，
+其布局不因应用包的新约定而改变；该 raw 算子包也不属于本页的新应用镜像协议。
+
+新应用包的 `metadata/parameters.json` 记录固定的表 ABI：
+
+```json
+{
+  "ntt_table_abi": {
+    "version": 1,
+    "coefficient_order": "natural",
+    "pre_twist_order": "natural",
+    "post_factor_order": "natural",
+    "stage_twiddle_order": "reference_loader_batch_lane",
+    "canonical_ntt_layout": "reference_forward_layout",
+    "normalization": "explicit_post_pmul",
+    "twist_fused": false
+  }
+}
+```
+
+该对象描述 builder 生成的实际镜像，与回放时选择的 `ntt_contract` 分别记录；
+选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
+schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，应按原生成版本和
+镜像约定回放。迁移到新自然边界时应重新生成完整应用包，包括镜像、golden、元数据
+和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。旧 raw 算子包可以保留
+用于旧契约回归，不将其文件混入新生成的自然镜像包。
 
 ## 验证依据
 
@@ -161,6 +214,11 @@ RNS limb 与 SEAL oracle 转换后的 HPU 物理 word 比较。报告中的 `mod
 `raw_physical_words_equal` 均为 `true`。新程序应读取 `checks` 数组中的
 `name/required/status`。`host_software_model_to_oracle` 也是必选检查
 （`required=true`）；任一逐 word 比较失败都会停止生成交付包。
+
+Evaluator 前端还记录 `host_instruction_model` 和资源优化前后的一致性比较。
+默认严格编译要求最终编码指令的软件回放与 golden 一致；显式诊断模式才允许保存
+带失败记录的指令模型报告。实际通过规模以当次日志和包内报告为准，不能沿用旧
+raw profile 或旧镜像的测试结果来声明新自然边界契约通过。
 
 所有包都记录 `instruction_execution_verified=false`、`rtl_verified=false`、
 `hardware_verified=false`。软件数学模型逐字通过不代表编码指令已经在 RTL/HPU 上执行。

@@ -10,16 +10,6 @@
 namespace hpu::seal_adapter {
 namespace {
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::uint32_t add_mod(std::uint32_t left, std::uint32_t right, std::uint32_t modulus)
 {
     const std::uint64_t sum = static_cast<std::uint64_t>(left) + right;
@@ -163,7 +153,7 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
         for (const auto& span : prepared.inverse_stages) {
             inverse_tables.stages.push_back(memory_.read(span, degree / 2));
         }
-        inverse_tables.post_scale = memory_.read(prepared.post_untwist_scale, degree);
+        inverse_tables.set_natural_post_scale(memory_.read(prepared.post_untwist_scale, degree));
         return model.inverse(words, inverse_tables);
     }
 
@@ -179,7 +169,7 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
             throw std::invalid_argument("BFV transform input is not reduced modulo q");
         }
         coefficients[index] =
-            multiply_mod(coefficients[index], pre_twist[bit_reverse(index, degree)], modulus);
+            multiply_mod(coefficients[index], pre_twist[index], modulus);
     }
     return model.forward(coefficients, forward_tables);
 }
@@ -756,7 +746,7 @@ void BfvSoftwareExecutor::rotate(
             for (const auto& span : fused.inverse_stages) {
                 inverse_tables.stages.push_back(memory_.read(span, degree / 2));
             }
-            inverse_tables.post_scale = memory_.read(fused.post_untwist_scale, degree);
+            inverse_tables.set_natural_post_scale(memory_.read(fused.post_untwist_scale, degree));
             memory_.write(workspace.limbs[basis], model.inverse(transformed, inverse_tables));
         }
     }

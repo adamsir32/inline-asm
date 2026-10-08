@@ -302,8 +302,19 @@ PreparedRnsObject CkksOperationPlan::append_relinearize(
     const PreparedKeySwitchConstants& constants,
     std::string output_id)
 {
+    return append_relinearize(std::move(step_id), tensor, evaluation_key,
+        constants, std::move(output_id), nullptr);
+}
+
+PreparedRnsObject CkksOperationPlan::append_relinearize(
+    std::string step_id, const PreparedRnsObject& tensor,
+    const PreparedEvaluationKey& evaluation_key,
+    const PreparedKeySwitchConstants& constants, std::string output_id,
+    const PreparedRnsObject* coefficient_workspace)
+{
     require_new_step(step_id);
     validate_value(tensor, 3, "CKKS Relinearize input");
+    if (coefficient_workspace) validate_coefficient_workspace(tensor, *coefficient_workspace);
     require_resource_id(evaluation_key.id, "CKKS Relinearize evaluation key");
     if (evaluation_key.data_parms_id != tensor.parms_id
         || evaluation_key.chain_index != tensor.chain_index
@@ -335,6 +346,7 @@ PreparedRnsObject CkksOperationPlan::append_relinearize(
     step.id = std::move(step_id);
     step.kind = CkksOperationKind::relinearize;
     step.inputs = {describe(tensor)};
+    if (coefficient_workspace) step.workspaces = {describe(*coefficient_workspace)};
     step.output = describe(output);
     step.resources.requires_canonical_twiddles = true;
     step.resources.evaluation_key_ids = {evaluation_key.id};
@@ -349,11 +361,20 @@ PreparedRnsObject CkksOperationPlan::append_rescale(
     const PreparedRescaleConstants& constants,
     std::string output_id)
 {
+    return append_rescale(std::move(step_id), input, constants, std::move(output_id), nullptr);
+}
+
+PreparedRnsObject CkksOperationPlan::append_rescale(
+    std::string step_id, const PreparedRnsObject& input,
+    const PreparedRescaleConstants& constants, std::string output_id,
+    const PreparedRnsObject* coefficient_workspace)
+{
     require_new_step(step_id);
     if (input.components.empty()) {
         throw std::invalid_argument("CKKS Rescale input has no components");
     }
     validate_value(input, input.components.size(), "CKKS Rescale input");
+    if (coefficient_workspace) validate_coefficient_workspace(input, *coefficient_workspace);
     const auto output_metadata = infer_ckks_rescale_metadata(
         image_builder_.level_chain(), input.metadata());
     if (constants.source_parms_id != input.parms_id
@@ -380,6 +401,7 @@ PreparedRnsObject CkksOperationPlan::append_rescale(
     step.id = std::move(step_id);
     step.kind = CkksOperationKind::rescale;
     step.inputs = {describe(input)};
+    if (coefficient_workspace) step.workspaces = {describe(*coefficient_workspace)};
     step.output = describe(output);
     step.resources.requires_canonical_twiddles = true;
     step.resources.constant_ids = {constants.id};
@@ -659,6 +681,23 @@ void CkksOperationPlan::validate_value(
 {
     validate_value_representation(
         object, component_count, canonical_domain, 1, role);
+}
+
+void CkksOperationPlan::validate_coefficient_workspace(
+    const PreparedRnsObject& input, const PreparedRnsObject& workspace) const
+{
+    validate_value_representation(workspace, input.components.size(),
+        hpu::runtime::PolynomialDomain::coefficient, 1, "CKKS coefficient workspace");
+    require_ckks_metadata_matches(image_builder_.level_chain(), input.metadata(),
+        workspace.metadata(), "CKKS coefficient workspace");
+    for (const auto& component : workspace.components) {
+        for (auto modulus : component.modulus_ids) {
+            const auto& allocation = image_builder_.image().allocation(
+                component.id + "/mod" + std::to_string(modulus));
+            if (allocation.read_only || allocation.kind != hpu::runtime::AllocationKind::workspace)
+                throw std::invalid_argument("CKKS coefficient workspace must use mutable scratch allocations");
+        }
+    }
 }
 
 void CkksOperationPlan::validate_value_representation(

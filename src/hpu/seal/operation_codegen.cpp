@@ -59,6 +59,21 @@ void require_resource_ids(
     }
 }
 
+void require_coefficient_workspace(
+    const CkksOperationStep& step, const CkksLevelChain& levels,
+    std::size_t components)
+{
+    if (step.workspaces.empty()) return;
+    if (step.workspaces.size() != 1)
+        throw std::invalid_argument("planned CKKS operation has too many coefficient workspaces");
+    const auto& workspace = step.workspaces.front();
+    if (workspace.id.empty() || workspace.component_count != components ||
+        workspace.domain != hpu::runtime::PolynomialDomain::coefficient || workspace.key_domain != 1)
+        throw std::invalid_argument("planned CKKS coefficient workspace has an incompatible representation");
+    require_ckks_metadata_matches(levels, step.inputs.front().metadata,
+        workspace.metadata, "planned CKKS coefficient workspace");
+}
+
 std::string lower_step(
     const CkksOperationStep& step,
     const CkksLevelChain& level_chain,
@@ -192,6 +207,7 @@ std::string lower_step(
         require_value_shape(
             level_chain, step.inputs.front(), 3,
             "planned CKKS Relinearize input");
+        require_coefficient_workspace(step, level_chain, 3);
         require_value_shape(
             level_chain, step.output, 2,
             "planned CKKS Relinearize output");
@@ -222,6 +238,7 @@ std::string lower_step(
         require_value_shape(
             level_chain, step.inputs.front(), components,
             "planned CKKS Rescale input");
+        require_coefficient_workspace(step, level_chain, components);
         require_value_shape(
             level_chain, step.output, components,
             "planned CKKS Rescale output");
@@ -230,14 +247,15 @@ std::string lower_step(
             infer_ckks_rescale_metadata(
                 level_chain, step.inputs.front().metadata),
             step.output.metadata, "planned CKKS Rescale output");
-        if (components != 2) {
+        if (components != 2 && components != 3) {
             throw std::invalid_argument(
-                "standalone CKKS Rescale codegen currently requires two components");
+                "standalone CKKS Rescale codegen requires two/three components");
         }
         const auto& level = level_chain.require(
             step.inputs.front().metadata.parms_id);
         return hpu::scheme::ckks::generate_rescale_ntt_body_asm(
-            degree, static_cast<int>(level.q_moduli.size()), false, false);
+            degree, static_cast<int>(level.q_moduli.size()),
+            static_cast<int>(components), false, false);
     }
     case CkksOperationKind::add_plain:
     case CkksOperationKind::subtract_plain: {

@@ -48,11 +48,13 @@ endif()
 
 add_library(hpu_hardware_model STATIC
         src/hpu/model/hardware_ntt.cpp
+        src/hpu/model/instruction_executor.cpp
 )
 target_include_directories(hpu_hardware_model
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_link_libraries(hpu_hardware_model PUBLIC hpu_encode hpu_runtime_core)
 
 add_library(hpu_runtime_core STATIC
         src/hpu/runtime/application.cpp
@@ -63,6 +65,10 @@ target_include_directories(hpu_runtime_core
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+add_library(hpu_compiler_core STATIC src/hpu/compiler/resource_ir.cpp)
+target_include_directories(hpu_compiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(hpu_compiler_core PUBLIC hpu_runtime_core hpu_encode)
 
 add_library(hpu_delivery_core STATIC
         src/hpu/delivery/checksum.cpp
@@ -148,6 +154,12 @@ target_link_libraries(inline_asm_codegen
 
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
+    add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
+    target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core)
+    add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)
+    add_executable(hpu_instruction_executor_test test/instruction_executor_test.cpp)
+    target_link_libraries(hpu_instruction_executor_test PRIVATE hpu_hardware_model hpu_runtime_core)
+    add_test(NAME hpu_instruction_executor_test COMMAND hpu_instruction_executor_test)
     add_executable(delivery_io_test test/delivery_io_test.cpp)
     target_link_libraries(delivery_io_test PRIVATE hpu_delivery_core Threads::Threads)
     add_test(NAME delivery_io_test COMMAND delivery_io_test)
@@ -385,6 +397,8 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     )
 
     add_library(hpu_seal_ckks_codegen STATIC
+            src/hpu/seal/evaluator.cpp
+            src/hpu/seal/frontend_package.cpp
             src/hpu/seal/bgv_arithmetic_application.cpp
             src/hpu/seal/bgv_operation_plan.cpp
             src/hpu/seal/bgv_keyswitch_application.cpp
@@ -410,8 +424,15 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             hpu_fhe_codegen
             hpu_filesystem_compat
             hpu_delivery_core
+            hpu_compiler_core
     )
     add_library(hpu_seal_delivery ALIAS hpu_seal_ckks_codegen)
+
+    foreach(frontend_scheme ckks bfv bgv)
+        add_executable(hpu_${frontend_scheme}_evaluator_example
+            examples/${frontend_scheme}_evaluator_application.cpp)
+        target_link_libraries(hpu_${frontend_scheme}_evaluator_example PRIVATE hpu_seal_delivery)
+    endforeach()
 
     add_executable(hpu_ckks_polynomial_example
             examples/ckks_polynomial_x2_plus_one.cpp
@@ -496,6 +517,10 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     add_custom_target(hpu_bgv_delivery)
     add_custom_target(hpu_fhe_delivery)
     add_custom_target(hpu_fhe_deployment_delivery)
+    add_custom_target(hpu_frontend_delivery)
+    add_custom_target(hpu_frontend_deployment_delivery)
+    add_custom_target(hpu_frontend_diagnostic_delivery)
+    add_custom_target(hpu_frontend_deployment_diagnostic_delivery)
     add_dependencies(hpu_fhe_deployment_delivery ckks_polynomial_x2_plus_one_delivery)
     add_dependencies(hpu_fhe_delivery hpu_ckks_delivery hpu_bfv_delivery hpu_bgv_delivery)
     function(hpu_application_delivery scheme case_name example)
@@ -552,7 +577,62 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     hpu_application_delivery(bgv bgv_multiply_chain_n65536 hpu_bgv_multiply_chain_example 65536)
     hpu_application_delivery(bgv bgv_composed_application_n65536 hpu_bgv_composed_application_example 65536)
 
+    foreach(frontend_scheme ckks bfv bgv)
+        foreach(frontend_degree 128 65536)
+            set(frontend_case ${frontend_scheme}_evaluator_application)
+            set(frontend_group hpu_frontend)
+            if(frontend_degree EQUAL 65536)
+                string(APPEND frontend_case _n65536)
+                string(APPEND frontend_group _deployment)
+            endif()
+            foreach(frontend_mode strict diagnostic)
+                set(frontend_target ${frontend_case}_delivery)
+                set(frontend_output ${frontend_case})
+                set(frontend_args)
+                if(frontend_mode STREQUAL diagnostic)
+                    set(frontend_target ${frontend_case}_diagnostic_delivery)
+                    string(APPEND frontend_output _diagnostic)
+                    set(frontend_args --example-arg=--allow-unverified-instruction-model)
+                endif()
+                add_custom_target(${frontend_target}
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_application_package.py
+                        --example $<TARGET_FILE:hpu_${frontend_scheme}_evaluator_example>
+                        --validator $<TARGET_FILE:hpu_validate_package>
+                        --output ${HPU_APPLICATION_OUTPUT_ROOT}/${frontend_output}
+                        --example-arg=--degree --example-arg=${frontend_degree} ${frontend_args}
+                    DEPENDS hpu_${frontend_scheme}_evaluator_example hpu_validate_package
+                    COMMENT "Generating ${frontend_mode} frontend package: ${frontend_output}"
+                    VERBATIM)
+                if(frontend_mode STREQUAL diagnostic)
+                    add_dependencies(${frontend_group}_diagnostic_delivery ${frontend_target})
+                else()
+                    add_dependencies(${frontend_group}_delivery ${frontend_target})
+                endif()
+            endforeach()
+            if(BUILD_TESTING AND (frontend_degree EQUAL 128 OR HPU_ENABLE_DEPLOYMENT_APPLICATION_TESTS))
+                add_test(NAME ${frontend_case}_strict_delivery_test
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/application_delivery_test.py
+                        $<TARGET_FILE:hpu_${frontend_scheme}_evaluator_example> $<TARGET_FILE:hpu_validate_package>
+                        ${frontend_scheme} --degree ${frontend_degree})
+                set_tests_properties(${frontend_case}_strict_delivery_test PROPERTIES LABELS "application-delivery;frontend")
+            endif()
+        endforeach()
+    endforeach()
+
     if(BUILD_TESTING)
+        add_executable(hpu_seal_evaluator_test test/seal_evaluator_test.cpp)
+        target_link_libraries(hpu_seal_evaluator_test PRIVATE hpu_seal_delivery)
+        add_test(NAME hpu_seal_evaluator_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/seal_evaluator_package_test.py
+                $<TARGET_FILE:hpu_seal_evaluator_test> $<TARGET_FILE:hpu_validate_package>)
+        add_executable(hpu_seal_evaluator_coverage_test test/seal_evaluator_coverage_test.cpp)
+        target_link_libraries(hpu_seal_evaluator_coverage_test PRIVATE hpu_seal_delivery)
+        add_test(NAME hpu_seal_evaluator_coverage_test COMMAND hpu_seal_evaluator_coverage_test)
+        add_executable(hpu_seal_ckks_keyswitch_instruction_test
+            test/seal_ckks_keyswitch_instruction_test.cpp)
+        target_link_libraries(hpu_seal_ckks_keyswitch_instruction_test PRIVATE hpu_seal_ckks_codegen)
+        add_test(NAME hpu_seal_ckks_keyswitch_instruction_test
+            COMMAND hpu_seal_ckks_keyswitch_instruction_test)
         add_executable(hpu_seal_bgv_operation_plan_test test/seal_bgv_operation_plan_test.cpp)
         target_link_libraries(hpu_seal_bgv_operation_plan_test PRIVATE hpu_seal_delivery)
         add_test(NAME hpu_seal_bgv_operation_plan_test COMMAND hpu_seal_bgv_operation_plan_test)

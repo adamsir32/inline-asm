@@ -560,7 +560,7 @@ CkksRelocationSchedule schedule = build_ckks_relocation_schedule(
 - resolver 会解析实际生成的 assembly，并逐条核对方向、对象槽、load type/bank
   flag 或 store release；codegen 和 relocation 配方发生漂移时立即报错。
 - 当前模表及所有 planner operation 均已完整解析。Relinearize 覆盖前后
-  NTT/INTT twiddle、逐 digit ModUp、evaluation-key 乘加、P→Q ModDown、base merge
+  NTT/INTT twiddle、逐 digit ModUp、evaluation-key 乘加、带 half-P 加法的 single-P 舍入 ModDown、base merge
   及所有 workspace；Rescale 覆盖 half、单源 BConv、inverse、跨 level 输出及前后
   transform；Rotate/Conjugate 覆盖 fused INTT、coefficient workspace、Galois key、
   KeySwitch workspace 和输出 NTT。由标准 image builder 构造的计划满足
@@ -807,7 +807,7 @@ std::string generate_ciphertext_multiply_body_asm(
 ```
 
 - 该入口组合 comparison-free/no-SMRQ BEHZ、branchless-SK 与 BFV rounded single-P
-  Relinearization；不使用 generic CKKS ModDown 语义。
+  Relinearization；不使用 generic 非舍入 ModDown 语义。SEAL CKKS single-P 路径也采用带舍入 ModDown。
 - Q/P/B/`m_sk`/t 全部使用调用者提供的全局 MOD_ID，允许降 level 后 P 和辅助基不重编号；
   重复、越界、非 singleton-Q digit、multi-P 或不足的 B 基会被拒绝。
 - `manage_modulus_table=true` 时整个融合流只装载/释放一次 small-bank 模表；嵌入更大

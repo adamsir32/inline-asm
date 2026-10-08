@@ -96,8 +96,16 @@ std::string generate_rescale_ntt_body_asm(
     bool append_psync,
     bool manage_modulus_table)
 {
+    return generate_rescale_ntt_body_asm(N, num_q, 2, append_psync, manage_modulus_table);
+}
+
+std::string generate_rescale_ntt_body_asm(
+    int N, int num_q, int num_components,
+    bool append_psync, bool manage_modulus_table)
+{
     std::ostringstream asm_code;
-    if (!valid_rescale_config(num_q, 2) || !hpu::is_valid_ntt_size(N)) {
+    if (!valid_rescale_config(num_q, num_components) ||
+        (num_components != 2 && num_components != 3) || !hpu::is_valid_ntt_size(N)) {
         asm_code << "        /* Invalid SEAL-facing CKKS Rescale config */\n";
         return asm_code.str();
     }
@@ -112,12 +120,14 @@ std::string generate_rescale_ntt_body_asm(
             hpu::DloadFlag::small_bank);
     }
     asm_code << transform_components(
-        N, num_q, 2, true,
-        "Input c0/c1: canonical HPU NTT -> coefficient domain");
-    asm_code << generate_rescale_body_asm(num_q, 2, false, false);
+        N, num_q, num_components, true,
+        num_components == 2 ? "Input c0/c1: canonical HPU NTT -> coefficient domain"
+                            : "Input c0/c1/c2: canonical HPU NTT -> coefficient domain");
+    asm_code << generate_rescale_body_asm(num_q, num_components, false, false);
     asm_code << transform_components(
-        N, num_q - 1, 2, false,
-        "Rescaled c0/c1: coefficient domain -> canonical HPU NTT");
+        N, num_q - 1, num_components, false,
+        num_components == 2 ? "Rescaled c0/c1: coefficient domain -> canonical HPU NTT"
+                            : "Rescaled c0/c1/c2: coefficient domain -> canonical HPU NTT");
     if (manage_modulus_table) {
         asm_code << hpu::pfree(modulus_table_object);
     }

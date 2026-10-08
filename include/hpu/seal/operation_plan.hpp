@@ -89,11 +89,21 @@ public:
         const PreparedEvaluationKey& evaluation_key,
         const PreparedKeySwitchConstants& constants,
         std::string output_id);
+    // Optional coefficient workspace preserves the canonical input snapshot.
+    PreparedRnsObject append_relinearize(
+        std::string step_id, const PreparedRnsObject& tensor,
+        const PreparedEvaluationKey& evaluation_key,
+        const PreparedKeySwitchConstants& constants, std::string output_id,
+        const PreparedRnsObject* coefficient_workspace);
     PreparedRnsObject append_rescale(
         std::string step_id,
         const PreparedRnsObject& input,
         const PreparedRescaleConstants& constants,
         std::string output_id);
+    PreparedRnsObject append_rescale(
+        std::string step_id, const PreparedRnsObject& input,
+        const PreparedRescaleConstants& constants, std::string output_id,
+        const PreparedRnsObject* coefficient_workspace);
     PreparedRnsObject append_add_plain(
         std::string step_id,
         const PreparedRnsObject& ciphertext,
@@ -151,6 +161,9 @@ private:
         hpu::runtime::PolynomialDomain domain,
         std::uint64_t key_domain,
         const char* role) const;
+    void validate_coefficient_workspace(
+        const PreparedRnsObject& input,
+        const PreparedRnsObject& workspace) const;
     PreparedRnsObject append_galois(
         CkksOperationKind kind,
         std::string step_id,

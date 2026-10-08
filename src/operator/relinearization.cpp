@@ -42,11 +42,10 @@ std::string generate_add_second_component_body_asm(
     return asm_code.str();
 }
 
-} // namespace
-
-std::string generate_hpu_relinearization_body_asm(
+std::string generate_relinearization_body_asm_impl(
     int N,
     const hpu::RnsDecompositionLayout& layout,
+    bool rounded_single_p,
     bool append_psync,
     bool manage_modulus_table)
 {
@@ -56,11 +55,19 @@ std::string generate_hpu_relinearization_body_asm(
         asm_code << "        // Invalid explicit Relinearization RNS layout\n";
         return asm_code.str();
     }
+    if (rounded_single_p
+        && !hpu::is_seal_single_p_rns_decomposition_layout(N, layout)) {
+        asm_code << "        // Invalid SEAL single-P Relinearization layout: require one P and one ordered singleton digit per active Q\n";
+        return asm_code.str();
+    }
 
     asm_code << "        /* --- Relinearization: KeySwitch(t2, rlk) with base=t0 --- */\n";
     asm_code << "        /* KeySwitch(base=t0, switching_component=t2) -> (t0 + ks0, ks1) */\n";
-    asm_code << generate_hpu_keyswitch_body_asm(
-        N, layout, false, manage_modulus_table);
+    asm_code << (rounded_single_p
+        ? generate_hpu_rounded_single_p_keyswitch_body_asm(
+            N, layout, false, manage_modulus_table)
+        : generate_hpu_keyswitch_body_asm(
+            N, layout, false, manage_modulus_table));
     asm_code << "        /* --- Compose final ciphertext: out0=t0+ks0, out1=t1+ks1 --- */\n";
     asm_code << generate_add_second_component_body_asm(
         layout.q_mod_ids, manage_modulus_table);
@@ -70,6 +77,28 @@ std::string generate_hpu_relinearization_body_asm(
     }
 
     return asm_code.str();
+}
+
+} // namespace
+
+std::string generate_hpu_relinearization_body_asm(
+    int N,
+    const hpu::RnsDecompositionLayout& layout,
+    bool append_psync,
+    bool manage_modulus_table)
+{
+    return generate_relinearization_body_asm_impl(
+        N, layout, false, append_psync, manage_modulus_table);
+}
+
+std::string generate_hpu_rounded_single_p_relinearization_body_asm(
+    int N,
+    const hpu::RnsDecompositionLayout& layout,
+    bool append_psync,
+    bool manage_modulus_table)
+{
+    return generate_relinearization_body_asm_impl(
+        N, layout, true, append_psync, manage_modulus_table);
 }
 
 std::string generate_hpu_bfv_relinearization_body_asm(

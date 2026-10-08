@@ -54,18 +54,32 @@ defaults unless these options are requested.
 - physical NTT layout after every P network;
 - data-independent lazy inverse scale tags.
 
-The raw increasing-m DIT hardware schedule consumes coefficients in bit-reversed
+The raw increasing-m DIT software stage model consumes coefficients in bit-reversed
 memory order. `HardwareNttModel::forward` and `inverse` expose a mathematical
 API, so they explicitly convert between normal coefficient order and that
-hardware boundary order. The test suite compares the physical result, after the
+reference memory order. The test suite compares the physical result, after the
 reported P-network layout permutation, with an independent mathematical NTT and
 checks `NTT(delta_1)[k] = omega^k`; round-trip alone is not accepted as proof of
 NTT correctness.
 
-The inverse stage tables contain `w_bf = alpha / beta`. The final pointwise
-factor is not merely `N^-1`: it is `lazy_scale[position]^-1 * N^-1`, followed by
-the CKKS inverse twist. The hardware package generator now emits the combined
-factor.
+This legacy reference contract does not specify the full controller address
+mapping for natural-input PNTT. The application boundary and independent CKKS
+KeySwitch rounding issues were repaired; their causes and software validation
+are recorded in [the dated NTT audit](../audits/HPU_NTT_CONTRACT_AUDIT_2026-10.md).
+
+New application images for all three schemes use natural coefficient
+boundaries and natural-indexed pre/post factors. The default instruction replay
+contract is `natural_coefficient_boundaries`: it adapts the reference stages at
+forward entry and inverse exit, while twist and normalization remain explicit
+PMULs. `InverseNttTables::set_natural_post_scale` adapts application post factors
+for this mathematical inverse API. Stage tables and canonical NTT physical
+layout retain the reference convention. These are functional software
+boundaries; per-stage RTL address and timing equivalence is a separate check.
+
+The inverse stage tables contain `w_bf = alpha / beta`. Application images
+include scale cancellation, normalization and untwist in the explicit natural
+post-PMUL factor. Its exact indexing and the legacy raw convention are specified
+in [the programming manual](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令).
 
 The model also implements both modified-root automorphism identities from
 `toy_fhe_auto.py`. Both APIs return the canonical HPU NTT physical domain. The

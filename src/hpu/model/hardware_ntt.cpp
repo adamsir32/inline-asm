@@ -90,6 +90,26 @@ void store_batch(
     }
 }
 
+std::vector<NttBatch> make_stage_batches(
+    std::size_t degree, std::size_t forward_stage)
+{
+    const std::size_t m = std::size_t{1} << forward_stage;
+    std::vector<NttBatch> batches;
+    batches.reserve(degree / kArrayWidth);
+    if (m < kArrayWidth) {
+        for (std::size_t base = 0; base < degree; base += kArrayWidth) {
+            batches.push_back({false, base, base + kButterflyCount});
+        }
+    } else {
+        for (std::size_t group = 0; group < degree; group += 2 * m) {
+            for (std::size_t offset = 0; offset < m; offset += kButterflyCount) {
+                batches.push_back({true, group + offset, group + m + offset});
+            }
+        }
+    }
+    return batches;
+}
+
 std::uint64_t inverse_mod_small(std::uint64_t value, std::uint64_t modulus)
 {
     // This helper is used only for odd Galois elements modulo 2N <= 131072.
@@ -158,6 +178,18 @@ std::uint32_t inverse_mod_prime(std::uint32_t value, std::uint32_t modulus)
     return pow_mod(value, static_cast<std::uint64_t>(modulus) - 2U, modulus);
 }
 
+void InverseNttTables::set_natural_post_scale(std::vector<std::uint32_t> factors)
+{
+    const auto degree = factors.size();
+    if (degree < kArrayWidth || degree > kMaxDegree || (degree & (degree - 1)) != 0)
+        throw std::invalid_argument("natural inverse post factor has invalid degree");
+    for (std::size_t position = 0; position < degree; ++position) {
+        const auto reversed = bit_reverse(position, degree);
+        if (position < reversed) std::swap(factors[position], factors[reversed]);
+    }
+    post_scale = std::move(factors);
+}
+
 HardwareNttModel::HardwareNttModel(
     std::size_t degree,
     std::uint32_t modulus,
@@ -181,26 +213,55 @@ std::uint32_t HardwareNttModel::modulus() const noexcept { return modulus_; }
 std::uint32_t HardwareNttModel::omega() const noexcept { return omega_; }
 std::size_t HardwareNttModel::log_degree() const noexcept { return log_degree_; }
 
+std::vector<std::uint32_t> execute_ntt_stage(
+    const std::vector<std::uint32_t>& input,
+    const std::vector<std::uint32_t>& stage_twiddles,
+    std::uint32_t modulus,
+    std::size_t stage,
+    bool inverse)
+{
+    const std::size_t degree = input.size();
+    if (degree < kArrayWidth || degree > kMaxDegree || (degree & (degree - 1)) != 0
+        || modulus < 3) {
+        throw std::invalid_argument("invalid raw NTT stage degree/modulus");
+    }
+    std::size_t log_degree = 0;
+    for (std::size_t length = degree; length > 1; length >>= 1U) ++log_degree;
+    if (stage >= log_degree || stage_twiddles.size() != degree / 2
+        || std::any_of(input.begin(), input.end(),
+            [&](std::uint32_t value) { return value >= modulus; })
+        || std::any_of(stage_twiddles.begin(), stage_twiddles.end(),
+            [&](std::uint32_t value) { return value >= modulus; })) {
+        throw std::invalid_argument("invalid raw NTT stage index/payload");
+    }
+    const std::size_t forward_stage = inverse ? log_degree - 1 - stage : stage;
+    const auto batches = make_stage_batches(degree, forward_stage);
+    auto values = input;
+    std::size_t twiddle = 0;
+    for (const auto& batch : batches) {
+        auto loaded = load_batch(values, batch);
+        if (inverse) loaded.first = apply_p(loaded.first, 6);
+        for (std::size_t lane = 0; lane < kButterflyCount; ++lane) {
+            const std::size_t even = 2 * lane;
+            const std::size_t odd = even + 1;
+            const std::uint32_t a = loaded.first[even];
+            const std::uint32_t product = mul_mod(
+                loaded.first[odd], stage_twiddles[twiddle++], modulus);
+            loaded.first[even] = add_mod(a, product, modulus);
+            loaded.first[odd] = sub_mod(a, product, modulus);
+        }
+        if (!inverse) loaded.first = apply_p(loaded.first);
+        store_batch(values, loaded.first, loaded.second);
+    }
+    return values;
+}
+
 std::vector<NttBatch> HardwareNttModel::stage_batches(std::size_t forward_stage) const
 {
     if (forward_stage >= log_degree_) {
         throw std::out_of_range("NTT stage is outside log2(N)");
     }
-    const std::size_t m = std::size_t{1} << forward_stage;
-    std::vector<NttBatch> batches;
-    batches.reserve(degree_ / kArrayWidth);
-    if (m < kArrayWidth) {
-        for (std::size_t base = 0; base < degree_; base += kArrayWidth) {
-            batches.push_back({false, base, base + kButterflyCount});
-        }
-    } else {
-        for (std::size_t group = 0; group < degree_; group += 2 * m) {
-            for (std::size_t offset = 0; offset < m; offset += kButterflyCount) {
-                batches.push_back({true, group + offset, group + m + offset});
-            }
-        }
-    }
-    return batches;
+    return make_stage_batches(degree_, forward_stage);
 }
 
 std::vector<std::size_t> HardwareNttModel::forward_layout() const
@@ -329,13 +390,10 @@ std::vector<std::uint32_t> HardwareNttModel::forward(
     for (std::size_t position = 0; position < degree_; ++position) {
         values[position] = coefficients[bit_reverse(position, degree_)];
     }
-    std::vector<std::size_t> labels(degree_);
-    std::iota(labels.begin(), labels.end(), 0);
     for (std::size_t stage = 0; stage < log_degree_; ++stage) {
         std::size_t twiddle = 0;
         for (const NttBatch& batch : stage_batches(stage)) {
             auto loaded_values = load_batch(values, batch);
-            auto loaded_labels = load_batch(labels, batch);
             for (std::size_t lane = 0; lane < kButterflyCount; ++lane) {
                 const std::size_t even = 2 * lane;
                 const std::size_t odd = even + 1;
@@ -346,9 +404,7 @@ std::vector<std::uint32_t> HardwareNttModel::forward(
                 loaded_values.first[odd] = sub_mod(a, product, modulus_);
             }
             loaded_values.first = apply_p(loaded_values.first);
-            loaded_labels.first = apply_p(loaded_labels.first);
             store_batch(values, loaded_values.first, loaded_values.second);
-            store_batch(labels, loaded_labels.first, loaded_labels.second);
         }
     }
     return values;

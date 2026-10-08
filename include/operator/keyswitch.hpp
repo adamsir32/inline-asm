@@ -12,6 +12,16 @@ std::string generate_hpu_keyswitch_body_asm(
     bool append_psync = false,
     bool manage_modulus_table = true);
 
+// SEAL singleton-digit KeySwitch with rounded single-P ModDown. The core
+// accepts coefficient-domain inputs and returns coefficient-domain outputs;
+// CKKS wraps it with its input/output NTT transforms. Half-P residues must be
+// bound for every Q/P context, and the accumulator objects must be mutable.
+std::string generate_hpu_rounded_single_p_keyswitch_body_asm(
+    int N,
+    const hpu::RnsDecompositionLayout& layout,
+    bool append_psync = false,
+    bool manage_modulus_table = true);
+
 // SEAL BFV KeySwitch specialization. Inputs and outputs are in coefficient
 // form. Evaluation-key products accumulate in NTT form, cross back through
 // INTT, and use rounded single-P ModDown before the base component is added.

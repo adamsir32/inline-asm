@@ -73,6 +73,8 @@ struct PreparedCanonicalTwiddles {
     std::uint8_t modulus_id = 0;
     std::uint32_t modulus = 0;
     std::uint32_t canonical_psi = 0;
+    // Natural coefficient order: pre[i]=psi^i; post[i] includes normalization
+    // and inverse twist. Stage tables retain reference batch/lane order.
     hpu::runtime::HpuMemSpan pre_twist;
     std::vector<hpu::runtime::HpuMemSpan> forward_stages;
     std::vector<hpu::runtime::HpuMemSpan> inverse_stages;
@@ -86,6 +88,7 @@ struct PreparedFusedAutomorphismTwiddles {
     std::uint32_t canonical_psi = 0;
     std::uint32_t modified_psi = 0;
     std::vector<hpu::runtime::HpuMemSpan> inverse_stages;
+    // Natural coefficient order, using modified_psi for inverse twist.
     hpu::runtime::HpuMemSpan post_untwist_scale;
 };
 
@@ -116,7 +119,8 @@ public:
         const CkksLevelDescriptor& level);
     PreparedRescaleConstants add_rescale_constants(
         std::string id,
-        const CkksLevelDescriptor& source_level);
+        const CkksLevelDescriptor& source_level,
+        std::size_t component_capacity = 2);
     PreparedEvaluationKey add_galois_key(
         std::string id,
         const ::seal::GaloisKeys& keys,

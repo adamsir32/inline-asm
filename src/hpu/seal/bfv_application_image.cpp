@@ -182,7 +182,7 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
         std::vector<std::uint32_t> pre_twist(degree);
         for (std::size_t position = 0; position < degree; ++position) {
             pre_twist[position] = hpu::model::pow_mod(
-                prepared.canonical_psi, bit_reverse(position, degree), current_modulus);
+                prepared.canonical_psi, position, current_modulus);
         }
         prepared.pre_twist = image_
                                  .add(prefix + "/ntt/pre_twist", pre_twist,
@@ -213,8 +213,11 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
             hpu::model::inverse_mod_prime(prepared.canonical_psi, current_modulus);
         for (std::size_t position = 0; position < degree; ++position) {
             const std::uint32_t untwist =
-                hpu::model::pow_mod(inverse_psi, bit_reverse(position, degree), current_modulus);
-            post[position] = multiply_mod(inverse.post_scale[position], untwist, current_modulus);
+                hpu::model::pow_mod(inverse_psi, position, current_modulus);
+            // The last inverse stage exposes natural coefficient order, so
+            // its raw lazy-scale tag must follow the same boundary mapping.
+            post[position] = multiply_mod(
+                inverse.post_scale[bit_reverse(position, degree)], untwist, current_modulus);
         }
         prepared.post_untwist_scale = image_
                                           .add(prefix + "/intt/post_untwist_scale", post,
@@ -421,9 +424,18 @@ BfvApplicationImageBuilder::add_fused_automorphism_twiddles(
                          hpu::runtime::AllocationKind::twiddle, true)
                     .span);
         }
+        // The shared generator exposes raw inverse-stage order. Delivery
+        // PMUL consumes the post factor after natural coefficient writeback.
+        auto post = tables[basis].post_untwist_scale;
+        for (std::size_t position = 0; position < post.size(); ++position) {
+            const auto reversed = bit_reverse(position, post.size());
+            if (position < reversed) {
+                std::swap(post[position], post[reversed]);
+            }
+        }
         prepared.post_untwist_scale =
             image_
-                .add(prefix + "/post_untwist_scale", tables[basis].post_untwist_scale,
+                .add(prefix + "/post_untwist_scale", post,
                      hpu::runtime::AllocationKind::twiddle, true)
                 .span;
         result.push_back(std::move(prepared));

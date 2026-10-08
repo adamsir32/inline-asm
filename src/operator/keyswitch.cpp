@@ -17,6 +17,7 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool rounded_single_p,
+    bool bfv_label,
     bool append_psync,
     bool manage_modulus_table)
 {
@@ -28,7 +29,9 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     }
     if (rounded_single_p
         && !hpu::is_seal_single_p_rns_decomposition_layout(N, layout)) {
-        asm_code << "        // Invalid SEAL BFV KeySwitch layout: require one P and one ordered singleton digit per active Q\n";
+        asm_code << "        // Invalid SEAL "
+                 << (bfv_label ? "BFV " : "single-P ")
+                 << "KeySwitch layout: require one P and one ordered singleton digit per active Q\n";
         return asm_code.str();
     }
 
@@ -44,7 +47,7 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     const int POBJ_TMP_A = 0;
 
     asm_code << "        /* "
-             << (rounded_single_p ? "BFV " : "")
+             << (bfv_label ? "BFV " : (rounded_single_p ? "ROUNDED SINGLE-P " : ""))
              << "KEYSWITCH BODY: (base, switching_component) -> (base + ks0, ks1) */\n";
     asm_code << "        /* Application-global MOD_IDs; fixed P survives Q level drops. */\n";
     asm_code << "        /* --- Active SEAL key digits loop (dnum = " << dnum << ") --- */\n";
@@ -130,7 +133,8 @@ std::string generate_hpu_keyswitch_body_asm_impl(
 
     // 5. ModDown
     if (rounded_single_p) {
-        asm_code << "        /* --- Step 5: BFV rounded coefficient-domain ModDown for both parts --- */\n";
+        asm_code << "        /* --- Step 5: " << (bfv_label ? "BFV " : "")
+                 << "rounded coefficient-domain ModDown for both parts --- */\n";
         asm_code << generate_hpu_rounded_single_p_moddown_contexts_body_asm(
             q_contexts, p_contexts.front(), 2, false, manage_modulus_table);
     } else {
@@ -185,7 +189,17 @@ std::string generate_hpu_keyswitch_body_asm(
     bool manage_modulus_table)
 {
     return generate_hpu_keyswitch_body_asm_impl(
-        N, layout, false, append_psync, manage_modulus_table);
+        N, layout, false, false, append_psync, manage_modulus_table);
+}
+
+std::string generate_hpu_rounded_single_p_keyswitch_body_asm(
+    int N,
+    const hpu::RnsDecompositionLayout& layout,
+    bool append_psync,
+    bool manage_modulus_table)
+{
+    return generate_hpu_keyswitch_body_asm_impl(
+        N, layout, true, false, append_psync, manage_modulus_table);
 }
 
 std::string generate_hpu_bfv_keyswitch_body_asm(
@@ -195,7 +209,7 @@ std::string generate_hpu_bfv_keyswitch_body_asm(
     bool manage_modulus_table)
 {
     return generate_hpu_keyswitch_body_asm_impl(
-        N, layout, true, append_psync, manage_modulus_table);
+        N, layout, true, true, append_psync, manage_modulus_table);
 }
 
 std::string generate_hpu_keyswitch_body_asm(

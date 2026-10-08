@@ -27,6 +27,12 @@ std::string generate_rescale_ntt_body_asm(
     bool append_psync = true,
     bool manage_modulus_table = true);
 
+// Explicit component count for raw multiplication tensors (three components).
+// The overload above retains its two-component instruction stream.
+std::string generate_rescale_ntt_body_asm(
+    int N, int num_q, int num_components,
+    bool append_psync, bool manage_modulus_table);
+
 std::string generate_rescale_ntt_asm(
     int N,
     int num_q,
