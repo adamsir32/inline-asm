@@ -15,7 +15,7 @@ host 软件验证和应用交付工具。程序员使用 SEAL 风格接口构建
 | 理解分层、编译过程和 runtime | 本文第 2～5、7 节 |
 | 新增算子或优化内存、对象调度 | 本文第 6 节及 [HPU 编程手册](../reference/HPU_PROGRAMMING_MANUAL.md) |
 | 对接 Nexus-AM、执行与读回 | 本文第 9 节及 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md)、[IT 交接清单](../delivery/IT_HANDOFF_CHECKLIST.md) |
-| 维护 SEAL 数据与方案语义适配 | [SEAL 集成设计](HPU_SEAL_INTEGRATION.md)及 [API 参考](../reference/HPU_SEAL_API_REFERENCE.md) |
+| 维护 SEAL 数据与方案语义适配 | [SEAL 集成设计](HPU_SEAL_INTEGRATION.md)及 [底层 API 参考](../reference/HPU_LOW_LEVEL_API_REFERENCE.md) |
 
 ## 2. 整体流程
 

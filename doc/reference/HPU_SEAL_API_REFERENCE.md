@@ -1,912 +1,595 @@
-# HPU 仿 SEAL API 参考
+# HPU 应用编程手册
 
-本文件主要记录 SEAL 适配、显式 Plan、算子生成和软件执行接口，即那些在内部会
-调用 `src/` 下、最终落到 HPU 指令（`padd`/`psub`/`pmul`/`pmac`/`pntt`/`pintt`/
-`pmodld`/`pfree`/`psync`/`dload`/`dstore`）或对应软件执行语义的接口。
+本手册面向使用当前项目编写 CKKS、BFV、BGV 应用和测试用例的程序员。
+统一入口为 `hpu/seal/evaluator.hpp`，命名空间为 `hpu::seal_adapter`。
 
-新应用使用 `ApplicationBuilder` / `Evaluator` 顶层 API，编程方法见
-[Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)，分层、编译流程
-与 runtime 职责见 [HPU 项目架构](../architecture/HPU_ARCHITECTURE.md)。
+阅读顺序：先运行第 2 节的完整程序，再按第 5～7 节查询接口与方案约束。
+只想运行现成案例可阅读 [Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
+显式 Plan、镜像构建器、软件执行器和算子生成 API 见
+[底层 API 参考](HPU_LOW_LEVEL_API_REFERENCE.md)；分层设计见
+[项目架构](../architecture/HPU_ARCHITECTURE.md)。
 
-仿 SEAL API 分两条独立路径，分别对应两个 namespace：
+## 目录
 
-| 层次 | namespace | 职责 | 对应 SEAL 概念 |
+- [1. 编程流程与职责](#1-编程流程与职责)
+- [2. 完整示例：CKKS 计算 x²+1](#2-完整示例ckks-计算-x²1)
+- [3. 编译、运行与重复生成](#3-编译运行与重复生成)
+- [4. 句柄、计算图与命名](#4-句柄计算图与命名)
+- [5. 应用构建与编译结果接口](#5-应用构建与编译结果接口)
+- [6. Evaluator 接口与支持范围](#6-evaluator-接口与支持范围)
+- [7. 三方案的编程规则](#7-三方案的编程规则)
+- [8. 编译选项与诊断](#8-编译选项与诊断)
+- [9. golden、数学验证与交付](#9-golden数学验证与交付)
+- [10. 常见错误与排查](#10-常见错误与排查)
+- [11. 完整案例与进阶入口](#11-完整案例与进阶入口)
+
+## 1. 编程流程与职责
+
+一个应用生成程序通常完成以下步骤：
+
+1. 用 SEAL 创建上下文、密钥，编码并加密输入。
+2. 用 `ApplicationBuilder` 导入密文和明文。
+3. 用 HPU `Evaluator` 记录计算图，显式添加重线性化、旋转和降层等操作。
+4. 用 `mark_output` 命名要交付的结果。
+5. 用 `compile` 自动生成 SEAL oracle，完成软件对拍和资源编译。
+6. 检查解密后的数学结果，用 `write` 或公共包接口导出到 `outputs/`。
+
+| 应用代码负责 | 框架负责 |
+| --- | --- |
+| 选择方案、参数、输入和数学公式 | 根据 context 选择方案实现，检查句柄与元数据 |
+| 用 SEAL 编码、加密和生成评估密钥 | 转换 HPU 数据布局，准备常量、twiddle、密钥镜像与工作区 |
+| 显式选择重线性化、降层和 scale 调整 | 构造资源 IR，分配 DDR、对象槽位与 bank，生成指令和 DMA |
+| 编写数学预期和解码容差 | 自动比较 SEAL、方案 SoftwareExecutor 与最终指令 host 模型 |
+| 指定导出路径并归档 | 写出指令、内存、golden、图元数据与验证报告 |
+
+HPU `Evaluator` 的调用记录图，`compile()` 执行 host 验证与编译；目标 HPU
+执行由 IT/Nexus-AM 接入。C++ 中的普通循环和条件判断在构图时执行，当前生成
+静态图与静态指令序列。
+
+## 2. 完整示例：CKKS 计算 x²+1
+
+将下面代码保存为 `examples/my_ckks_application.cpp`。程序使用 N=128 的功能
+演示参数，计算 `y=x²+1`，检查解码误差，并导出带语义报告的交付包。
+部署规模的参数选择参考现有 N=65536 前端示例。
+
+```cpp
+#include "hpu/seal/application_delivery.hpp"
+#include "hpu/seal/ckks_context.hpp"
+#include "hpu/seal/evaluator.hpp"
+#include <seal/seal.h>
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+int main(int argc, char** argv)
+{
+    try {
+        std::filesystem::path emit_directory = "outputs/my_ckks_application";
+        if (argc == 3 && std::string(argv[1]) == "--emit-dir") {
+            emit_directory = argv[2];
+        } else if (argc != 1) {
+            throw std::invalid_argument("usage: hpu_my_ckks_application [--emit-dir PATH]");
+        }
+
+        // 1. host SEAL：上下文、密钥、编码与加密。
+        hpu::seal_adapter::CkksContextSpec spec;
+        spec.poly_modulus_degree = 128;
+        spec.coeff_modulus_bits = {20, 20, 20, 20};
+        const auto bundle = hpu::seal_adapter::create_ckks_context(spec);
+        const auto& context = *bundle.context;
+        seal::KeyGenerator keygen(context);
+        seal::RelinKeys relin_keys;
+        keygen.create_relin_keys(relin_keys);
+
+        const std::vector<double> input{0.25, -1.5, 2.0, 0.75};
+        seal::CKKSEncoder encoder(context);
+        seal::Plaintext encoded_input;
+        encoder.encode(input, std::ldexp(1.0, 20), encoded_input);
+        seal::Ciphertext encrypted_input;
+        seal::Encryptor(context, keygen.secret_key())
+            .encrypt_symmetric(encoded_input, encrypted_input);
+
+        // 2. HPU 前端：记录图，并显式进行乘法后处理。
+        hpu::seal_adapter::ApplicationBuilder app(context);
+        auto evaluator = app.evaluator();
+        const auto x = app.import_ciphertext("input/x", encrypted_input);
+        hpu::seal_adapter::Ciphertext y;
+        evaluator.square(x, y);                         // 2 → 3 分量
+        evaluator.relinearize_inplace(y, relin_keys);   // 3 → 2 分量
+        evaluator.rescale_to_next_inplace(y);          // 降一层并更新 scale
+
+        // 偏置按消费它的密文 level 和 scale 编码。
+        seal::Plaintext encoded_bias;
+        encoder.encode(std::vector<double>(input.size(), 1.0),
+                       y.parms_id(), y.scale(), encoded_bias);
+        const auto bias = app.import_plaintext("constant/bias", encoded_bias);
+        evaluator.add_plain_inplace(y, bias);
+        app.mark_output("y", y);
+
+        // 3. 自动执行 SEAL、方案软件模型和最终指令模型对拍。
+        const auto compiled = app.compile("my_ckks_application");
+
+        // 4. 检查所构建的图是否表达了预期公式。
+        seal::Plaintext decrypted;
+        seal::Decryptor(context, keygen.secret_key())
+            .decrypt(compiled.oracle_result(y), decrypted);
+        std::vector<double> decoded;
+        encoder.decode(decrypted, decoded);
+        double maximum_error = 0.0;
+        for (std::size_t i = 0; i < input.size(); ++i) {
+            const double expected = input[i] * input[i] + 1.0;
+            if (!std::isfinite(decoded.at(i))) {
+                throw std::runtime_error("decoded result is not finite");
+            }
+            maximum_error = std::max(maximum_error, std::abs(decoded[i] - expected));
+        }
+        if (maximum_error >= 1e-2) {
+            throw std::runtime_error("CKKS decoded error exceeded tolerance");
+        }
+
+        // 5. 给包附加数学验证报告，然后一次导出。
+        auto request = compiled.package();
+        request.semantic_report = hpu::seal_adapter::ckks_delivery_semantics(
+            decoded, input.size(), maximum_error, 1e-2);
+        hpu::delivery::write_application_package(emit_directory, request);
+        std::cout << "Package: " << emit_directory << '\n'
+                  << "Maximum decoded error: " << maximum_error << '\n';
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}
+```
+
+此例的期望结果为 `[1.0625, 3.25, 5.0, 1.5625]`。仅检查输入使用的前四个槽位。
+`oracle_result(y)` 是 SEAL 参考结果，实际 HPU 读回由 IT 完成。
+若不需要附加 `semantic/decoded.json`，导出部分可直接使用：
+
+```cpp
+compiled.write(emit_directory);
+```
+
+两种方式选择一种导出，目标目录要求不存在。
+
+## 3. 编译、运行与重复生成
+
+### 3.1 为自己的 cpp 添加构建目标
+
+在仓库 `CMakeLists.txt` 已有 SEAL 集成目标定义之后添加：
+
+```cmake
+if(HPU_ENABLE_SEAL_INTEGRATION)
+    add_executable(hpu_my_ckks_application examples/my_ckks_application.cpp)
+    target_link_libraries(hpu_my_ckks_application PRIVATE hpu_seal_delivery)
+endif()
+```
+
+链接 `hpu_seal_delivery` 会传递所需的头文件与库依赖。方案均使用这个目标；
+不要另外混用另一份 SEAL 安装。当前包写入实现使用 POSIX 文件接口，生成程序
+在 Linux host 上运行。
+
+从仓库根目录执行：
+
+```bash
+cmake -S . -B build -DHPU_ENABLE_SEAL_INTEGRATION=ON
+cmake --build build -j2 --target hpu_my_ckks_application hpu_validate_package
+./build/hpu_my_ckks_application --emit-dir outputs/my_ckks_application
+./build/hpu_validate_package outputs/my_ckks_application
+```
+
+`hpu_validate_package` 检查磁盘包的结构、清单、布局和文件完整性，不会重新执行
+SEAL，也不运行 HPU。
+
+### 3.2 先运行仓库现成示例
+
+```bash
+cmake -S . -B build -DHPU_ENABLE_SEAL_INTEGRATION=ON
+cmake --build build -j2 --target \
+  hpu_ckks_evaluator_example hpu_bfv_evaluator_example hpu_bgv_evaluator_example
+
+# 统一生成三个方案的小规模前端应用包。
+cmake --build build --target hpu_frontend_delivery
+
+# 部署规模 N=65536，输出目录带 _n65536 后缀。
+cmake --build build -j2 --target hpu_frontend_deployment_delivery
+```
+
+现有前端示例支持 `--degree N`、`--emit-dir PATH`、`--print-asm`、`--no-opt` 和
+指令模型诊断选项。第 2 节的独立程序只实现了 `--emit-dir`；CLI 由用例自己解析，
+并非 `ApplicationBuilder` 自动提供。
+
+### 3.3 重复生成到同一目录
+
+直接 `write()` 或执行第 2 节程序要求目标目录不存在。可指定新目录，或通过
+公共生成脚本重复发布已验证的同案例包：
+
+```bash
+python3 tools/generate_application_package.py \
+  --example ./build/hpu_my_ckks_application \
+  --validator ./build/hpu_validate_package \
+  --output outputs/my_ckks_application
+```
+
+脚本先在临时目录生成和校验，再替换同方案、同案例的有效包。普通目录、损坏包
+或其他案例不会被覆盖。内置 delivery 构建目标也使用这条流程。
+
+## 4. 句柄、计算图与命名
+
+### 4.1 两类 Ciphertext / Plaintext
+
+| 类型 | 用途 |
+| --- | --- |
+| `seal::Ciphertext / seal::Plaintext` | host 上真实的 SEAL 数据，用于编码、加密、导入和解密 |
+| `hpu::seal_adapter::Ciphertext / Plaintext` | 图中逻辑值的句柄，用作 HPU Evaluator 的输入和输出 |
+
+通过 `import_ciphertext`、`import_plaintext` 从 SEAL 数据取得 HPU 句柄。
+空的 `Ciphertext` 可作为输出参数；作为输入或查询元数据前必须已被赋值。
+所有输入句柄必须属于当前 `ApplicationBuilder`，相同 context 的两个 builder
+也不能直接混用句柄。
+
+### 4.2 复制与 inplace
+
+句柄代表不可变逻辑值。复制句柄保留原值，`_inplace` 创建新值并更新传入句柄：
+
+```cpp
+auto original = x;
+auto y = x;
+evaluator.add_inplace(y, x);
+// original 和 x 仍表示原输入；y 表示 x+x。
+```
+
+图上的 inplace 不承诺覆盖同一个 DDR 地址。物理存储由编译器分配。
+输入在导入时捕获快照，评估密钥在操作记录时捕获快照；后续修改原 SEAL 对象
+不会改变已记录值，继续构图也不会改变已经编译的包。
+
+### 4.3 分支与多个输出
+
+以已有 CKKS `x` 和对应 Galois key 为例：
+
+```cpp
+hpu::seal_adapter::Ciphertext rotated, conjugated, mixed;
+evaluator.rotate_vector(x, 1, galois_keys, rotated);
+evaluator.complex_conjugate(x, galois_keys, conjugated);
+evaluator.add(rotated, conjugated, mixed);
+app.mark_output("rotated", rotated);
+app.mark_output("mixed", mixed);
+```
+
+两个旋转节点都引用 `x`，`mixed` 引用两个分支，依赖由句柄确定。
+目前编译整个已记录图，各计算节点结果均保留 golden；`mark_output` 记录命名输出，
+不会裁剪其他节点。显式标记结果可避免依赖隐式的最后一个值。
+
+### 4.4 名称规则
+
+导入名称和输出标签由 `/` 分隔标识符段：每段以英文字母或 `_` 开始，其后使用英文字母、
+数字或 `_`。例如 `input/x`、`constant/bias`、`result/y`。空段、尾部 `/`、空格、
+`-` 和以数字开头的段均不允许。精确名称 `output` 和前缀 `frontend/` 被保留。
+
+密文与明文的导入名称在同一 builder 内共同唯一；输出标签在输出列表内唯一。
+`compile(stem)` 使用简单标识符，例如 `my_ckks_application`；导出目录可以另外指定。
+
+## 5. 应用构建与编译结果接口
+
+### 5.1 ApplicationBuilder
+
+构造方式为 `ApplicationBuilder(const seal::SEALContext& context)`。
+context 必须是有效的 CKKS/BFV/BGV，N 为 `[128,65536]` 内的 2 次幂，
+参数还需满足对应方案和算子的 HPU 约束，见第 7 节。
+
+| 方法 | 用法与要求 |
+| --- | --- |
+| `import_ciphertext(id, input)` | 导入有效的 2 或 3 分量 SEAL 密文；BFV 必须是系数域，CKKS/BGV 必须是 NTT 域 |
+| `import_plaintext(id, input)` | 导入有效的 SEAL 明文；CKKS 必须是 NTT 域，BFV/BGV 使用系数域明文 |
+| `evaluator()` | 返回与此 builder 共享图状态的 `Evaluator` |
+| `mark_output(id, value)` | 标记当前应用中的计算结果，原始输入及仅由输入修改 scale 得到的视图不能标为结果 |
+| `compile(stem, options={})` | 编译快照并返回 `CompiledApplication`，要求图至少包含一个计算操作 |
+| `context()` | 查询应用使用的 SEAL context |
+
+不显式标记输出时，编译器使用最后记录的值作为最终结果，并要求它来源于计算。
+`ApplicationBuilder` 不可复制；每个应用建立自己的 builder。
+
+### 5.2 值句柄
+
+| 查询方法 | Ciphertext | Plaintext | 含义 |
 | --- | --- | --- | --- |
-| host 侧 SEAL-facing | `hpu::seal_adapter` | 从 `SEALContext`/`Ciphertext`/`Plaintext`/`RelinKeys`/`GaloisKeys` 派生 HPU 布局、HPU_MEM 镜像，并做软件执行 | `SEALContext`、`Evaluator`、`KeyGenerator`、`NTT` |
-| 指令生成（codegen） | `hpu::scheme::{ckks,bfv}` | 直接生成 HPU 汇编 body，内部复用 `operator`/`poly`/`util` 层 | `Evaluator::add/sub/multiply/rotate/rescale/...` |
+| `valid()` | 支持 | 支持 | 是否为有效句柄；可用于检查空输出参数 |
+| `value_id()` | 支持 | 支持 | 逻辑值名称，用于日志和图定位 |
+| `parms_id()` | 支持 | 支持 | SEAL 参数层级标识 |
+| `scale()` | 支持 | 支持 | scale，主要用于 CKKS |
+| `size()` | 支持 | 无 | 密文分量数，常见为 2 或 3 |
+| `correction_factor()` | 支持 | 无 | BGV correction factor |
 
----
+除了 `valid()`，对空句柄的查询会抛出异常。元数据在构图时推导，因此可在
+`compile()` 前读取 `y.parms_id()`、`y.scale()` 来编码下一步使用的明文。
+BFV/BGV 导入的系数域明文通常使用零 `parms_id`，其实际 HPU 表示由消费者的层级
+和操作决定。
 
-## 1. HPU 指令集速查
+### 5.3 CompiledApplication
 
-所有仿 SEAL API 内部最终都落到下列 11 条指令（定义见
-`include/util/hpu_asm.hpp`）：
+| 方法 | 返回内容或含义 |
+| --- | --- |
+| `write(directory)` | 写出包，返回 `ApplicationPackageReport`；目录必须不存在 |
+| `package()` | 返回包请求的只读引用；需要附加 semantic 时可复制请求后交给公共 writer |
+| `oracle_result(value)` | 返回该编译快照中对应值的 SEAL 密文；值必须来自同一 builder 且已包含在快照中 |
+| `node_count()` | 实际计算节点数，不包含导入和 `set_scale` 元数据视图 |
+| `verified()` | SEAL 与方案 SoftwareExecutor 的功能比较通过 |
+| `instruction_verified()` | 最终指令 host 模型与 golden 的有效 word 比较通过 |
+| `resource_report_json()` | DDR、DMA、对象槽位、bank、spill/reload 等统计 |
 
-| 指令 | 类型 | 语义 |
+`oracle_result` 可用于 host 解密验证。`package()` 的请求包含编译结果所拥有的
+镜像指针，复制请求后应保持 `CompiledApplication` 存活直至导出完成。
+
+## 6. Evaluator 接口与支持范围
+
+### 6.1 支持矩阵
+
+| 操作 | CKKS | BFV | BGV |
+| --- | --- | --- | --- |
+| `add` / `sub` / `multiply` / `square` | 支持 | 支持 | 支持 |
+| `add_plain` / `sub_plain` / `multiply_plain` | 支持 | 支持 | 支持 |
+| `relinearize`：3 → 2 分量 | 支持 | 支持 | 支持 |
+| `negate` | 支持 | 支持 | 前端暂不支持 |
+| `rescale_to_next` | 支持 2、3 分量 | 不适用 | 不适用 |
+| `mod_switch_to_next` | 前端暂不支持 | 支持 | 支持 |
+| `rotate_vector` / `complex_conjugate` | 支持 | 不适用 | 不适用 |
+| `rotate_rows` / `rotate_columns` | 不适用 | 支持 | 支持 |
+| `set_scale` | 支持 | 不适用 | 不适用 |
+
+该表描述统一前端的范围；底层存在某个算子不代表前端已有对应能力。
+
+### 6.2 算术方法
+
+下表中的 `a`、`b`、`out` 为 HPU `Ciphertext`，`p` 为 HPU `Plaintext`：
+
+| 调用 | 输入要求 | 输出 |
 | --- | --- | --- |
-| `dload` | custom1 | 从 HPU_MEM 搬运到对象槽位；`flag[0]=1` 分配到 small Bank 5 |
-| `dstore` | custom1 | 对象槽位写回 HPU_MEM；当前 RTL 对 `rel=0/1` 都在 DMA 完成后释放对象，传输长度取 `OBJ.len` |
-| `padd` | custom0 | 对象级逐点模加 |
-| `psub` | custom0 | 对象级逐点模减 |
-| `pmul` | custom0 | 对象级逐点模乘（或 `pmul imm` 整数乘） |
-| `pmac` | custom0 | 对象级逐点乘加（乘积累加） |
-| `pntt` | custom0 | 按 stage 的负循环前向 NTT（数据对象 + twiddle 对象） |
-| `pintt` | custom0 | 按 stage 的负循环逆 NTT |
-| `pmodld` | custom0 | 激活 small-bank 模上下文表项 |
-| `pfree` | custom0 | 释放对象槽位 |
-| `psync` | custom0 | 通知 CPU 整个 HPU 程序完成（仅程序末尾一次） |
-
----
-
-## 2. host 侧 SEAL-facing API：`hpu::seal_adapter`
-
-这一层不直接生成 HPU 汇编，而是以 SEAL 对象为输入，产出 HPU 可消费的
-布局/镜像，或直接在 HPU_MEM 镜像上做软件执行。头文件位于
-`include/hpu/seal/`，实现位于 `src/hpu/seal/`。
-
-### 2.1 Context：仿 `seal::SEALContext`
-
-`include/hpu/seal/ckks_context.hpp`
-
-```cpp
-struct CkksContextSpec {
-    std::size_t poly_modulus_degree = 65536;
-    std::vector<int> coeff_modulus_bits;   // 完整 key-context 模数列表
-};
-struct CkksContextBundle {
-    std::shared_ptr<::seal::SEALContext> context;
-    std::vector<std::uint32_t> data_moduli;
-    std::vector<std::uint32_t> special_moduli;
-};
-CkksContextBundle create_ckks_context(const CkksContextSpec& spec);
-```
-
-- 约束：每个 q/P 素数必须能装入一个 uint32；`sec_level_type::none` 为功能路径。
-- Q/P 划分不在此冻结，由 `SEALContext` 的 key/data context 链决定。
-
-BFV 使用独立的 modified-SEAL context 工厂：
-
-```cpp
-struct BfvContextSpec {
-    std::size_t poly_modulus_degree = 65536;
-    std::vector<int> coeff_modulus_bits;   // data Q + 恰好一个 special P
-    int plain_modulus_bits = 17;
-};
-struct BfvContextBundle {
-    std::shared_ptr<::seal::SEALContext> context;
-    std::vector<std::uint32_t> data_moduli;
-    std::uint32_t special_modulus;
-    std::uint32_t plain_modulus;
-};
-BfvContextBundle create_bfv_context(const BfvContextSpec& spec);
-```
-
-- 当前 HPU BFV profile 要求 Q/P/t 不超过 31 bit；32-bit 素数宽度保留给
-  modified-SEAL 自动选择的 `B/m_sk` 辅助基。
-- 要求 batching 可用，并以 `sec_level_type::none` 构造功能验证 context；这里不作
-  生产安全性声明。
-
-### 2.2 Level 描述：仿 SEAL 模数链
-
-`include/hpu/seal/ckks_level.hpp`
-
-```cpp
-struct CkksLevelDescriptor {
-    ::seal::parms_id_type parms_id;
-    std::size_t chain_index;
-    std::vector<std::uint32_t> q_moduli;
-    std::vector<std::uint32_t> special_moduli;
-    hpu::RnsDecompositionLayout rns_layout;          // 应用级全局 MOD_ID
-    std::vector<std::size_t> evaluation_key_digit_indices;
-    std::uint32_t q_last;
-};
-
-std::vector<CkksLevelDescriptor> create_ckks_level_descriptors(
-    const ::seal::SEALContext& context);
-
-class CkksLevelChain {
-public:
-    explicit CkksLevelChain(const ::seal::SEALContext&);
-
-    std::size_t size() const noexcept;
-    const std::vector<CkksLevelDescriptor>& levels() const noexcept;
-    const CkksLevelDescriptor& top() const noexcept;
-    const CkksLevelDescriptor& bottom() const noexcept;
-    const CkksLevelDescriptor& at(std::size_t ordinal) const;
-    const CkksLevelDescriptor& require(const ::seal::parms_id_type&) const;
-    const CkksLevelDescriptor& require_chain_index(std::size_t) const;
-    std::size_t ordinal(const ::seal::parms_id_type&) const;
-    bool has_next(const ::seal::parms_id_type&) const;
-    bool has_previous(const ::seal::parms_id_type&) const;
-    const CkksLevelDescriptor& next(const ::seal::parms_id_type&) const;
-    const CkksLevelDescriptor& previous(const ::seal::parms_id_type&) const;
-    bool is_direct_successor(
-        const ::seal::parms_id_type& source,
-        const ::seal::parms_id_type& destination) const;
-};
-```
-
-- 遍历从 `first_context_data()` 到单素数层的所有 data-context 节点。
-- P 的 MOD_ID 保持全局固定（初始 Q 为 `[0..Qmax)`，P 为 `[Qmax..Qmax+P)`），
-  即使低层 Q 变短也不重新编号。
-- `CkksLevelChain` 的 ordinal 从 top level 的 0 开始递增；它不同于随着 Q
-  逐层移除而递减的 SEAL `chain_index`。业务代码应通过 `next/previous`
-  导航，不应依赖裸 `levels[i]`。
-- 未知 `parms_id`、未知 `chain_index` 和越过 top/bottom 的迁移都会被拒绝。
-
-#### 2.2.1 BFV Level 与全局模表
-
-`include/hpu/seal/bfv_level.hpp`
-
-```cpp
-struct BfvLevelDescriptor {
-    ::seal::parms_id_type parms_id;
-    std::size_t chain_index;
-    std::vector<std::uint32_t> q_moduli;
-    std::uint32_t special_modulus;
-    std::vector<std::uint32_t> b_moduli;
-    std::uint32_t m_sk, plaintext_modulus;
-    hpu::RnsDecompositionLayout keyswitch_layout;
-    std::vector<int> b_mod_ids;
-    int m_sk_mod_id, plaintext_mod_id;
-    std::vector<std::size_t> evaluation_key_digit_indices;
-    std::uint32_t q_last;
-};
-struct BfvLevelRegistry {
-    std::size_t poly_modulus_degree;
-    std::vector<std::uint32_t> modulus_table;
-    std::vector<BfvLevelDescriptor> levels;
-};
-```
-
-- `create_bfv_level_registry` 逐层读取 modified-SEAL 的真实 Q、`RNSTool::base_B()`、
-  `m_sk` 和 t，不接收手工 `num_b/dnum`。
-- 全局 MOD_ID 表以前缀 `Qmax|P` 开始，再追加所有 level 的 B/m_sk 并复用相同素数，
-  t 最后登记；完整 union 必须不超过 64 项。
-- 每层 KeySwitch 固定为 single-P、每个 active-Q 对应一个 singleton digit；P 在
-  降 level 后不重新编号。
-- `BfvLevelChain` 提供 `top/bottom/at/require/next/has_next`，未知或越界 level 直接
-  拒绝。
-
-#### 2.2.2 BFV 应用镜像
-
-`include/hpu/seal/bfv_application_image.hpp`
-
-```cpp
-BfvApplicationImageBuilder builder(context, capacity_lines);
-auto moduli = builder.add_modulus_table();
-auto twiddles = builder.add_canonical_twiddles();
-const auto &level = builder.level_chain().top();
-auto input = builder.add_ciphertext("input/a", ciphertext);
-auto add_plain = builder.add_add_subtract_plaintext(
-    "plain/add", plaintext, level);
-auto multiply_plain = builder.add_multiply_plaintext(
-    "plain/multiply", plaintext, level);
-auto output = builder.reserve_ciphertext("output/result", level);
-auto relin = builder.add_relinearization_key("relin/top", keys, level);
-auto ks = builder.add_keyswitch_constants("constants/keyswitch/top", level);
-auto mul = builder.add_multiply_constants("constants/multiply/top", level);
-auto mod_switch = builder.add_mod_switch_constants(
-    "constants/mod_switch/top", level);
-```
-
-- 模表直接使用 `BfvLevelRegistry` 的全局 Q/P/B/`m_sk`/t MOD_ID；t 不生成 evaluator
-  NTT twiddle。
-- level-specific RelinKeys 只保留 active Q 与固定 P limb，每个 active-Q singleton
-  digit 的顺序由 descriptor 决定。
-- KeySwitch 镜像展开 Q→Q|P ModUp、Q|P 上的 `floor(P/2)` residue、P→Q BConv、
-  `P^{-1} mod q` 和所需工作区。舍入数据全是只读 HPU 常量，不需要运行时比较或
-  CPU 数值计算。
-- Multiply 镜像展开 comparison-free BEHZ 所需的 Q→Bsk、t residue、
-  `Q^{-1} mod Bsk`、B→Q/`m_sk`、`B^{-1} mod m_sk`、`m_sk`→Q 与 `-B mod Q`。
-  同一 B 基的 qhat inverse 在 B→Q 与 B→`m_sk` 之间共享，不重复占用 HPU_MEM。
-- ModSwitch 镜像为相邻 level 预制每个 source-Q limb 的 `floor(q_last/2)` residue、
-  dropped-Q→retained-Q 单源 BConv 常量、`q_last^{-1} mod q_i` 和二分量工作区。
-  这些对象足以在 HPU 上完成 rounded coefficient-domain drop-last，不需要运行时比较。
-- builder 不接收 legacy `bfv_num_b/dnum`。未知 `parms_id` 会被拒绝；SecretKey
-  从 API 和镜像中均不可见。
-- BFV Ciphertext 保持 SEAL 的系数域 Q 表示并按 limb 打包；`reserve_ciphertext` 可为
-  指定 level、分量数和域预留输出或中间对象。`register_bfv_rns_object` 将每个 limb
-  的 level、MOD_ID、domain、key-domain 和 required-output 状态交给 runtime。
-- plaintext 必须在建镜像时预制，且两种表示不能混用：
-  `add_add_subtract_plaintext` 生成与 SEAL scaling variant 完全相同的系数域
-  `Delta*m`；`add_multiply_plaintext` 生成中心提升至 Q 后的 canonical HPU NTT 表示。
-  因而实际算子执行期间不做 host plaintext lift、缩放或 NTT。
-- 当前 API 已完成参数、输入/输出对象、预制 plaintext、评估密钥与预计算常量镜像。
-
-#### 2.2.3 BFV 基础算子 Planner 与重定位
-
-`include/hpu/seal/bfv_operation_plan.hpp`、
-`include/hpu/seal/bfv_operation_codegen.hpp`、
-`include/hpu/seal/bfv_operation_relocation.hpp`
-
-```cpp
-BfvOperationPlan plan(builder);
-auto sum = plan.append_add("add", left, right, "output/sum");
-auto with_plain = plan.append_add_plain(
-    "add_plain", sum, prepared_add_plain, "output/result");
-auto product = plan.append_multiply_plain(
-    "multiply_plain", left, prepared_multiply_plain, "output/product");
-auto tensor = plan.append_multiply(
-    "multiply", left, right, prepared_multiply_constants,
-    "intermediate/tensor"); // 三分量系数域输出
-auto ciphertext_product = plan.append_relinearize(
-    "relinearize", tensor, prepared_relin_key,
-    prepared_keyswitch_constants, "output/ciphertext_product");
-auto switched = plan.append_mod_switch(
-    "mod_switch", ciphertext_product, prepared_mod_switch_constants,
-    "output/next_level");
-auto rotated = plan.append_rotate_rows(
-    "rotate_rows_2", left, 2, prepared_row_galois_key,
-    prepared_keyswitch_constants, prepared_row_twiddles,
-    prepared_row_workspace, "output/rotated");
-auto swapped = plan.append_rotate_columns(
-    "rotate_columns", left, prepared_column_galois_key,
-    prepared_keyswitch_constants, prepared_column_twiddles,
-    prepared_column_workspace, "output/swapped");
-auto program = lower_bfv_operation_plan(plan, context);
-auto relocation = build_bfv_relocation_schedule(
-    program, builder.image(), context);
-```
-
-- 首层 planner 支持 Ciphertext Add/Subtract/Multiply、Relinearize、Negate、
-  AddPlain/SubtractPlain、MultiplyPlain、ModSwitch、RotateRows 与 RotateColumns。
-  Multiply 接收同 level 的二分量系数域 Q 密文并产生三分量；Relinearize 接收三分量并恢复二分量。
-  其他密文算术当前要求二分量；输出保持系数域和 `key_domain=1`。除显式 ModSwitch 外不会隐式降 level。
-- AddPlain/SubtractPlain 只接受 builder 生成的只读系数域 `Delta*m` 对象；为
-  MultiplyPlain 准备的 NTT plaintext 会被明确拒绝。运行时仅执行 `padd/psub`，不做
-  host plaintext 缩放或系数计算。
-- MultiplyPlain 只接受中心提升后的 canonical HPU NTT plaintext。对密文的每个
-  component/Q limb，lowering 显式执行 canonical NTT、`pmul` 和 INTT，结果恢复为
-  BFV 系数域；pre-twist、正逆 stage twiddle 与 post-scale 都由 relocation 绑定到
-  builder 预制的只读 HPU_MEM 对象，不存在 CPU 计算回退。
-- 独立 Ciphertext Multiply 仅要求同 level 的 `PreparedBfvMultiplyConstants`，
-  lowering 生成 comparison-free BEHZ，输出三分量系数域密文，作为图中的显式值。
-  独立 Relinearize 要求 `PreparedEvaluationKey` 与 `PreparedKeySwitchConstants`，
-  使用 rounded single-P KeySwitch。交付包可分别保存和逐 word 比较这两个节点的 SEAL oracle。
-  BEHZ 输入扩基、tensor、FastFloor、branchless SK 和 KeySwitch 的全部中间多项式都由
-  builder 预留，relocation 逐条绑定。
-- 原有带 key、keyswitch constants 和 multiply constants 的 `append_multiply` 重载保留融合语义，
-  输出二分量；交付图标记为 `multiply_relinearize`。原有示例不需要更换调用方式。
-- ModSwitch 只接受存在相邻下一层的二分量系数域密文。它按 modified-SEAL 的
-  `divide_and_round_q_last_inplace` 语义先加 `floor(q_last/2)`，再用单源 BConv 和
-  `q_last^{-1}` 完成 rounded drop-last；输出被 planner 注册到下一 `parms_id`。
-  Multiply→ModSwitch 可作为同一计划一次 lowering、relocation 和 runtime 物化。
-- RotateRows/RotateColumns 使用预制的 active-Q GaloisKey、canonical NTT twiddle、
-  与 Galois element 匹配的 modified-root INTT twiddle，以及
-  `{domain=coefficient,key_domain=k}` 的二分量 workspace。每个输入 Q limb 执行
-  canonical NTT→modified-root INTT，形成 `sigma_k(c0),sigma_k(c1)`；然后用 BFV
-  rounded single-P KeySwitch 恢复 `key_domain=1`。输出保持系数域和原 level。
-  planner 校验 workspace、twiddle 和 level；relocation 绑定所有 DMA，整个计算没有
-  CPU 系数运算。正向/负向行旋转和换列均与 modified-SEAL 逐系数对拍。
-- lowering 为整个计划只装载一次 small-bank 模表、在末尾只发出一次 `psync`。
-  relocation 按生成汇编中每条 `dload/dstore` 的顺序绑定具体 HPU_MEM limb，并拒绝
-  shape、level、domain、只读属性或 DMA ABI 不匹配的对象。
-- `include/hpu/seal/bfv_operation_runtime.hpp` 将完整 relocation schedule 与汇编一起
-  物化为 `BfvRuntimeProgram`，逐条复核编码后的 custom1。`render_bfv_runtime_artifacts`
-  输出固定指令字、resolved span 数组、`hpu_run_<stem>()` 包装和带 BFV operation/
-  allocation provenance 的 CSV；任何不完整 schedule、编码字段漂移或越界 span 都会被拒绝。
-- `include/hpu/seal/bfv_software_executor.hpp` 提供 HPU_MEM 功能执行层。当前可执行
-  Add/Subtract/Negate、AddPlain/SubtractPlain、MultiplyPlain、独立或融合的
-  Multiply/Relinearize、ModSwitch、RotateRows 和 RotateColumns。MultiplyPlain 消费预制的 canonical HPU NTT
-  plaintext 与 twiddle，完成系数域→NTT→逐点乘法→系数域；Ciphertext Multiply
-  直接复现 no-SMRQ BEHZ、FastFloor、branchless-SK 和 rounded single-P KeySwitch。
-  所有路径读取 builder 预制资源，不调用 `seal::Evaluator`。
-- BFV application image 的 `add_row_rotation_key/twiddles` 与
-  `add_column_rotation_key/twiddles` 按 SEAL generator-3 batching 约定，把预定步长映射
-  为 Galois element，并准备 active-Q GaloisKey 和 `psi^(1/k)` modified-root INTT 表。
-  资源转换支持任意合法 `k`；顶层行旋转 API 接受预定的非零步长。
-
-#### 2.2.4 CKKS 操作元数据规则
-
-`include/hpu/seal/ckks_metadata.hpp`
-
-```cpp
-struct CkksValueMetadata {
-    ::seal::parms_id_type parms_id;
-    std::size_t chain_index;
-    double scale;
-};
-
-CkksValueMetadata infer_ckks_preserving_metadata(
-    const CkksLevelChain&, const CkksValueMetadata& input);
-CkksValueMetadata infer_ckks_add_sub_metadata(
-    const CkksLevelChain&, const CkksValueMetadata& left,
-    const CkksValueMetadata& right);
-CkksValueMetadata infer_ckks_multiply_metadata(
-    const CkksLevelChain&, const CkksValueMetadata& left,
-    const CkksValueMetadata& right);
-CkksValueMetadata infer_ckks_rescale_metadata(
-    const CkksLevelChain&, const CkksValueMetadata& input);
-```
-
-- 保持型操作（Negate、Relinearize、Rotate、NTT/INTT）保持 level 与 scale。
-- Add/Sub 要求两个输入位于同一 level 且 scale 在相对误差内匹配。
-- Multiply 保持 level，并把输出 scale 推导为两个输入 scale 的乘积。
-- Rescale 只能迁移到直接下一层，输出 scale 为 `input.scale / q_last`。
-- 每个输入都会同时校验 `parms_id`、`chain_index` 和有限正 scale；底层
-  Rescale、跨层运算、scale 不匹配及乘法 scale 溢出都会在分配或执行前拒绝。
-- 这里只管理元数据，不自动插入 Rescale，也不改变算子的数学/表示域路径。
-
-#### 2.2.5 BGV 单次 ModSwitch 应用包
-
-`include/hpu/seal/bgv_modswitch_application.hpp`
-
-```cpp
-auto program = build_bgv_modswitch_application(context, ciphertext, capacity_lines);
-auto artifacts = render_bgv_modswitch_runtime_artifacts("bgv_modswitch", program);
-```
-
-- 要求 modified-SEAL 的 NTT 域 BGV 密文及直接下一层；全局模表按 `Qmax|P|t`
-  固定，降层后 `t` 的 MOD_ID 不变。输入经系数域桥转换为 canonical HPU NTT，
-  密文、twiddle、三个常量族、`c_last/u_t` 工作区及输出均装入 HPU_MEM。
-- `program.instructions` 包含可编码的完整单次操作流，`program.dma` 与
-  `program.spans()` 按 custom1 顺序给出 resolved 绑定；构建时逐条检查对象号、
-  load/store 类型、字数、只读属性和 span。渲染产生固定指令字、span 数组、
-  `hpu_run_<stem>()` 包装及 resolved DMA manifest。
-- `program.destination_parms_id` 与 `program.correction_factor` 是 host 元数据。
-  两级逐 limb 与 HPU 物理 NTT 差分已对齐 modified-SEAL。这个 standalone builder
-  只生成单次 ModSwitch；多算子应用使用 `BgvOperationPlan`。两条路径都尚未
-  通过 encoded instruction stream 或实体 HPU 执行验证。
-
-#### 2.2.6 BGV 单次 KeySwitch / Relinearize 应用包
-
-`include/hpu/seal/bgv_keyswitch_application.hpp`
-
-```cpp
-auto program = build_bgv_keyswitch_application(
-    context, three_component_product, relin_keys, capacity_lines);
-auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_relin", program);
-```
-
-- 要求 modified-SEAL 的三分量 NTT 域 BGV 乘积和同一 key context 的
-  `RelinKeys`。当前入口仅执行 Relinearize，不包含前置密文乘法或 Galois 自同构。
-- 全局 MOD_ID 固定为 `Qmax|P|t`；降层只缩短 active Q，P/t 不重编号。密文和
-  evaluation key 通过表示桥变换到 canonical HPU NTT，模表、双向 twiddle、
-  `-P^-1 mod t`、`P mod q_i`、`P^-1 mod q_i` 和全部工作区都在 HPU_MEM 中。
-- `program.dma`/`program.spans()` 与编码 custom1 逐条对应；渲染产物含固定
-  指令字、resolved span 数组、`hpu_run_<stem>()` 入口和 DMA manifest。
-  `parms_id` 与 `correction_factor` 保持原产品的 host 元数据，不经 PE 更新。
-- 顶层和降一级的镜像内容已在 HPU 物理 NTT 数学模型中与 modified-SEAL
-  Relinearize 逐 limb 对齐；其原生资源 IR 也参与前端及 Plan 包的严格逐指令
-  host 对拍。实体 HPU 运行证据由 IT 验收提供。
-- `estimate_bgv_keyswitch_image_lines(N, active_q, key_modulus_count)` 给出当前
-  all-resident 布局的精确容量，并在构建前检查 `capacity_lines`。例如
-  `N=65536,Q=3,P=1` 需 136193 个 256B line，超过旧的 65536-line 软件 profile；
-  若平台允许更大的 HPU_MEM window，可直接按估计值或以上配置，而无需为这一步
-  引入分段调度。目标 `N=65536,Q=3,P=1` 的真实镜像已按 136193 line 构建，
-  475 个 DMA 绑定和 runtime manifest 均通过软件检查；这不替代实体 DMA/window 验证。
-
-#### 2.2.7 BGV 连续 Multiply+Relinearize 应用包
-
-`include/hpu/seal/bgv_keyswitch_application.hpp`
-
-```cpp
-const auto lines = estimate_bgv_multiply_relinearize_image_lines(
-    degree, active_q_count, key_modulus_count);
-auto program = build_bgv_multiply_relinearize_application(
-    context, left, right, relin_keys, lines);
-auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_multiply_relin", program);
-```
-
-- 输入为同 level 的两个二分量 modified-SEAL BGV NTT 密文；构建器将输入与
-  evaluation key 准备为 canonical HPU NTT。三分量乘积在镜像里只预留可写
-  span，不由 CPU 或 SEAL 预计算。`CMULT` 写入这些 span，KeySwitch 随即读取；
-  中间无 `psync`、host copy 或 window 切换。
-- 完整流只有一次模表加载与末尾 `psync`。`parms_id` 保持原 level，
-  `correction_factor` 在 host 更新为两输入因子的乘积模 `t`。
-- `N=65536,Q=3,P=1` 的实际镜像占 148481 个 256B line，包含 508 个
-  resolved DMA 绑定。顶层及降一级 tensor 与 modified-SEAL 差分一致，
-  KeySwitch 后缀与独立运行包逐条一致；尚无实体 HPU 执行证据。
-
-#### 2.2.8 BGV 单次密文和明文算术应用包
-
-`include/hpu/seal/bgv_arithmetic_application.hpp`
-
-```cpp
-auto add = build_bgv_add_application(context, left, right, capacity_lines);
-auto sub = build_bgv_subtract_application(context, left, right, capacity_lines);
-auto neg = build_bgv_negate_application(context, left, capacity_lines);
-auto add_plain = build_bgv_add_plain_application(context, left, plain, capacity_lines);
-auto sub_plain = build_bgv_subtract_plain_application(context, left, plain, capacity_lines);
-auto mul_plain = build_bgv_multiply_plain_application(context, left, plain, capacity_lines);
-auto artifacts = render_bgv_arithmetic_runtime_artifacts("bgv_add", add);
-```
-
-- 输入为同 level 的二分量 BGV NTT 密文。不同 `correction_factor` 的
-  Add/Sub 按 modified-SEAL 的平衡规则准备标量 splat，HPU 以 `PMUL`
-  缩放各 limb 后执行 `PADD/PSUB`；host 只保留输出 factor 元数据。
-- 每个包含固定 `Qmax|P|t` 模表、canonical HPU NTT 输入、输出和逐条
-  resolved DMA；不执行 CPU 密文加减或缩放。Negate 保持 factor 不变。
-- 已对顶层、降一级和不同 factor 组合做 modified-SEAL 逐 limb 差分；
-  其原生资源 IR 参与前端及 Plan 包的逐指令 host 对拍；实体 HPU 验证由 IT 提供。
-- 明文输入须为有效的系数域 BGV `Plaintext`。构建镜像时将其预制为
-  canonical HPU NTT；AddPlain/SubPlain 先按密文 factor 模 `t` 缩放明文，
-  然后由 HPU 只更新 `c0` 并复制 `c1`。MultiplyPlain 对两个密文分量
-  做 `PMUL`，factor 保持不变。顶层及降一级已与 modified-SEAL 差分。
-
-#### 2.2.9 BGV 单次行旋转与列交换应用包
-
-`include/hpu/seal/bgv_keyswitch_application.hpp`
-
-```cpp
-auto rows = build_bgv_rotate_rows_application(context, ciphertext, galois_keys,
-                                              steps, capacity_lines);
-auto columns = build_bgv_rotate_columns_application(context, ciphertext,
-                                                    galois_keys, capacity_lines);
-auto lines = estimate_bgv_rotation_image_lines(degree, active_q_count,
-                                               key_modulus_count);
-auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_rows", rows);
-```
-
-- 要求 batching、二分量 BGV NTT 密文及对应的 Galois key。行旋转使用
-  非零有符号步长，列交换对应 `X -> X^(2N-1)`。当前单次包只执行一个
-  Galois 元素；不自动合成缺失密钥的多步旋转。
-- HPU 以改根 INTT 实现自同构、canonical NTT 返回密文表示，再在同一
-  指令流中执行 BGV Galois KeySwitch；不通过 CPU 计算旋转后密文。
-  `parms_id` 与 `correction_factor` 保持不变，只有末尾一次 `psync`。
-- 正/负行步长及列交换在顶层和降一级与 modified-SEAL 逐 limb 差分；
-  `N=65536,Q=3,P=1` 估算需 169985 个 256B line。前端及 Plan 包会对其原生资源 IR
-  做严格逐指令 host 对拍，实际优化后的容量以包内报告为准；实体 HPU 验证由 IT 提供。
-
-#### 2.2.10 BGV 跨 level 计算图
-
-`include/hpu/seal/bgv_operation_plan.hpp`
-
-```cpp
-BgvOperationPlan plan(context);
-const auto x = plan.add_ciphertext("input/x", encrypted);
-const auto rows = plan.append_rotate_rows("rows", x, 1, galois_keys);
-const auto columns = plan.append_rotate_columns("columns", x, galois_keys);
-const auto mixed = plan.append_add("mix", rows, columns);
-const auto tensor = plan.append_multiply("multiply", x, mixed); // 3 components
-const auto product = plan.append_relinearize("relinearize", tensor, relin_keys);
-const auto switched = plan.append_modswitch_to_next("drop_level", product);
-const auto y = plan.append_add_plain("bias", switched, bias);
-plan.set_output(y);
-auto application = plan.lower(capacity_lines);
-```
-
-- `BgvPlannedValue` 是图中密文值句柄，包含 ID、parms_id、component count 和
-  correction factor。节点引用已经存在的值，追加顺序就是拓扑顺序；多个节点可以
-  引用同一个输入。跨 plan 或被篡改的句柄会被拒绝。
-- 元数据按每个输入推导：不同分支可处于不同 level。Add/Sub 对两个 correction
-  factor 求平衡标量；Multiply 输出三分量并更新 factor；Relinearize 恢复二分量；
-  只有 ModSwitch 显式降层。`append_multiply_relinearize` 可显式选择融合操作。
-- 图默认导出最后追加的节点；`set_output` 可以选择较早节点，其他节点仍保留逐步
-  golden。`allocation_prefix(value)` 返回 lowering 后用于查询镜像的逻辑前缀。
-- 计划拥有导入密文、明文和密钥的只读快照；重复密钥在 plan 中共享。lowering 对
-  同 kind、同长度且字节完全相同的只读 payload 共享物理 allocation，hash 碰撞会
-  再比较实际数据。可变 workspace 和 golden 输出保持独立。
-- 每次只准备一个独立算子的资源并合入全图；不同时保留全部临时应用镜像。
-  整图只有一次模表加载和一个末尾 `psync`。构建容量是上限，最终 window 会收紧。
-- 旧 `BgvPlainOperationPlan`、`BgvLinearOperationPlan` 名称及不传输入句柄的调用
-  保留，默认沿当前尾节点追加。旧 `append_multiply(id, seal_ciphertext, relin_keys)`
-  仍表示融合乘法，避免改变已有用例的分量数和 golden 数量。
-- 明文算术、Add/Sub、旋转和 ModSwitch 当前要求二分量；三分量可导入、由 Multiply
-  生成并供 Relinearize 消费。没有声明支持 SEAL 的全部密文形状和操作。
-
-完整可运行示例见 [BGV 复合应用](../examples/BGV_COMPOSED_APPLICATION_EXAMPLE.md)。
-
-#### 2.6.1 显式操作计划
-
-`include/hpu/seal/operation_plan.hpp`
-
-```cpp
-CkksOperationPlan plan(image_builder);
-auto sum = plan.append_add("add", left, right, "output/sum");
-auto difference = plan.append_subtract(
-    "subtract", left, right, "output/difference");
-auto product_tensor = plan.append_multiply(
-    "multiply", left, right, "intermediate/product_tensor");
-auto scaled = plan.append_multiply_plain(
-    "multiply_plain", left, encoded_weight, "output/scaled");
-auto tensor = plan.append_square("square", input, "intermediate/tensor");
-auto relin = plan.append_relinearize(
-    "relinearize", tensor, relinearization_key, keyswitch_constants,
-    "intermediate/relinearized");
-auto rescaled = plan.append_rescale(
-    "rescale", relin, rescale_constants, "intermediate/rescaled");
-auto output = plan.append_add_plain(
-    "add_one", rescaled, encoded_one, "output/x2_plus_one");
-auto shifted = plan.append_subtract_plain(
-    "subtract_bias", output, encoded_bias, "output/shifted");
-auto negative = plan.append_negate(
-    "negate", shifted, "output/negative");
-auto rotated = plan.append_rotate_slots(
-    "rotate_left_2", input, 2, rotation_key, keyswitch_constants,
-    rotation_twiddles, rotation_workspace, "output/rotate_left_2");
-auto conjugated = plan.append_conjugate(
-    "conjugate", input, conjugation_key, keyswitch_constants,
-    conjugation_twiddles, conjugation_workspace, "output/conjugate");
-```
-
-- 每一步都显式给出；`append_multiply` 只生成三分量 tensor，plan 不会自动插入
-  Relinearize 或 Rescale。
-- 输出由前一步 metadata 推导后直接在同一个 `HpuMemImage` 中分配；输入对象的
-  allocation ID/span 也必须属于该 image。
-- Relinearize 会绑定并校验当前 level 的 evaluation key、KeySwitch 常量和
-  canonical twiddle 需求；Rescale 会绑定相邻 level 的常量和 twiddle 需求。
-- Rotate/Conjugate 会验证 Galois element、对应 evaluation key、modified-root fused
-  INTT 表、canonical NTT 表以及 `{domain=coefficient,key_domain=k}` workspace；不同
-  Galois element 的 key、twiddle 或 workspace 不能混用。
-- `steps()` 保留有序的输入/输出 metadata、组件数、表示域和资源 ID，供下一阶段
-  的 codegen/runtime lowering 使用。目前覆盖 Add/Subtract、Multiply/MultiplyPlain、
-  AddPlain/SubtractPlain、Negate、Square、Relinearize、Rescale、Rotate 和 Conjugate。
-
-`include/hpu/seal/operation_codegen.hpp`
-
-```cpp
-CkksLoweredProgram lowered = lower_ckks_operation_plan(
-    plan, context, /* append_psync=*/true,
-    /* manage_modulus_table=*/true);
-```
-
-- lowering 按每个 step 的输入 level 选择已有 kernel：基础算术选择对应 pointwise
-  body，Multiply/Square→CMULT tensor，Relinearize→standalone NTT Relinearize，
-  Rescale→standalone NTT Rescale，Rotate/Conjugate→fused automorphism + Galois
-  KeySwitch + canonical output NTT。
-- `CkksLoweredProgram::operations` 保留 step 与各自 body 的一一映射，供后续 DMA
-  relocation backend 绑定对象和资源 ID；`body_asm` 是按原顺序拼接的完整程序。
-- 嵌套 kernel 不加载/释放模表也不发 `psync`，完整程序默认只在外层管理一次。
-- 当前不做跨 step 的 NTT/INTT 或 dstore/dload 融合，因此比专用复合 Multiply
-  kernel 更长；这是后续优化点，不影响显式计划和 CKKS 语义。
-
-`include/hpu/seal/operation_relocation.hpp`
-
-```cpp
-CkksRelocationSchedule schedule = build_ckks_relocation_schedule(
-    lowered, image_builder.image(), context);
-```
-
-- 每条已解析记录同时保存 program/operation 内 DMA 序号、DLOAD/DSTORE 参数、
-  allocation ID 和 `HpuMemSpan`；runtime 可按 `program_dma_index` 在发指令前把
-  `line_offset/line_count` 装入 `x10/x11`。
-- resolver 会解析实际生成的 assembly，并逐条核对方向、对象槽、load type/bank
-  flag 或 store release；codegen 和 relocation 配方发生漂移时立即报错。
-- 当前模表及所有 planner operation 均已完整解析。Relinearize 覆盖前后
-  NTT/INTT twiddle、逐 digit ModUp、evaluation-key 乘加、带 half-P 加法的 single-P 舍入 ModDown、base merge
-  及所有 workspace；Rescale 覆盖 half、单源 BConv、inverse、跨 level 输出及前后
-  transform；Rotate/Conjugate 覆盖 fused INTT、coefficient workspace、Galois key、
-  KeySwitch workspace 和输出 NTT。由标准 image builder 构造的计划满足
-  `schedule.complete()`。
-- 只有 `unresolved_operations` 为空且绑定数等于 `expected_dma_count` 时，
-  `schedule.complete()` 才返回 true。
-
-`include/hpu/seal/operation_runtime.hpp`、
-`include/hpu/seal/bfv_operation_runtime.hpp`
-
-```cpp
-CkksRuntimeProgram runtime = lower_ckks_runtime_program(lowered, schedule);
-CkksRuntimeArtifacts artifacts = render_ckks_runtime_artifacts(
-    "ckks_x2_plus_one", runtime, image_builder.image().capacity_lines());
-
-BfvRuntimeProgram bfv_runtime = lower_bfv_runtime_program(
-    bfv_lowered, bfv_schedule);
-BfvRuntimeArtifacts bfv_artifacts = render_bfv_runtime_artifacts(
-    "bfv_fused_multiply", bfv_runtime, bfv_builder.image().capacity_lines());
-```
-
-- runtime lowering 通过公共 assembler 生成 `EncodedInstruction`，执行 object lifetime
-  校验，再把 encoder 识别出的每条 custom1 与 schedule 的方向、p 槽、type/release、
-  flag 和 DMA 序号逐项比较。
-- `runtime.spans()` 按 custom1 消费顺序返回 `{line_offset,line_count}`；两者分别在
-  指令前绑定到 `x10/x11`。
-- artifacts 包含声明 `hpu_run_<stem>()` 的 header、固定 instruction word 加 resolved
-  span 数组的 source，以及同时记录 operation/allocation provenance 和编码信息的 CSV。
-- renderer 要求每个 span 非零、落在给定 HPU_MEM 容量内，并符合当前
-  `hpu_dma_span_t` 的 uint32 地址 ABI。
-
-### 2.7 软件执行器：仿 `seal::Evaluator`
-
-CKKS、BFV、BGV 分别使用 `software_executor.hpp`、`bfv_software_executor.hpp`、
-`bgv_software_executor.hpp`。
-在 `HpuMemImage` 之上做功能执行，**不调用 `seal::Evaluator`**；SEAL 仅作为差分 oracle。
-
-```cpp
-class CkksSoftwareExecutor {
-public:
-    CkksSoftwareExecutor(const ::seal::SEALContext& context,
-                         const hpu::runtime::HpuMemImage& image);
-
-    void add(const PreparedRnsObject& l, const PreparedRnsObject& r, const PreparedRnsObject& o);
-    void subtract(const PreparedRnsObject& l, const PreparedRnsObject& r, const PreparedRnsObject& o);
-    void multiply_plain(const PreparedRnsObject& ct, const PreparedRnsObject& pt, const PreparedRnsObject& o);
-    void add_plain(const PreparedRnsObject& ct, const PreparedRnsObject& pt, const PreparedRnsObject& o);
-    void subtract_plain(const PreparedRnsObject& ct, const PreparedRnsObject& pt, const PreparedRnsObject& o);
-    void negate(const PreparedRnsObject& ct, const PreparedRnsObject& o);
-    void square(const PreparedRnsObject& ct, const PreparedRnsObject& tensor_o);
-    void multiply(const PreparedRnsObject& l, const PreparedRnsObject& r, const PreparedRnsObject& tensor_o);
-    void key_switch(const PreparedRnsObject& base, const PreparedRnsObject& switching,
-                    const PreparedEvaluationKey& ek, const PreparedKeySwitchConstants& c,
-                    const PreparedRnsObject& o, const std::vector<PreparedCanonicalTwiddles>& t);
-    void relinearize(const PreparedRnsObject& tensor, const PreparedEvaluationKey& rlk,
-                     const PreparedKeySwitchConstants& c, const PreparedRnsObject& o,
-                     const std::vector<PreparedCanonicalTwiddles>& t);
-    void rescale(const PreparedRnsObject& in, const PreparedRescaleConstants& c,
-                 const PreparedRnsObject& o, const std::vector<PreparedCanonicalTwiddles>& t);
-    void rotate(const PreparedRnsObject& in, std::uint32_t galois_element,
-                const PreparedEvaluationKey& gk, const PreparedKeySwitchConstants& c,
-                const std::vector<PreparedFusedAutomorphismTwiddles>& fused_t,
-                const std::vector<PreparedCanonicalTwiddles>& canonical_t,
-                const PreparedRnsObject& coeff_ws, const PreparedRnsObject& o);
-    void rotate_slots(const PreparedRnsObject& in, int steps, ...);   // 正步左旋/负步右旋
-    void conjugate(const PreparedRnsObject& in, ...);                  // galois = 2N-1
-    void forward_ntt(const PreparedRnsObject& coeff, const PreparedRnsObject& ntt,
-                     const std::vector<PreparedCanonicalTwiddles>& t);
-    void inverse_ntt(const PreparedRnsObject& ntt, const PreparedRnsObject& coeff,
-                     const std::vector<PreparedCanonicalTwiddles>& t);
-    HpuRnsPolynomial export_component(const PreparedRnsObject& object, std::size_t component) const;
-    const hpu::runtime::HpuSoftwareExecutor& memory() const noexcept;
-};
-
-class BgvSoftwareExecutor {
-public:
-    BgvSoftwareExecutor(const ::seal::SEALContext& context,
-                        const hpu::runtime::HpuMemImage& image);
-    void execute(const BgvOperationPlan& plan);
-    const hpu::runtime::HpuSoftwareExecutor& memory() const noexcept;
-};
-```
-
-`BgvSoftwareExecutor::execute` 覆盖明文/密文算术、行旋转、列交换、
-Multiply、Relinearize、融合 Multiply+Relinearize 和 ModSwitch。它按 plan 的 allocation edge 执行整图，并消费
-镜像中的 canonical/fused NTT twiddle、evaluation key 和 BGV correction 常量。
-
-**SEAL 等价关系**（用于逐字比对）：
-
-| 执行器方法 | seal::Evaluator 对应 |
+| `add(a, b, out)` | 两个 2 分量密文，同 `parms_id`；CKKS scale 兼容 | 2 分量，同层级；BGV 自动按规则平衡 correction factor |
+| `sub(a, b, out)` | 与 add 相同 | 2 分量，表示 a−b |
+| `multiply(a, b, out)` | 两个 2 分量密文，同 `parms_id`；BFV 当前 Q 至少有两个模数 | 3 分量；CKKS scale 相乘，BGV factor 相乘 mod t |
+| `square(a, out)` | 2 分量；BFV 当前 Q 至少有两个模数 | 与 multiply(a,a) 相同 |
+| `negate(a, out)` | 2 分量，CKKS/BFV | 2 分量，同层级 |
+| `add_plain(a, p, out)` | a 为 2 分量；CKKS 明文与密文同 level、scale 兼容 | 2 分量，同层级 |
+| `sub_plain(a, p, out)` | 与 add_plain 相同 | 2 分量，表示 a−p |
+| `multiply_plain(a, p, out)` | a 为 2 分量；CKKS 明文与密文同 level | 2 分量；CKKS scale 乘以明文 scale |
+
+三分量乘法结果需先重线性化，才能继续使用当前要求二分量的加法、乘法、明文
+运算或旋转。CKKS rescale 可在重线性化之前或之后使用，支持 2、3 分量。
+
+### 6.3 重线性化、降层与 scale
+
+| 调用 | 要求与行为 |
 | --- | --- |
-| `add` | `add` |
-| `subtract` | `sub` |
-| `multiply_plain` | `multiply_plain` |
-| `add_plain` | `add_plain` |
-| `subtract_plain` | `sub_plain` |
-| `negate` | `negate` |
-| `square` | `square` |
-| `multiply` | `multiply`（张量积 t0/t1/t2） |
-| `relinearize` | `relinearize` |
-| `rescale` | `rescale_to_next` |
-| `rotate` / `rotate_slots` / `conjugate` | `apply_galois` |
+| `relinearize(a, relin_keys, out)` | a 必须为 3 分量；密钥属于同一 context 且含 s² 对应键；输出 2 分量，level 不变 |
+| `rescale_to_next(a, out)` | CKKS，2 或 3 分量，存在下一层；去掉当前末尾 q，scale 除以该 q |
+| `mod_switch_to_next(a, out)` | BFV/BGV，2 分量，存在下一层；BGV 同时更新 correction factor |
+| `set_scale(value, new_scale)` | CKKS；new_scale 有限、为正且小于当前 Q 的可表示上限；创建共享数据的元数据视图 |
 
-**内部落地的 HPU 语义**（`src/hpu/runtime/software_executor.cpp` 的 `HpuSoftwareExecutor`）：
+`multiply` / `square` 不自动重线性化，所有操作均不自动降层或对齐 scale。
+`set_scale` 不修改密文系数，使用它之前需要判断近似 scale 调整是否符合数学预期。
 
-| 运行时方法 | 对应 HPU 指令语义 |
+### 6.4 旋转方法
+
+| 调用 | 槽位语义 |
 | --- | --- |
-| `pointwise(..., add)` | `padd` |
-| `pointwise(..., subtract)` | `psub` |
-| `pointwise(..., multiply)` | `pmul` |
-| `multiply_accumulate(...)` | `pmac` |
-| `read`/`write`/`copy` | `dload`/`dstore` |
-| `load_modulus_table`/`modulus` | `pmodld`（small-bank 模表） |
+| `rotate_vector(a, steps, galois_keys, out)` | CKKS 的 N/2 个槽位循环旋转；正数向左，负数向右 |
+| `complex_conjugate(a, galois_keys, out)` | CKKS 槽位逐项复数共轭 |
+| `rotate_rows(a, steps, galois_keys, out)` | BFV/BGV batching 的两行分别循环旋转；正数向左，负数向右 |
+| `rotate_columns(a, galois_keys, out)` | BFV/BGV batching 的两行交换 |
 
----
+旋转输入必须为 2 分量。整数方案要求 context 支持 batching。
+步数必须满足 `0 < abs(steps) < N/2`，零步直接保留输入句柄。
+当前前端要求 GaloisKeys 中存在本次变换的具体 Galois element，密钥准备见第 7 节。
 
-## 3. HPU 指令生成 API：`hpu::scheme::{ckks,bfv}`
+### 6.5 inplace 方法
 
-这一层直接生成 HPU 汇编 body（字符串），是“仿 SEAL 算子”的 codegen 入口。
-头文件位于 `include/scheme/{ckks,bfv}/`，实现位于 `src/scheme/{ckks,bfv}/`。所有函数返回
-包含 HPU 指令的 `std::string`；`*_asm` 版本返回带 `__asm__ volatile(...)` 包装的
-完整 C++ 内联汇编函数，`*_body_asm` 版本只返回 body。
-
-### 3.1 逐点运算：仿 `Evaluator` 的 add/sub/multiply_plain/...
-
-`include/scheme/ckks/basic_arithmetic.hpp`
+上述算术、重线性化、降层和旋转均提供 `_inplace` 变体，省略输出参数并更新第一个
+密文句柄，例如：
 
 ```cpp
-std::string generate_add_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-std::string generate_subtract_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-std::string generate_multiply_plain_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-std::string generate_add_plain_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-std::string generate_subtract_plain_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-std::string generate_negate_body_asm(int num_q, bool append_psync = true, bool manage_modulus_table = true);
-// *_asm 包装版本：generate_add_asm / generate_subtract_asm / ...
-bool compatible_add_scales(double l, double r, double tol = 1e-6);
-double multiply_plain_scale(double ct_scale, double pt_scale);
+evaluator.multiply_inplace(y, x);
+evaluator.relinearize_inplace(y, relin_keys);
+evaluator.rescale_to_next_inplace(y); // CKKS
 ```
 
-- 所有操作数使用同一 SEAL `parms_id` 与 canonical HPU NTT 物理序。
-- 刻意**不发出任何 `pntt`/`pintt`**（零变换）。
-- 内部指令：`dload(poly)`、`pmodld`、`padd`/`psub`/`pmul`、`pfree`、`dstore`；
-  `manage_modulus_table=true` 时额外包含模表 `dload`+`pfree` 与末尾 `psync`。
-- `negate` 用两个 `psub`（`(c-c)-c`）在 NTT 域合成负元，无额外零多项式。
-- `compatible_add_scales` / `multiply_plain_scale` 是 host 侧的 scale 元数据判定，不发指令。
+`set_scale` 直接更新句柄，没有额外 `_inplace` 名称。完整签名以
+[evaluator.hpp](../../include/hpu/seal/evaluator.hpp) 为准。
 
-### 3.2 密文乘法：仿 `Evaluator::multiply`
+## 7. 三方案的编程规则
 
-`include/scheme/ckks/ciphertext_multiply.hpp`
+### 7.1 Context 与输入准备
+
+| 方案 | Context 入口 | 编码与输入形式 |
+| --- | --- | --- |
+| CKKS | `CkksContextSpec` + `create_ckks_context` | `seal::CKKSEncoder`，密文和导入明文均为 NTT 域 |
+| BFV | `BfvContextSpec` + `create_bfv_context` | `seal::BatchEncoder`，密文和导入明文均为系数域 |
+| BGV | `seal::EncryptionParameters(scheme_type::bgv)` + `seal::SEALContext` | `seal::BatchEncoder`，密文为 NTT 域，导入明文为系数域 |
+
+`coeff_modulus_bits` 指完整 key-context 模数列表，包含数据 Q 和 special P。
+CKKS 的每个 q/P 至多 32 bit；BFV 工厂要求 Q/P/t 至多 31 bit、恰好一个 special P
+且 batching 可用。现有 BGV 前端案例使用三个数据 Q 和一个 P，参数定义见
+[integer_context](../../examples/evaluator_application.hpp)。NTT、密钥切换等算子的
+额外约束在构图或编译时检查。
+
+CKKS/BFV 工厂使用 `sec_level_type::none` 的功能验证配置。第 2 节参数用于
+快速验证，实际参数和验证状态记录在交付包中。
+
+### 7.2 CKKS：按消费位置编码常量
+
+乘法使 scale 相乘，rescale 去掉最后一个 q 并将 scale 除以该 q。
+后续 AddPlain 的常量按当前值编码：
 
 ```cpp
-std::string generate_ciphertext_multiply_body_asm(int N, const hpu::RnsDecompositionLayout& layout,
-                                                  bool append_psync = false, bool manage_modulus_table = true);
-std::string generate_ciphertext_multiply_body_asm(int N, int num_q, int num_p, int dnum,
-                                                  bool append_psync = false, bool manage_modulus_table = true);
-std::string generate_ciphertext_multiply_asm(int N, int num_q, int num_p, int dnum,
-                                             bool append_psync = true);
-double multiply_scale(double scale_a, double scale_b);
+seal::Plaintext native_bias;
+encoder.encode(std::vector<double>(active_slots, 1.0),
+               y.parms_id(), y.scale(), native_bias);
+const auto bias = app.import_plaintext("constant/bias_next", native_bias);
+evaluator.add_plain_inplace(y, bias);
 ```
 
-- 输入是 canonical HPU NTT 序的两个密文，输出两个 `Q_without_last` 上的 canonical
-  HPU NTT 分量。
-- 内部组合：张量积 `cmult`（`pmul`/`pmac` 得 t0/t1/t2）→ 系数域 KeySwitch
-  relinearization（`pintt`/`pntt` + BConv `pmul`/`pmac`）→ Rescale（`moddown` 舍入）。
-- `multiply_scale` 计算 `scale_a * scale_b`。
+两密文 Add/Sub 要求同 level、scale 兼容；当前前端 scale 相容检查的默认相对
+容差为 `1e-6`。scale 必须有限、为正，乘法后还需小于当前 Q 的表示上限。
+前端目前不支持 CKKS `mod_switch_to_next`，不能用它自动拉齐不同层级的分支。
 
-### 3.3 重线性化：仿 `Evaluator::relinearize`
+### 7.3 BFV/BGV：整数明文与后处理
 
-`include/scheme/ckks/relinearize.hpp`
+整数运算的数学语义位于模 t。常见乘法后处理为：
 
 ```cpp
-std::string generate_relinearize_ntt_body_asm(int N, const hpu::RnsDecompositionLayout& layout,
-                                              bool append_psync = true);
-std::string generate_relinearize_ntt_body_asm(int N, int num_q, int num_p, int dnum,
-                                              bool append_psync = true);
-std::string generate_relinearize_ntt_asm(int N, int num_q, int num_p, int dnum,
-                                         bool append_psync = true);
+evaluator.multiply(x, mixed, y);
+evaluator.relinearize_inplace(y, relin_keys);
+evaluator.mod_switch_to_next_inplace(y);
+evaluator.add_plain_inplace(y, bias);
 ```
 
-- 输入三分量 canonical HPU NTT 张量，输出两分量 canonical HPU NTT。
-- 内部指令：`pintt`（分量转到系数域）→ KeySwitch（`pntt`/`pintt`/`pmul`/`pmac`/BConv）→ 输出 `pntt`。
+BFV 明文由前端按消费者分别准备 Add/Sub 的系数域缩放形式或 MultiplyPlain
+的 NTT 形式，同一个导入明文可以复用。BGV 明文还按消费者的 correction factor
+准备；factor 更新和平衡由前端处理，应用可通过 `correction_factor()` 查询。
 
-### 3.4 Rescale：仿 `Evaluator::rescale_to_next`
+现有 BFV/BGV 前端示例实现 `x*(RotateRows(x,1)+RotateColumns(x))+7`。
+其计算图在各自 cpp 中定义，测试辅助代码提供输入和这一公式的数学预期。
+复制示例后改公式时，也要更新 [integer_main](../../examples/evaluator_application.hpp)
+中的预期计算，或在自己的程序里独立实现预期检查。
 
-`include/scheme/ckks/rescale.hpp`
+### 7.4 评估密钥与旋转键
+
+重线性化键通过 `keygen.create_relin_keys(relin_keys)` 生成。
+Galois key 应包含每次旋转所需的具体 element。例如 CKKS 左移一步与共轭：
 
 ```cpp
-std::string generate_rescale_body_asm(int num_q, int num_components,
-                                      bool append_psync = false, bool manage_modulus_table = true);
-std::string generate_rescale_asm(int num_q, int num_components, bool append_psync = true);
-std::string generate_rescale_ntt_body_asm(int N, int num_q, bool append_psync = true);
-std::string generate_rescale_ntt_asm(int N, int num_q, bool append_psync = true);
-double rescale_scale(double scale, std::uint64_t q_last);
+#include "scheme/ckks/galois.hpp"
+
+seal::GaloisKeys galois_keys;
+keygen.create_galois_keys(std::vector<std::uint32_t>{
+    hpu::scheme::ckks::rotation_galois_element(N, 1),
+    hpu::scheme::ckks::conjugation_galois_element(N)}, galois_keys);
 ```
 
-- 系数域舍入 RNS 降层：以最后一个 Q limb 为除数并从每个分量移除。
-- `*_ntt_*` 是 SEAL-facing 独立 kernel，输入/输出 canonical HPU NTT，输出落在
-  `Q_without_last`。
-- 内部指令：`dload`、`pmodld`、`moddown`（BConv + `pmul`/`padd`/`psub`）、`dstore`。
-
-### 3.5 Rotate / 槽旋转 / 共轭：仿 `Evaluator::apply_galois`
-
-`include/scheme/ckks/rotate.hpp`
+BFV/BGV 的行旋转和行交换使用同一 generator-3 映射：
 
 ```cpp
-std::string generate_rotate_body_asm(int N, const hpu::RnsDecompositionLayout& layout,
-                                     std::uint32_t galois_element, bool append_psync = true);
-std::string generate_rotate_steps_body_asm(int N, const hpu::RnsDecompositionLayout& layout,
-                                           int steps, bool append_psync = true);
-std::string generate_conjugate_body_asm(int N, const hpu::RnsDecompositionLayout& layout,
-                                        bool append_psync = true);
-// 以及 num_q/num_p/dnum 整数版本与 *_asm 包装版本
+#include "scheme/bfv/galois.hpp"
+
+seal::GaloisKeys galois_keys;
+keygen.create_galois_keys(std::vector<std::uint32_t>{
+    hpu::scheme::bfv::row_rotation_galois_element(N, 1),
+    hpu::scheme::bfv::column_rotation_galois_element(N)}, galois_keys);
 ```
 
-- 三分量 canonical HPU NTT 输入，两分量输出；第一阶段 p3 必须绑定
-  `create_fused_inverse_automorphism_tables` 生成的 modified-root 表。
-- 内部指令：fused INTT（`pintt`）→ Galois KeySwitch → 输出 `pntt`；无 CPU 系数置换。
-- 跨 kernel 仅保留 `domain=coefficient, key_domain=k`。
+上面代码假定已有同一 context 的 `keygen` 和对应 `N`。修改旋转步数时同步修改
+密钥列表。只有一些其他步数的键不能满足当前前端的具体 element 检查。
 
-`include/scheme/ckks/galois.hpp`（host 侧，无指令）：
+## 8. 编译选项与诊断
 
 ```cpp
-std::uint32_t conjugation_galois_element(std::size_t degree);     // 2N-1
-std::uint32_t rotation_galois_element(std::size_t degree, int steps);  // generator-3 槽映射
+hpu::seal_adapter::CompileOptions options;
+options.optimize_resources = true;
+options.require_instruction_verification = true;
+const auto compiled = app.compile("my_application", options);
 ```
 
-- 正 step 左旋、负 step 右旋，与 SEAL generator-3 槽布局一致；step=0 拒绝。
+| 字段 | 默认值 | 用途 |
+| --- | --- | --- |
+| `capacity_lines` | `1ULL << 24` | 数据构建阶段的行数上限，1 line=256B；实际包按使用量收紧窗口 |
+| `optimize_resources` | `true` | 启用工作区生命周期复用、对象槽位与 bank 调度 |
+| `require_instruction_verification` | `true` | 最终指令模型与 golden 不匹配时停止编译 |
+| `instruction_ntt_contract` | `natural_coefficient_boundaries` | 新应用的默认 host NTT 功能契约 |
 
-### 3.6 BFV 显式布局密文乘法
+选择 NoOpt 使用 `optimize_resources=false`；保留失败指令报告使用
+`require_instruction_verification=false`。诊断模式仍执行和记录指令比较，SEAL 与
+方案模型必须通过，资源优化改变基准结果也会失败。
 
-`include/scheme/bfv/ciphertext_multiply.hpp`
+当前新应用使用自然系数边界与显式 twist/untwist PMUL。`legacy_raw_stage`
+用于回放旧 raw 镜像，选择它不转换镜像或表，也不改变硬件 ABI。完整约定和
+诊断 CLI 见 [前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
 
-```cpp
-struct BfvCiphertextMultiplyLayout {
-    hpu::RnsDecompositionLayout keyswitch_layout; // active Q、固定 single-P、singleton digits
-    std::vector<int> b_mod_ids;
-    int m_sk_mod_id;
-    int plaintext_mod_id;
-};
-std::string generate_ciphertext_multiply_body_asm(
-    int N, const BfvCiphertextMultiplyLayout& layout,
-    std::uint64_t plaintext_modulus,
-    bool append_psync = false, bool manage_modulus_table = true);
-```
+## 9. golden、数学验证与交付
 
-- 该入口组合 comparison-free/no-SMRQ BEHZ、branchless-SK 与 BFV rounded single-P
-  Relinearization；不使用 generic 非舍入 ModDown 语义。SEAL CKKS single-P 路径也采用带舍入 ModDown。
-- Q/P/B/`m_sk`/t 全部使用调用者提供的全局 MOD_ID，允许降 level 后 P 和辅助基不重编号；
-  重复、越界、非 singleton-Q digit、multi-P 或不足的 B 基会被拒绝。
-- `manage_modulus_table=true` 时整个融合流只装载/释放一次 small-bank 模表；嵌入更大
-  planner 时可传 `false`，由外层统一管理模表和终止 `psync`。
+### 9.1 自动对照与用例预期
 
----
+`compile()` 自动运行 SEAL oracle、方案 SoftwareExecutor 和最终指令 host 模型。
+每个计算节点的 golden 来自 SEAL 密文结果，转换到 HPU 布局后与两种软件实现的
+有效 uint32 word 严格比较；优化模式还比较原始流与优化流结果。
 
-## 4. 内部组合层（被 `hpu::scheme::ckks` 复用）
+| 检查 | 用于回答 |
+| --- | --- |
+| 元数据和 RNS 密文字值逐节点相等 | 两种实现是否执行同一图并产生一致结果 |
+| 解密后与独立公式比较 | 所构建的图是否表达了用例作者想计算的公式 |
+| 目标端读回与 golden 比较 | 真实 HPU 是否产生该包要求的输出 |
 
-这些不是仿 SEAL 的直接入口，而是 codegen 复用的底层算子，各自返回 HPU 汇编：
+CKKS 密文字值对照仍是严格相等，`1e-2` 等容差用于解密后的浮点数学预期。
+BFV/BGV 解码预期按模 t 计算。自动对拍不能替代作者的独立公式检查。
 
-| 层 | 头文件 | 关键接口 | 内部 HPU 指令 |
-| --- | --- | --- | --- |
-| util NTT | `include/util/ntt.hpp` | `generate_hpu_ntt_body_asm` / `generate_hpu_intt_body_asm` | `pmul`（预/后扭转）、`pntt`/`pintt`、`dload`、`pfree` |
-| util MM | `include/util/mm.hpp` | 逐点向量乘法 / 乘加 | `pmul`、`pmac` |
-| util BConv | `include/util/bconv.hpp` | 基转换两阶段 | `pmul`、`pmac`、`dload`、`dstore` |
-| poly CMult | `include/poly/cmult.hpp` | 张量积 t0/t1/t2 | `pmul`、`pmac` |
-| poly ModUp | `include/poly/modup.hpp` | 模提升 | `pmul`、`pmac`、`dload`、`dstore` |
-| poly ModDown | `include/poly/moddown.hpp` | 模回缩/舍入降层 | `pmul`、`padd`、`psub`、`dload`、`dstore` |
-| operator KeySwitch | `include/operator/keyswitch.hpp` | 完整密钥切换 | `pntt`/`pintt`、`pmul`、`pmac`、`dload`、`dstore` |
-| operator Relinearization | `include/operator/relinearization.hpp` | 以 t0 为 base 切换 t2 | 复用 KeySwitch |
-| operator CiphertextMultiply | `include/operator/ciphertext_multiply.hpp` | 公共密文乘法 | 复用 CMult + Relinearization |
+第 2 节演示附加 CKKS semantic 报告。整数方案可使用
+`integer_delivery_semantics(decoded)`；先自行检查数学预期，再写入报告。
+这些辅助函数只组织报告，不替调用者完成预期断言。
 
-### 5. runtime 状态机（非 SEAL 概念，但被仿 SEAL 层消费）
+### 9.2 输出文件与 IT 消费
 
-`include/hpu/runtime/application.hpp` 与 `include/hpu/runtime/memory_image.hpp`：
+| 文件或目录 | 用途 |
+| --- | --- |
+| `package.json` | 方案、案例名称及各清单路径 |
+| `program/` | 最终指令、DMA 清单、目标侧 C/h；提供 `hpu_run_<stem>()` |
+| `memory/hpu_mem_image.u32.bin` | 执行前加载的初始镜像 |
+| `golden/golden_manifest.csv` | 各节点、分量、模数、结果路径与最终读回 span |
+| `metadata/operation_graph.json` | 依赖图与命名输出，供失败定位 |
+| `oracle/report.json` | 功能对拍、最终指令验证、资源报告及优化等价状态 |
+| `semantic/decoded.json` | 可选的用例数学验证报告 |
 
-```cpp
-class hpu::runtime::Application;   // 平台无关应用生命周期状态机
-class hpu::runtime::HpuMemImage;   // 256B 行对齐 DDR 镜像
-```
+BFV golden 是自然顺序系数域；CKKS/BGV 是 canonical HPU NTT 物理布局。
+golden 按节点、密文分量和模数 limb 拆分，每个计算节点结果保留独立读回空间。
+host 指令对拍检查有效字值，IT 还应检查 padding 和越界写入。
 
-- `Application` 记录对象驻留、dload/dstore、kernel 边界与唯一 `psync`；不依赖
-  Linux 驱动/用户态后端。
-- `HpuMemImage` 拥有确定性行对齐镜像，不持有任何秘密密钥。
+目标端加载初始镜像并运行 C 入口，按 golden 清单读回和比较。golden 文件作为
+期望结果，不加载到 HPU_MEM。`.inst32` 本身不是完整 ELF/BIN，Nexus-AM 需要
+消费 C wrapper 或等效实现 DMA 参数。host PASS 与 RTL/上板验证分别记录。
 
----
+详细数据协议见 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md)，目标端
+执行顺序见 [IT 交接清单](../delivery/IT_HANDOFF_CHECKLIST.md)。
 
-## 6. 端到端示例
+## 10. 常见错误与排查
 
-`examples/ckks_polynomial_x2_plus_one.cpp` 演示完整链：
+构图和参数错误通常抛出 `std::invalid_argument`；软件比较失败通常抛出
+`std::runtime_error`，包输出也可能抛出文件系统异常。建议在生成程序 `main()`
+捕获 `std::exception`，打印 `what()` 并返回非零。
 
-```
-SEALContext → Encrypt(x) → HPU_MEM 镜像 → Square → Relinearize → Rescale → AddPlain(1)
-```
+| 现象或错误信息 | 检查与处理 |
+| --- | --- |
+| `hpu/seal/evaluator.hpp` 找不到或链接符号缺失 | 开启 `HPU_ENABLE_SEAL_INTEGRATION`，在 SEAL 目标定义后添加应用目标并链接 `hpu_seal_delivery` |
+| `frontend name...` / `name is duplicated` | 检查名称字符、保留名称，以及输入和明文的重复导入名 |
+| `belongs to another application or is empty` | 确认输入已赋值且来自当前 builder，SEAL 数据需先导入 |
+| `does not support this component count` | 当前操作多数要求 2 分量，Multiply/Square 后先 Relinearize |
+| `binary operands require matching levels` | 查询两个 `parms_id()`，按方案显式安排降层与分支合并 |
+| `requires matching scales` / `plaintext and ciphertext levels differ` | 查询 CKKS level 与 scale，按实际消费者重新编码明文；判断是否需要有数学依据的 scale 视图 |
+| `scale is invalid or exceeds the active modulus` | 检查乘法后的 scale、模数链与计算深度，调整输入参数或操作顺序 |
+| `requested Galois key is missing` | 为实际步数或共轭/行交换准备具体 element 的键 |
+| `ciphertext has no next level` | 当前已到链底，减少降层次数或增加所需数据模数 |
+| `BFV multiply requires at least two active Q moduli` | 调整 BFV 模数链，确保乘法发生时仍有至少两个数据模数 |
+| `application has no computation` / `marked output must be produced by an operation` | 添加计算节点并标记其结果，导入和 set_scale 视图不单独构成计算 |
+| 输出目录已存在 | 使用新目录或第 3.3 节生成脚本 |
+| `delivery SEAL/model mismatch` | 功能模型与 oracle 不一致，查看报错 allocation 和 word 下标；生成不会通过 |
+| `encoded instruction verification...` | 定位最终指令与 golden 差异；需要保留报告时显式诊断导出并查看 `host_instruction_model` |
 
-SEAL 仅作为逐字 oracle 与最终解密验证；HPU 软件执行器运行整条计算链。
-运行 `./build-seal/hpu_ckks_polynomial_example`，`--print-asm` 可输出完整 HPU 指令 body。
+可通过 `compiled.resource_report_json()` 查看工作区和对象调度。不要凭旧 Plan
+示例打印的基准地址读取优化包；使用最终交付清单。
 
-多分支顶层应用参考 `examples/ckks_composed_application.cpp`，运行
-`./build-seal/hpu_ckks_composed_application_example`。它演示
-Rotate/Conjugate→Add→Multiply→Relinearize→Rescale→AddPlain 的完整 planner、
-relocation 和 runtime artifact 流程；详细说明见
-[CKKS 复合应用说明](../examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md)。
+## 11. 完整案例与进阶入口
 
-BFV 顶层应用参考 `examples/bfv_multiply_modswitch_application.cpp`。它实现
-`ModSwitch(left*right)+3`，其中 bias 在目标 level 预制，并把同一 plan 降低为完整
-relocation/runtime。传入 `--emit-dir PATH` 可输出 `.asm/.inst32/.cmd26`、生成的
-`hpu_run_*()` C 包装、resolved DMA CSV 和 HPU_MEM uint32 镜像；完整说明见
-[BFV 应用说明](../examples/BFV_APPLICATION_EXAMPLE.md)。
+| 目标 | 文档或代码 |
+| --- | --- |
+| CKKS 分支、旋转、共轭、乘法和降层 | [ckks_evaluator_application.cpp](../../examples/ckks_evaluator_application.cpp) |
+| BFV 分支、行旋转、行交换和乘法 | [bfv_evaluator_application.cpp](../../examples/bfv_evaluator_application.cpp) |
+| BGV 分支、correction factor 和降层 | [bgv_evaluator_application.cpp](../../examples/bgv_evaluator_application.cpp) |
+| 查询全部顶层签名 | [evaluator.hpp](../../include/hpu/seal/evaluator.hpp) |
+| 操作 Plan、数据镜像和底层算子 | [底层 API 参考](HPU_LOW_LEVEL_API_REFERENCE.md) |
+| 理解资源 IR、runtime 和编译器边界 | [项目架构](../architecture/HPU_ARCHITECTURE.md) |
+| 修改 SEAL 适配或对齐数学实现 | [SEAL 集成设计](../architecture/HPU_SEAL_INTEGRATION.md) |
+| 查询 ISA 与 NTT 软件契约 | [HPU 编程手册](HPU_PROGRAMMING_MANUAL.md) |
 
-BFV rotation 应用参考 `examples/bfv_rotation_application.cpp`。它将
-`RotateRows(x,2)` 与 `RotateColumns(x)` 两个分支合并为一次 Add，展示预制
-GaloisKey、modified-root twiddle、key-domain workspace、完整编码与 relocation；
-调用说明见 [BFV rotation 应用说明](../examples/BFV_ROTATION_APPLICATION_EXAMPLE.md)。
-
-
-## 通用应用交付接口
-
-`#include "hpu/seal/application_delivery.hpp"`，链接 `hpu_seal_delivery`。
-`make_ckks_application_package`、`make_bfv_application_package` 接收 plan lowering、
-runtime、初始镜像、按算子顺序保存的 SEAL ciphertext oracle 和软件执行后的镜像。
-`make_bgv_application_package` 接收 BGV 图 plan、lower 后的 application 和 oracle 快照。
-它们返回同一种 `hpu::delivery::ApplicationPackageRequest`，由
-`write_application_package(directory, request)` 写出，再用
-`validate_application_package_on_disk(directory)` 独立校验。
-
-每个应用输出必须有 golden；显式预留的临时对象应在 `reserve_ciphertext` 最后一个参数中
-传入 `AllocationKind::workspace`。默认仍为 `output`。
-参数和请求中不包含 SecretKey。三种方案都要求 SEAL oracle 到 golden 的检查为
-`pass`，并要求对应软件执行器与 SEAL 的每一步 HPU 物理输出逐字一致。详见
-[HPU_APPLICATION_PACKAGE_V1.md](../delivery/HPU_APPLICATION_PACKAGE_V1.md)。
-
-### 算子资源 IR 与导出编译
-
-`include/hpu/compiler/operator_resources.hpp` 提供符号操作数、数据端口及算术/变换操作。
-算子发出的 `OperatorProgram` 随 lowering/runtime/application 保留；物理对象编号仅在
-兼容汇编渲染和最终后端编码中出现。`read/publish/discard` 是输入、结果与生命周期
-声明，实际加载、写回、释放及 spill/reload 由公共编译器调度。
-
-`compile_application_resources(request, image, optimize, require_instruction_verification)`
-位于 `hpu/delivery/resource_compiler.hpp`，供前端和旧 Plan 交付导出共同使用。
-`write_application_package()` 自动编译尚未调度的原生请求，在私有镜像上更新最终指令、
-DMA 和 golden 目的地址。已经编译的前端请求直接导出。原始编码请求仍按原路径导出。
-
-CKKS Plan 默认 Relinearize/Rescale 自动声明独立 coefficient workspace，保护输入和
-逐节点 golden；调用者仍可通过已有显式 workspace 重载指定逻辑工作区。
+新用例从对应前端示例或本手册的完整程序开始，修改计算图、输入、参数和数学
+预期后重新生成完整包。实际支持能力以当前头文件、构图校验与编译验证结果为准。

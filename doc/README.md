@@ -6,12 +6,12 @@
 
 | 目标 | 建议阅读顺序 |
 | --- | --- |
-| 使用 SEAL 风格 Evaluator 编写三方案应用 | [Evaluator 前端入门](getting-started/HPU_EVALUATOR_FRONTEND.md) → [项目架构](architecture/HPU_ARCHITECTURE.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) |
+| 使用 SEAL 风格 Evaluator 编写三方案应用 | [Evaluator 前端入门](getting-started/HPU_EVALUATOR_FRONTEND.md) → [应用编程手册](reference/HPU_SEAL_API_REFERENCE.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) |
 | 理解整体架构、编译流程、runtime 与资源管理 | [项目架构](architecture/HPU_ARCHITECTURE.md) → [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) |
-| 使用 CKKS API 编写应用 | [CKKS 入门](getting-started/CKKS_HPU_GETTING_STARTED.md) → [CKKS 复合应用](examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
-| 为 IT 编写应用测试 | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [应用示例](examples/) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
+| 使用 CKKS 的显式 Plan 接口 | [CKKS 入门](getting-started/CKKS_HPU_GETTING_STARTED.md) → [CKKS 复合应用](examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md) → [底层 API 参考](reference/HPU_LOW_LEVEL_API_REFERENCE.md) |
+| 为 IT 编写应用测试 | [应用编程手册](reference/HPU_SEAL_API_REFERENCE.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) |
 | 对接 Nexus-AM 或 HPU runtime | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) → [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) |
-| 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
+| 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [底层 API 参考](reference/HPU_LOW_LEVEL_API_REFERENCE.md) |
 | 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
 | 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
@@ -32,7 +32,8 @@
 
 ### `reference/`
 
-- [HPU_SEAL_API_REFERENCE.md](reference/HPU_SEAL_API_REFERENCE.md)：CKKS、BGV、BFV 的应用构建器、operation plan、软件执行器和交付接口。
+- [HPU_SEAL_API_REFERENCE.md](reference/HPU_SEAL_API_REFERENCE.md)：面向应用程序员的手册，包含完整程序、自定义构建目标、顶层 API、三方案规则、golden 与诊断排查。
+- [HPU_LOW_LEVEL_API_REFERENCE.md](reference/HPU_LOW_LEVEL_API_REFERENCE.md)：供维护适配层、显式 Plan、镜像构建器、软件执行器和算子生成接口时查询。
 - [HPU_PROGRAMMING_MANUAL.md](reference/HPU_PROGRAMMING_MANUAL.md)：HPU 指令、编码、对象生命周期、DMA 和方案算子底层约定。
 
 ### `architecture/`

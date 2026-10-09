@@ -1,5 +1,8 @@
 # Evaluator 前端入门
 
+本页用于快速运行现有示例。完整应用代码、自定义构建目标和逐方法约束见
+[HPU 应用编程手册](../reference/HPU_SEAL_API_REFERENCE.md)。
+
 ## 1. 当前入口
 
 `hpu/seal/evaluator.hpp` 提供三个方案共用的应用前端：
