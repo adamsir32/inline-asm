@@ -154,4 +154,4 @@ random_stress PASS 不能代替完整控制器 NTT 数学闭环。
 后续原生算子资源 IR 迁移也通过了 73/73 回归和三方案 N=65536 前端包验收。
 现有 Plan 包导出已接入公共资源编译器并做严格 host 指令对拍；上述首次修复时的
 Plan 验证范围记录保留为验收快照。当前入口及报告字段见
-[编译器资源管理](../architecture/HPU_COMPILER_RESOURCES.md)。
+[HPU 项目架构](../architecture/HPU_ARCHITECTURE.md)。

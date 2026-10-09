@@ -1,8 +1,12 @@
 # HPU 仿 SEAL API 参考
 
-本文件记录当前仓库中所有“仿 Microsoft SEAL”的对外 API，即那些在内部会
+本文件主要记录 SEAL 适配、显式 Plan、算子生成和软件执行接口，即那些在内部会
 调用 `src/` 下、最终落到 HPU 指令（`padd`/`psub`/`pmul`/`pmac`/`pntt`/`pintt`/
 `pmodld`/`pfree`/`psync`/`dload`/`dstore`）或对应软件执行语义的接口。
+
+新应用使用 `ApplicationBuilder` / `Evaluator` 顶层 API，编程方法见
+[Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)，分层、编译流程
+与 runtime 职责见 [HPU 项目架构](../architecture/HPU_ARCHITECTURE.md)。
 
 仿 SEAL API 分两条独立路径，分别对应两个 namespace：
 

@@ -6,12 +6,13 @@
 
 | 目标 | 建议阅读顺序 |
 | --- | --- |
-| 使用 SEAL 风格 Evaluator 编写三方案应用 | [Evaluator 前端入门](getting-started/HPU_EVALUATOR_FRONTEND.md) → [编译器资源管理](architecture/HPU_COMPILER_RESOURCES.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) |
+| 使用 SEAL 风格 Evaluator 编写三方案应用 | [Evaluator 前端入门](getting-started/HPU_EVALUATOR_FRONTEND.md) → [项目架构](architecture/HPU_ARCHITECTURE.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) |
+| 理解整体架构、编译流程、runtime 与资源管理 | [项目架构](architecture/HPU_ARCHITECTURE.md) → [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) |
 | 使用 CKKS API 编写应用 | [CKKS 入门](getting-started/CKKS_HPU_GETTING_STARTED.md) → [CKKS 复合应用](examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
 | 为 IT 编写应用测试 | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [应用示例](examples/) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
 | 对接 Nexus-AM 或 HPU runtime | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) → [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) |
 | 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [仿 SEAL API 参考](reference/HPU_SEAL_API_REFERENCE.md) |
-| 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [编译器资源管理](architecture/HPU_COMPILER_RESOURCES.md) |
+| 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
 | 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
 
@@ -36,7 +37,7 @@
 
 ### `architecture/`
 
-- [HPU_COMPILER_RESOURCES.md](architecture/HPU_COMPILER_RESOURCES.md)：虚拟资源 IR、DDR workspace 复用、对象与 bank 调度、NoOpt 比较及当前迁移边界。
+- [HPU_ARCHITECTURE.md](architecture/HPU_ARCHITECTURE.md)：整体分层、顶层 API、计算图编译流程、资源 IR 与统一资源管理、runtime 职责、验证边界和交付链路。
 - [HPU_SEAL_INTEGRATION.md](architecture/HPU_SEAL_INTEGRATION.md)：modified-SEAL 依赖、NTT 物理模型、模数链和三方案适配设计。
 
 ### `delivery/`

@@ -199,4 +199,4 @@ const auto replay = hpu::model::execute_instructions(
 
 应用的独立数学预期仍由用例作者编写，例如解密后与 `x²+1` 或槽位旋转表达式比较。框架可以发现两条实现路径之间的差异；用例的数学预期用于检查构图是否表达了原本想测试的公式。私钥仅用于 host 解密，不进入交付包。
 
-交付包文件格式、Nexus-AM 消费方式与目标端读回要求见 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md)；资源调度实现见 [编译器资源管理](../architecture/HPU_COMPILER_RESOURCES.md)。
+交付包文件格式、Nexus-AM 消费方式与目标端读回要求见 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md)；整体架构、runtime 和资源调度实现见 [HPU 项目架构](../architecture/HPU_ARCHITECTURE.md)。

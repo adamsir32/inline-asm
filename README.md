@@ -2,7 +2,7 @@
 
 本项目用于为全同态加密在自研 HPU（Homomorphic Processing Unit）硬件上，提供 C++ 内联汇编（Inline Assembly）的生成器。项目基于 HPU 的 3-bit 寻址槽位和流水线执行语义进行抽象，支持从底层通用计算直至高层复杂 FHE 算子的自动代码生成，并可将生成后的 ASM 继续转译为 32 位指令编码文本。
 
-应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)。前端还接入了 [公共资源编译器](doc/architecture/HPU_COMPILER_RESOURCES.md)，支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
+应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
 
 ## 1. 项目结构
 
@@ -76,7 +76,7 @@
 - **`doc/delivery/`**：通用应用包规范及旧固定参数交付流程。
 - **`doc/audits/`**：按日期保存的规范符合性审计快照。
 
-### 9) 三个程序入口
+### 9) 三个 Legacy 程序入口
 
 | 可执行文件 | 源入口 | 职责 | 主要输出 |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@
 | `inline_asm_encode_outputs` | `test/encode/main.cpp` | 归档生成结果、编码 `.inst32/.cmd26`、生成 RV 接口冒烟流 | `outputs/<case>/*`、`outputs/rv_interface_smoke/*` |
 | `hpu_reference_vectors` | `test/reference/main.cpp` | 计算软件 golden、解密校验并拆分 UT/IT 数据包 | `outputs/<case>/test_data/*` |
 
-`src/main.cpp` 仍是指令生成主入口。`test/reference/main.cpp` 是另一独立可执行文件的入口，两者没有替代关系。顶层 `hpu_delivery` 目标只是按上述顺序编排三个程序并运行交付检查。
+上述入口用于旧固定参数算子流水线，`hpu_delivery` 目标按顺序编排三个程序并运行交付检查。新应用通过 `examples/*_evaluator_application.cpp` 使用统一前端构图和编译，`hpu_frontend_delivery` 目标生成三方案前端应用包；两条路径见 [项目架构](doc/architecture/HPU_ARCHITECTURE.md)。
 
 ---
 
