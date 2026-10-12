@@ -5,6 +5,7 @@
 #include "hpu/seal/operation_runtime.hpp"
 #include "hpu/seal/software_executor.hpp"
 #include "poly/cmult.hpp"
+#include "keyswitch_rounding_checks.hpp"
 
 #include <seal/seal.h>
 
@@ -142,6 +143,9 @@ int main()
                 && relocations.bindings.size()
                     == relocations.expected_dma_count,
             "Multiply pipeline relocation is incomplete");
+        require_keyswitch_rounding_bindings(
+            relocations, image_builder.image(), keyswitch_constants, top,
+            "relinearize");
         const auto has_binding = [&relocations](
             const std::string& operation,
             const std::string& allocation) {

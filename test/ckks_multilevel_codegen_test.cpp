@@ -55,6 +55,31 @@ void require_global_p(const std::string& program, int active_q)
             "complete lower-level kernel needs one terminal psync");
 }
 
+void require_rounded_keyswitch(const std::string& program, int active_q)
+{
+    const auto key_start = program.find("KEYSWITCH BODY:");
+    const auto key_end = program.find("Step 6: Add base component", key_start);
+    require(key_start != std::string::npos && key_end != std::string::npos,
+            "CKKS kernel omitted KeySwitch");
+    const auto keyswitch = program.substr(key_start, key_end - key_start);
+    for (int component = 0; component < 2; ++component) {
+        const auto start = keyswitch.find("component " + std::to_string(component)
+            + " stage-1: add floor(P/2) in Q union P");
+        require(start != std::string::npos, "CKKS KeySwitch omitted half-P rounding");
+        const auto end = keyswitch.find("MODDOWN stage-1: BConv P -> Q", start);
+        require(end != std::string::npos, "rounded KeySwitch omitted P-to-Q ModDown");
+        const auto rounding = keyswitch.substr(start, end - start);
+        require(count(rounding, hpu::padd(0, 0, 1))
+                    == static_cast<std::size_t>(active_q + 1),
+                "CKKS KeySwitch must round every Q/P limb of both components");
+        for (int context = 0; context <= 4; ++context) {
+            require(count(rounding, hpu::pmodld(context))
+                        == static_cast<std::size_t>(context < active_q || context == 4),
+                    "CKKS rounding lost fixed P or selected a dropped Q");
+        }
+    }
+}
+
 } // namespace
 
 int main()
@@ -110,6 +135,36 @@ int main()
         const auto rotate_q2 = hpu::scheme::ckks::generate_rotate_body_asm(
             degree, q2, galois_element, true);
         require_global_p(rotate_q2, 2);
+
+        // N=4096 matches the AM parameter-regression fixtures. Check raw
+        // Rotate, Conjugate, Relinearize and fused Multiply at active Q levels.
+        for (int test_degree : {128, 4096}) {
+            for (int active_q : {4, 3, 2, 1}) {
+                const auto layout = level_layout(active_q);
+                require_rounded_keyswitch(
+                    hpu::scheme::ckks::generate_rotate_steps_body_asm(
+                        test_degree, layout, 1, true), active_q);
+                require_rounded_keyswitch(
+                    hpu::scheme::ckks::generate_conjugate_body_asm(
+                        test_degree, layout, true), active_q);
+                require_rounded_keyswitch(
+                    hpu::scheme::ckks::generate_relinearize_ntt_body_asm(
+                        test_degree, layout, true), active_q);
+                if (active_q >= 2) {
+                    require_rounded_keyswitch(
+                        hpu::scheme::ckks::generate_ciphertext_multiply_body_asm(
+                            test_degree, layout, true), active_q);
+                }
+            }
+        }
+
+        const auto generic_layout = hpu::make_contiguous_rns_decomposition_layout(4, 2, 2);
+        const auto generic_multiply = hpu::scheme::ckks::generate_ciphertext_multiply_body_asm(
+            degree, generic_layout, true);
+        require(generic_multiply.find("Invalid") == std::string::npos
+                    && generic_multiply.find("ROUNDED SINGLE-P KEYSWITCH") == std::string::npos
+                    && generic_multiply.find("Step 5: ModDown for both parts") != std::string::npos,
+                "generic multi-P Multiply lost its existing KeySwitch contract");
 
         std::cout << "CKKS Q4->Q3->Q2 stable-MOD_ID codegen tests passed\n";
         return 0;

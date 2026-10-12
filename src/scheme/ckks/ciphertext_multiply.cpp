@@ -95,8 +95,11 @@ std::string generate_ciphertext_multiply_body_asm(
     asm_code << generate_basis_transform_body_asm(
         N, layout.q_mod_ids, 3, true,
         "Tensor t0/t1/t2: canonical HPU NTT -> coefficient domain");
-    asm_code << ::generate_hpu_relinearization_body_asm(
-        N, layout, false, false);
+    asm_code << (hpu::is_seal_single_p_rns_decomposition_layout(N, layout)
+        ? ::generate_hpu_rounded_single_p_relinearization_body_asm(
+            N, layout, false, false)
+        : ::generate_hpu_relinearization_body_asm(
+            N, layout, false, false));
 
     // Keep Rescale independent in the generated stream. It consumes the two
     // coefficient-domain relinearization results and drops q_last.
