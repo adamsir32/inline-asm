@@ -5,6 +5,7 @@
 
 #include <seal/seal.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -97,7 +98,7 @@ int main()
                     && prepared_keyswitch_constants.hardware_prefix
                         == "constants/keyswitch/q2/hardware"
                     && prepared_keyswitch_constants
-                        .hardware_constant_polynomial_count == 11
+                        .hardware_constant_polynomial_count == 14
                     && prepared_keyswitch_constants
                         .hardware_workspace_polynomial_count == 12,
                 "level-specific KeySwitch constant record is incorrect");
@@ -124,6 +125,22 @@ int main()
                 "Rotate twiddles or reserved output shape is incorrect");
 
         const auto& image = builder.image();
+        const auto half_p = level.special_moduli.front() / 2;
+        std::vector<int> half_contexts = level.rns_layout.q_mod_ids;
+        half_contexts.push_back(level.rns_layout.p_mod_ids.front());
+        for (std::size_t limb = 0; limb < half_contexts.size(); ++limb) {
+            const auto& half = image.allocation(
+                prepared_keyswitch_constants.hardware_prefix + "/half/mod"
+                + std::to_string(half_contexts[limb]));
+            const auto modulus = limb < level.q_moduli.size()
+                ? level.q_moduli[limb] : level.special_moduli.front();
+            const auto begin = image.words().begin()
+                + half.span.line_offset * hpu::runtime::kHpuMemLineWords;
+            require(half.read_only && half.word_count == spec.poly_modulus_degree
+                        && std::all_of(begin, begin + half.word_count,
+                            [&](std::uint32_t value) { return value == half_p % modulus; }),
+                "rounded KeySwitch half-P payload is missing or incorrect");
+        }
         const auto& keyswitch_allocation = image.allocation(
             "constants/keyswitch/q2");
         const std::size_t keyswitch_word_offset = static_cast<std::size_t>(

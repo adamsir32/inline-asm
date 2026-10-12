@@ -336,6 +336,15 @@ PreparedKeySwitchConstants CkksApplicationImageBuilder::add_keyswitch_constants(
         full_contexts.end(), authoritative.rns_layout.p_mod_ids.begin(),
         authoritative.rns_layout.p_mod_ids.end());
 
+    // The compact KSW1 half-P value is a software record, not a DMA operand.
+    // Rounded hardware ModDown adds its polynomial-sized residue to each
+    // mutable Q/P accumulator before the existing BConv/subtract/divide core.
+    for (int context : full_contexts) {
+        add_constant_polynomial(
+            mod_id(result.hardware_prefix + "/half", context),
+            (p >> 1U) % modulus(context));
+    }
+
     // Generic BConv consumes polynomial-sized scalar objects. Keep these
     // separate from the compact KSW1 record used by the software executor.
     for (std::size_t digit = 0;

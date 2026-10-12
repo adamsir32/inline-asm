@@ -547,6 +547,16 @@ void bind_keyswitch_core(
     for (int component = 0; component < 2; ++component) {
         const std::string accumulator_role =
             "accumulator/c" + std::to_string(component);
+        // Match the rounded single-P KeySwitch core: add floor(P/2) to QP
+        // scratch in place, never to an imported ciphertext or constant.
+        for (int context : full_contexts) {
+            const auto accumulator = workspace_mod_id(
+                hardware_prefix, accumulator_role, context);
+            bindings.load(0, accumulator);
+            bindings.load(
+                1, hardware_prefix + "/half/mod" + std::to_string(context));
+            bindings.store(0, accumulator);
+        }
         for (std::size_t source_index = 0;
              source_index < layout.p_mod_ids.size(); ++source_index) {
             const int source = layout.p_mod_ids[source_index];

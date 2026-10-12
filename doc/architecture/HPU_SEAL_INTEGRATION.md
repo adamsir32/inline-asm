@@ -218,6 +218,17 @@ The codegen regression test counts every PNTT/PINTT stage, so reintroducing the
 four input transforms is a test failure. Standalone operator demos keep their
 existing table-management behavior through default arguments.
 
+SEAL singleton-digit CKKS KeySwitch uses rounded single-P ModDown in
+Relinearize, Rotate, Conjugate and fused Multiply: both Q/P accumulators
+receive `floor(P/2) mod modulus` before the P-to-Q conversion and division.
+The image contains polynomial-sized `hardware/half/mod<ID>` constants and
+the DMA schedule binds each constant to both mutable accumulators. This is
+the producer-side equivalent of the
+[Nexus-AM rounded-P adaptation](https://github.com/cuihu2/nexus-am/blob/master/tests/hputest/scripts/program_adaptation.py).
+Regenerate the complete application package to include the new constants,
+instructions and resolved DMA spans. Codegen regression covers N=128/4096
+and active Q4/Q3/Q2/Q1; plan tests check both components' rounding operands.
+
 The first additional kernel is CKKS Rotate. For odd Galois element `k`, the
 SEAL adapter precomputes hardware INTT tables with `psi' = psi^(1/k) mod q` for
 every active q. The generated stream applies that modified-root INTT to `c0`
