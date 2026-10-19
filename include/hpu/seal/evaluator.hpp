@@ -80,6 +80,10 @@ public:
     const hpu::delivery::ApplicationPackageRequest& package() const;
     hpu::delivery::ApplicationPackageReport write(const std::filesystem::path& directory) const;
     const ::seal::Ciphertext& oracle_result(const Ciphertext& value) const;
+    // Returns the native SEAL ciphertext reconstructed from the BFV software
+    // executor's final memory, rather than from the independent SEAL oracle.
+    // This is intended for chaining separately compiled HPU stages.
+    const ::seal::Ciphertext& software_result(const Ciphertext& value) const;
     std::size_t node_count() const noexcept;
     // SEAL metadata and every functional SoftwareExecutor output word passed.
     // Encoded instruction diagnostics have a separate status below.

@@ -397,6 +397,13 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
 - **BFV comparison-free 单 kernel 乘法：**
   BFV 固定使用 `Q|Pks|B|m_sk|t`。输入先执行不带 `m_tilde/SmMRq` 的 `Q -> Bsk` FastBConv，再在 Q/Bsk 下做 tensor product、FastFloor 和 branchless-SK；校正为 `out=y+alpha*(-B) mod Q`。三分量 Q 结果写回统一 HPU_MEM 后立即由同一指令流执行 Q/Pks Relinearization，中间没有 `psync`、host copy 或 window 切换，完整流只有末尾一个 `psync`。默认统一镜像为 30913 line，低于配置的 65536-line 上限。BFV ModSwitch 仍是独立算子，复用 `round(c/q_last)`。
 
+- **SealPIR 二维递归应用：**
+  `hpu_bfv_sealpir_2d_example` 保留原有一维 PIR 示例，并新增 128 条的 4×4 快速回归和
+  65536 条的 86×85 完整配置。两个查询维度的展开、点积及模数切换都生成 HPU 指令；
+  CPU 只负责客户端、BatchEncoder 和递归分解/重组。第二轮读取第一轮 HPU 软件执行器
+  内存重建的实际密文，不使用 SEAL oracle 代替。参数差异、命令和 ST 产物见
+  [二维 SealPIR HPU 应用](doc/examples/SEALPIR_2D_HPU_APPLICATION.md)。
+
 - **生成与编码分层解耦：**
   `inline-asm` 仍负责汇编生成，`encode` 模块则负责解析、归一化和 32 位编码。两者保留独立边界，但通过同一 CMake 工程统一构建，从而降低汇编语义更新后生成器与编码器失配的风险。
 

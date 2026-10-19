@@ -109,6 +109,15 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     require(baseline.verified() && optimized.verified(), "functional verification did not run");
     require(identical(optimized.oracle_result(saved_handle), saved_input), "inplace changed aliased input");
     require(identical(optimized.oracle_result(multiplied), host_multiplied), "frontend expression differs from independent oracle");
+    if (scheme == seal::scheme_type::bfv) {
+        require(identical(optimized.software_result(saved_handle), saved_input),
+                "BFV software result did not preserve an imported ciphertext");
+        require(identical(optimized.software_result(multiplied), host_multiplied),
+                "BFV software result differs from the independent oracle");
+    } else {
+        rejects([&] { optimized.software_result(multiplied); },
+                "non-BFV graph unexpectedly exposed a BFV software result");
+    }
     require(baseline.package().outputs.size() == optimized.package().outputs.size(), "optimization lost golden results");
     for (std::size_t i = 0; i < baseline.package().outputs.size(); ++i)
         require(baseline.package().outputs[i].golden_words == optimized.package().outputs[i].golden_words,
@@ -120,6 +129,8 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     require(optimized.package().initial_image->words() == frozen_words &&
         optimized.package().operation_graph_json == frozen_graph, "compiled application changed after builder mutation");
     rejects([&] { optimized.oracle_result(later); }, "compiled snapshot accepted future graph value");
+    rejects([&] { optimized.software_result(later); },
+            "compiled snapshot accepted a future BFV software result");
 
     ApplicationBuilder foreign(*context);
     const auto other = foreign.import_ciphertext("input/other", saved_input);

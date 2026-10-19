@@ -31,6 +31,10 @@ Cuckoo Hash、传输协议和标签处理，以及 SealPIR 的网络序列化，
 
 入口：`examples/bfv_poseidon_pir_application.cpp`
 
+该文件继续保留原先的一维实验，不因新增工作而删除。严格采用 BatchEncoder、两轮递归、
+4×4/86×85 两种规模的独立实现见
+[`SEALPIR_2D_HPU_APPLICATION.md`](SEALPIR_2D_HPU_APPLICATION.md)。
+
 原样保留的规模和流程：
 
 | 项目 | 值 |

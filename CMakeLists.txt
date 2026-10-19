@@ -503,6 +503,12 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     )
     target_link_libraries(hpu_bfv_poseidon_pir_example PRIVATE hpu_seal_delivery)
 
+    add_executable(hpu_bfv_sealpir_2d_example
+            examples/bfv_sealpir_2d_application.cpp
+    )
+    target_link_libraries(hpu_bfv_sealpir_2d_example
+            PRIVATE hpu_seal_delivery hpu_filesystem_compat)
+
     add_executable(hpu_bfv_poseidon_psi_example
             examples/bfv_poseidon_psi_application.cpp
     )
@@ -585,6 +591,47 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     hpu_application_delivery(bgv bgv_rotate_chain hpu_bgv_rotate_chain_example)
     hpu_application_delivery(bgv bgv_multiply_chain hpu_bgv_multiply_chain_example)
     hpu_application_delivery(bgv bgv_composed_application hpu_bgv_composed_application_example)
+
+    add_custom_target(bfv_sealpir_2d_small_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_sealpir_2d_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_sealpir_2d_small
+            --profile small --record-index 127
+        DEPENDS hpu_bfv_sealpir_2d_example hpu_validate_package
+        COMMENT "Generating two-stage BFV SealPIR package: small 4x4 profile"
+        VERBATIM)
+    add_dependencies(hpu_bfv_delivery bfv_sealpir_2d_small_delivery)
+
+    # The 65536-record profile deliberately remains explicit: it retains the
+    # 86x85 SealPIR matrix and emits many bounded HPU dot-product shards.
+    add_custom_target(bfv_sealpir_2d_full_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_sealpir_2d_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_sealpir_2d_full
+            --profile full --record-index 65535
+        DEPENDS hpu_bfv_sealpir_2d_example hpu_validate_package
+        COMMENT "Generating two-stage BFV SealPIR package: full 86x85 profile"
+        VERBATIM)
+
+    if(BUILD_TESTING)
+        foreach(sealpir_record 0 64 127)
+            add_test(NAME hpu_bfv_sealpir_2d_small_record_${sealpir_record}
+                COMMAND hpu_bfv_sealpir_2d_example
+                    --profile small --record-index ${sealpir_record})
+            set_tests_properties(hpu_bfv_sealpir_2d_small_record_${sealpir_record}
+                PROPERTIES LABELS "sealpir-2d;application" RUN_SERIAL TRUE TIMEOUT 900)
+        endforeach()
+        add_test(NAME bfv_sealpir_2d_small_delivery_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+                --example $<TARGET_FILE:hpu_bfv_sealpir_2d_example>
+                --validator $<TARGET_FILE:hpu_validate_package>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/sealpir_2d_delivery_test
+                --profile small --record-index 127)
+        set_tests_properties(bfv_sealpir_2d_small_delivery_test
+            PROPERTIES LABELS "application-delivery;sealpir-2d" RUN_SERIAL TRUE TIMEOUT 1200)
+    endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application_n65536 hpu_bfv_multiply_modswitch_example 65536)
     hpu_application_delivery(bfv bfv_rotation_application_n65536 hpu_bfv_rotation_example 65536)
