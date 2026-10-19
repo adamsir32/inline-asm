@@ -769,6 +769,18 @@ void BfvSoftwareExecutor::rotate_rows(
            coefficient_workspace, output);
 }
 
+void BfvSoftwareExecutor::apply_galois(
+    const PreparedBfvRnsObject& input, std::uint32_t galois_element,
+    const PreparedEvaluationKey& galois_key,
+    const PreparedKeySwitchConstants& keyswitch_constants,
+    const std::vector<PreparedFusedAutomorphismTwiddles>& fused_tables,
+    const std::vector<PreparedCanonicalTwiddles>& canonical_tables,
+    const PreparedBfvRnsObject& coefficient_workspace, const PreparedBfvRnsObject& output)
+{
+    rotate(input, galois_element, galois_key, keyswitch_constants, fused_tables,
+           canonical_tables, coefficient_workspace, output);
+}
+
 void BfvSoftwareExecutor::rotate_columns(
     const PreparedBfvRnsObject& input, const PreparedEvaluationKey& galois_key,
     const PreparedKeySwitchConstants& keyswitch_constants,

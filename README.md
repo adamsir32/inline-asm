@@ -72,6 +72,8 @@
 
 - **[`doc/README.md`](doc/README.md)**：按应用开发、IT 测试、runtime 对接和维护任务提供文档入口。
 - **`doc/getting-started/`、`doc/examples/`**：入门流程和可运行的 CKKS/BFV 应用示例。
+  Poseidon/SealPIR 与 Poseidon/APSI 的移植范围、来源参数和所有显式适配见
+  [Poseidon PIR/PSI 的 HPU 应用移植](doc/examples/POSEIDON_PIR_PSI_APPLICATIONS.md)。
 - **`doc/reference/`、`doc/architecture/`**：当前 API、HPU 指令规范和 SEAL 集成设计。
 - **`doc/delivery/`**：通用应用包规范及旧固定参数交付流程。
 - **`doc/audits/`**：按日期保存的规范符合性审计快照。

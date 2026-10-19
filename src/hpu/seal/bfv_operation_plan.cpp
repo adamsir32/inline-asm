@@ -298,6 +298,18 @@ PreparedBfvRnsObject BfvOperationPlan::append_rotate_rows(
                          std::move(output_id));
 }
 
+PreparedBfvRnsObject BfvOperationPlan::append_apply_galois(
+    std::string step_id, const PreparedBfvRnsObject& ciphertext,
+    std::uint32_t galois_element, const PreparedEvaluationKey& galois_key,
+    const PreparedKeySwitchConstants& keyswitch_constants,
+    const std::vector<PreparedFusedAutomorphismTwiddles>& fused_twiddles,
+    const PreparedBfvRnsObject& coefficient_workspace, std::string output_id)
+{
+    return append_galois(BfvOperationKind::apply_galois, std::move(step_id), ciphertext,
+                         galois_element, galois_key, keyswitch_constants, fused_twiddles,
+                         coefficient_workspace, std::move(output_id));
+}
+
 PreparedBfvRnsObject BfvOperationPlan::append_rotate_columns(
     std::string step_id, const PreparedBfvRnsObject& ciphertext,
     const PreparedEvaluationKey& galois_key,
@@ -601,7 +613,8 @@ PreparedBfvRnsObject BfvOperationPlan::append_galois(
     const PreparedBfvRnsObject& coefficient_workspace, std::string output_id)
 {
     require_new_step(step_id);
-    if (kind != BfvOperationKind::rotate_rows && kind != BfvOperationKind::rotate_columns) {
+    if (kind != BfvOperationKind::apply_galois && kind != BfvOperationKind::rotate_rows &&
+        kind != BfvOperationKind::rotate_columns) {
         throw std::invalid_argument("invalid BFV Galois operation kind");
     }
     validate_value(ciphertext, 2, hpu::runtime::PolynomialDomain::coefficient, false,

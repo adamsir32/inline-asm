@@ -179,7 +179,7 @@ const char* name(BfvOperationKind kind)
     case BfvOperationKind::relinearize: return "relinearize";
 #define OP(x) case BfvOperationKind::x: return #x
         OP(add); OP(subtract); OP(add_plain); OP(subtract_plain);
-        OP(multiply_plain); OP(negate); OP(mod_switch); OP(rotate_rows); OP(rotate_columns);
+        OP(multiply_plain); OP(negate); OP(mod_switch); OP(apply_galois); OP(rotate_rows); OP(rotate_columns);
 #undef OP
     }
     throw std::invalid_argument("unknown BFV operation");

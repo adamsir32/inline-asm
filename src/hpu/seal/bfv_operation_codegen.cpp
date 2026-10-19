@@ -181,6 +181,7 @@ std::string lower_step(const BfvOperationStep& step, const BfvLevelChain& level_
         return hpu::scheme::bfv::generate_modswitch_body_asm(
             static_cast<int>(source.q_moduli.size()), 2, false, false);
     }
+    case BfvOperationKind::apply_galois:
     case BfvOperationKind::rotate_rows:
     case BfvOperationKind::rotate_columns: {
         if (step.inputs.size() != 1 || step.workspaces.size() != 1 ||

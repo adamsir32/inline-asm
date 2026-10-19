@@ -498,6 +498,16 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             hpu_filesystem_compat
     )
 
+    add_executable(hpu_bfv_poseidon_pir_example
+            examples/bfv_poseidon_pir_application.cpp
+    )
+    target_link_libraries(hpu_bfv_poseidon_pir_example PRIVATE hpu_seal_delivery)
+
+    add_executable(hpu_bfv_poseidon_psi_example
+            examples/bfv_poseidon_psi_application.cpp
+    )
+    target_link_libraries(hpu_bfv_poseidon_psi_example PRIVATE hpu_seal_delivery)
+
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
         "Directory for scheme-neutral application packages")
@@ -569,6 +579,8 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     hpu_application_delivery(ckks ckks_composed_application hpu_ckks_composed_application_example)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application hpu_bfv_multiply_modswitch_example)
     hpu_application_delivery(bfv bfv_rotation_application hpu_bfv_rotation_example)
+    hpu_application_delivery(bfv bfv_poseidon_pir_application hpu_bfv_poseidon_pir_example)
+    hpu_application_delivery(bfv bfv_poseidon_psi_application hpu_bfv_poseidon_psi_example)
     hpu_application_delivery(bgv bgv_plain_chain hpu_bgv_plain_chain_example)
     hpu_application_delivery(bgv bgv_rotate_chain hpu_bgv_rotate_chain_example)
     hpu_application_delivery(bgv bgv_multiply_chain hpu_bgv_multiply_chain_example)
