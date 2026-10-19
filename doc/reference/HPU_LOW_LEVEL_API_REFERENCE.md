@@ -911,3 +911,19 @@ DMA 和 golden 目的地址。已经编译的前端请求直接导出。原始�
 
 CKKS Plan 默认 Relinearize/Rescale 自动声明独立 coefficient workspace，保护输入和
 逐节点 golden；调用者仍可通过已有显式 workspace 重载指定逻辑工作区。
+
+
+### SSA 值、显式端口和原地约束
+
+原生算子使用 `make_operand(label, compatibility_slot=-1)` 创建任意数量的独立变量。
+名称仅用于阅读，可选槽位仅用于旧汇编渲染。每次定义生成新的 SSA `ValueId`；
+`Recording::value(variable)` 可取得当前版本，`Operation.inputs/outputs` 引用这些版本。
+
+`OperatorProgram.ports` 保存每次加载/写回的 `PortId`、方向和 binding。
+通过 `bind_port(id, binding)` 单独绑定，或用 `bind_ports(bindings)` 完成已有请求的
+接入，再调用 `bind_program(program, image)` 降低到存储 IR。旧的四参数重载继续
+提供兼容基准检查。程序片段拼接会重编号值与端口，不能直接拼接裸操作数组。
+
+NTT/PMAC 的 `tied_input` 声明结果必须承接的数据/累加器输入。降低器在旧版本仍
+被使用时通过 DMA snapshot 保留旧字值，再初始化新结果；常规算术可分配独立结果。
+`render_operator_ir()` 提供值和端口的可读视图。此变更不修改统一 Evaluator 接口。

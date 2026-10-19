@@ -20,9 +20,9 @@ std::string generate_basis_ntt_body_asm(
 {
     std::ostringstream asm_code;
 
-    const auto POBJ_POLY = hpu::resource::value;
-    const auto POBJ_TWIDDLE = hpu::resource::transform_table;
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_POLY = hpu::resource::make_operand("value", 0);
+    const auto POBJ_TWIDDLE = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* --- " << label << ": coefficient -> NTT domain --- */\n";
     asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
@@ -50,9 +50,9 @@ std::string generate_basis_intt_body_asm(
 {
     std::ostringstream asm_code;
 
-    const auto POBJ_POLY = hpu::resource::value;
-    const auto POBJ_TWIDDLE = hpu::resource::transform_table;
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_POLY = hpu::resource::make_operand("value", 0);
+    const auto POBJ_TWIDDLE = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* --- " << label << ": NTT -> coefficient domain --- */\n";
     asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,

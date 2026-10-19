@@ -26,9 +26,9 @@ std::string generate_hpu_rounded_single_p_moddown_contexts_body_asm(
         return asm_code.str();
     }
 
-    constexpr auto POBJ_VALUE = hpu::resource::value;
-    constexpr auto POBJ_HALF = hpu::resource::auxiliary;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_VALUE = hpu::resource::make_operand("value", 0);
+    const auto POBJ_HALF = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     std::vector<int> full_contexts = q_contexts;
     full_contexts.push_back(p_context);

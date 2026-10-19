@@ -10,11 +10,11 @@
 namespace hpu::scheme::bgv {
 namespace {
 
-constexpr auto kValue = hpu::resource::value;
-constexpr auto kAuxiliary = hpu::resource::auxiliary;
-constexpr auto kAccumulator = hpu::resource::accumulator;
-constexpr auto kTwiddle = hpu::resource::transform_table;
-constexpr auto kModulusTable = hpu::resource::modulus_table;
+const auto kValue = hpu::resource::make_operand("value", 0);
+const auto kAuxiliary = hpu::resource::make_operand("auxiliary", 1);
+const auto kAccumulator = hpu::resource::make_operand("accumulator", 2);
+const auto kTwiddle = hpu::resource::make_operand("transform_table", 3);
+const auto kModulusTable = hpu::resource::make_operand("modulus_table", 4);
 
 bool valid_config(int N, const hpu::RnsDecompositionLayout& layout, int t_id)
 {

@@ -12,10 +12,10 @@
 namespace hpu::scheme::ckks {
 namespace {
 
-constexpr auto kLeftObject = hpu::resource::value;
-constexpr auto kRightObject = hpu::resource::auxiliary;
-constexpr auto kOutputObject = hpu::resource::accumulator;
-constexpr auto kModulusTableObject = hpu::resource::modulus_table;
+const auto kLeftObject = hpu::resource::make_operand("value", 0);
+const auto kRightObject = hpu::resource::make_operand("auxiliary", 1);
+const auto kOutputObject = hpu::resource::make_operand("accumulator", 2);
+const auto kModulusTableObject = hpu::resource::make_operand("modulus_table", 4);
 
 bool valid_config(int num_q)
 {

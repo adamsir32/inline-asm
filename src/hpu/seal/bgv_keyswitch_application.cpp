@@ -660,23 +660,26 @@ static BgvKeySwitchApplication build_bgv_galois_application(
     hpu::resource::Recording recording;
     std::ostringstream body;
     body << "        /* BGV Galois automorphism in HPU, then Galois KeySwitch */\n";
-    body << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
+    const auto native_modulus_table = hpu::resource::make_operand("modulus_table", 4);
+    const auto native_transform_table = hpu::resource::make_operand("transform_table", 3);
+    const auto native_value = hpu::resource::make_operand("value", 0);
+    body << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx,
                        hpu::DloadFlag::small_bank);
     for (std::size_t component = 0; component < 2; ++component) {
         for (std::size_t basis = 0; basis < q_count; ++basis) {
             body << hpu::resource::select_modulus(static_cast<int>(basis));
-            body << hpu::resource::read(hpu::resource::value, hpu::DataType::poly);
+            body << hpu::resource::read(native_value, hpu::DataType::poly);
             body << generate_hpu_intt_body_asm(
-                static_cast<int>(degree), hpu::resource::value, hpu::resource::transform_table, false);
+                static_cast<int>(degree), native_value, native_transform_table, false);
             body << generate_hpu_ntt_body_asm(
-                static_cast<int>(degree), hpu::resource::value, hpu::resource::transform_table, false);
-            body << hpu::resource::publish(hpu::resource::value, 1);
+                static_cast<int>(degree), native_value, native_transform_table, false);
+            body << hpu::resource::publish(native_value, 1);
         }
     }
     body << hpu::scheme::bgv::generate_keyswitch_ntt_body_asm(
         static_cast<int>(degree), layout,
         static_cast<int>(key_modulus_count), false, false);
-    body << hpu::resource::discard(hpu::resource::modulus_table) << hpu::resource::finish_program();
+    body << hpu::resource::discard(native_modulus_table) << hpu::resource::finish_program();
     auto instructions = hpu::assemble_source(body.str());
     hpu::validate_executable_program(instructions);
     const auto encoded_dma = hpu::collect_dma_relocations(instructions);

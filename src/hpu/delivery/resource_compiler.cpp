@@ -157,9 +157,10 @@ std::string compile_application_resources(
         if (span.line_offset != dma[i].span.line_offset || span.line_count != dma[i].span.line_count)
             throw std::invalid_argument("native operator DMA port disagrees with baseline span");
     }
-    auto resources = hpu::compiler::compile_resources(
-        hpu::resource::bind_program(*request.program.operator_program,
-            request.program.instructions, dma, image),
+    auto source = *request.program.operator_program;
+    source.bind_ports(dma);
+    auto program = hpu::resource::bind_program(source, image);
+    auto resources = hpu::compiler::compile_resources(std::move(program),
         request.program.instructions, dma, image, options);
     for (auto& output : request.outputs) {
         const auto& allocation = containing_allocation(image, output.destination);

@@ -16,7 +16,7 @@
 namespace hpu::seal_adapter {
 namespace {
 
-constexpr auto kModulusTableObject = hpu::resource::modulus_table;
+const auto kModulusTableObject = hpu::resource::make_operand("modulus_table", 4);
 constexpr auto kCanonicalDomain =
     hpu::runtime::PolynomialDomain::canonical_ntt_physical;
 
@@ -411,7 +411,12 @@ CkksLoweredProgram lower_ckks_operation_plan(
     for (const auto& step : plan.steps()) {
         CkksLoweredOperation lowered;
         lowered.operation = step;
-        lowered.body_asm = lower_step(step, level_chain, degree);
+        {
+            hpu::resource::Recording kernel;
+            lowered.body_asm = lower_step(step, level_chain, degree);
+            lowered.operator_program = std::make_shared<hpu::resource::OperatorProgram>(kernel.finish());
+        }
+        recording.append(*lowered.operator_program);
         result.body_asm += lowered.body_asm;
         result.operations.push_back(std::move(lowered));
     }

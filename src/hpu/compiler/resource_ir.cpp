@@ -1,5 +1,6 @@
 #include "hpu/compiler/resource_ir.hpp"
 #include "hpu/compiler/operator_resources.hpp"
+#include "hpu/compiler/detail/use_index.hpp"
 
 #include "encoder.hpp"
 #include "executable.hpp"
@@ -255,12 +256,13 @@ struct ScheduledProgram {
 class Scheduler {
 public:
     Scheduler(VirtualProgram& program, const CompileOptions& options)
-        : program_(program), options_(options), states_(program.objects.size()) {}
+        : program_(program), options_(options), states_(program.objects.size()), uses_(program) {}
 
     ScheduledProgram run()
     {
         for (cursor_ = 0; cursor_ < program_.instructions.size(); ++cursor_) {
             const auto op = program_.instructions[cursor_];
+            uses_.consume(op, cursor_);
             current_origin_ = op.origin.value_or(ResolvedDma{});
             excluded_.clear();
             excluded_.insert(op.uses.begin(), op.uses.end());
@@ -275,7 +277,7 @@ public:
                 emit(op.instruction);
                 break;
             case hpu::Mnemonic::kPsync:
-                for (ObjectId id = 0; id < states_.size(); ++id) release(id);
+                while (!resident_.empty()) release(*resident_.begin());
                 emit(op.instruction);
                 break;
             default: kernel(op); break;
@@ -297,17 +299,7 @@ private:
 
     std::size_t next_use(ObjectId id) const
     {
-        for (std::size_t index = cursor_ + 1; index < program_.instructions.size(); ++index) {
-            const auto& op = program_.instructions[index];
-            if (op.instruction.mnemonic == hpu::Mnemonic::kPfree) continue;
-            if (std::find(op.uses.begin(), op.uses.end(), id) != op.uses.end()
-                || (op.reload_retained_object
-                    && std::find(op.definitions.begin(), op.definitions.end(), id)
-                        != op.definitions.end())) {
-                return index;
-            }
-        }
-        return kNoUse;
+        return uses_.next(id);
     }
 
     bool small(ObjectId id) const { return program_.objects[id].dma_flag != 0; }
@@ -315,9 +307,7 @@ private:
     std::size_t banks() const
     {
         std::size_t result = 0;
-        for (ObjectId id = 0; id < states_.size(); ++id) {
-            if (states_[id].slot && !small(id)) ++result;
-        }
+        for (const auto id : resident_) if (!small(id)) ++result;
         return result;
     }
 
@@ -326,8 +316,7 @@ private:
         const auto regular = banks() + extra;
         std::size_t slots = 0;
         std::uint64_t small_lines = 0;
-        for (ObjectId id = 0; id < states_.size(); ++id) {
-            if (!states_[id].slot) continue;
+        for (const auto id : resident_) {
             ++slots;
             if (small(id)) small_lines += program_.objects[id].line_count;
         }
@@ -364,6 +353,7 @@ private:
         free.idx1 = 0;
         emit(free);
         state.slot.reset();
+        resident_.erase(id);
     }
 
     void evict(ObjectId id)
@@ -393,6 +383,7 @@ private:
             auto origin = current_origin_;
             emit_dma(store, spill, std::move(origin));
             state.slot.reset();
+            resident_.erase(id);
             state.home = spill;
             state.dirty = false;
             ++result_.report.spills;
@@ -406,15 +397,15 @@ private:
         auto available_slot = [&] {
             std::array<bool, 8> used{};
             used[4] = true;
-            for (const auto& state : states_) if (state.slot) used[*state.slot] = true;
+            for (const auto id : resident_) used[*states_[id].slot] = true;
             return std::find(used.begin(), used.end(), false) != used.end();
         };
         while (banks() + requested_banks > options_.regular_bank_count
                || (need_slot && !available_slot())) {
             std::optional<ObjectId> victim;
             std::size_t farthest = 0;
-            for (ObjectId id = 0; id < states_.size(); ++id) {
-                if (!states_[id].slot || excluded_.count(id) || small(id)) continue;
+            for (const auto id : resident_) {
+                if (excluded_.count(id) || small(id)) continue;
                 const auto next = next_use(id);
                 if (!victim || next > farthest || (next == farthest && id < *victim)) {
                     victim = id;
@@ -435,18 +426,19 @@ private:
         }
         const bool modulus = small(id) && program_.objects[id].type == 2;
         if (modulus) {
-            for (ObjectId other = 0; other < states_.size(); ++other) {
-                if (states_[other].slot == 4) release(other);
-            }
+            const auto previous = std::find_if(resident_.begin(), resident_.end(),
+                [&](ObjectId other) { return states_[other].slot == 4; });
+            if (previous != resident_.end()) release(*previous);
             states_[id].slot = 4;
         } else {
             make_room(small(id) ? 0 : 1, true);
             std::array<bool, 8> used{};
             used[4] = true;
-            for (const auto& state : states_) if (state.slot) used[*state.slot] = true;
+            for (const auto other : resident_) used[*states_[other].slot] = true;
             const auto first = std::find(used.begin(), used.end(), false);
             states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
         }
+        resident_.insert(id);
         measure();
         return *states_[id].slot;
     }
@@ -482,6 +474,9 @@ private:
         state.home = op.memory;
         state.initialized = true;
         state.dirty = false;
+        // Conservative native lowering can materialize a formerly deferred
+        // reload into the same storage object. DLOAD replaces that definition.
+        release(id);
         auto instruction = op.instruction;
         instruction.obj_id = allocate(id);
         emit_dma(instruction, *op.memory, *op.origin);
@@ -499,6 +494,7 @@ private:
         instruction.obj_id = *states_[id].slot;
         emit_dma(instruction, *op.memory, *op.origin);
         states_[id].slot.reset();
+        resident_.erase(id);
         states_[id].home = op.memory;
         states_[id].dirty = false;
     }
@@ -529,6 +525,8 @@ private:
     VirtualProgram& program_;
     const CompileOptions& options_;
     std::vector<State> states_;
+    detail::UseIndex uses_;
+    std::set<ObjectId> resident_;
     ScheduledProgram result_;
     std::set<ObjectId> excluded_;
     std::size_t cursor_ = 0;
@@ -539,7 +537,8 @@ std::vector<LogicalBufferPlacement> place_buffers(
     const VirtualProgram& program,
     const hpu::runtime::HpuMemImage& original,
     hpu::runtime::HpuMemImage& image,
-    std::uint64_t& arena_lines)
+    std::uint64_t& arena_lines,
+    bool reuse_scratch = true)
 {
     std::vector<LogicalBufferPlacement> result(program.buffers.size());
     std::vector<BufferId> scratch;
@@ -552,14 +551,19 @@ std::vector<LogicalBufferPlacement> place_buffers(
         placement.first_use = buffer.first_use;
         placement.last_use = buffer.last_use;
         placement.layout = buffer.layout;
-        if (!buffer.retained) {
+        if (!buffer.retained && reuse_scratch) {
             scratch.push_back(id);
             continue;
         }
-        const auto begin = original.words().begin()
-            + buffer.original_span.line_offset * hpu::runtime::kHpuMemLineWords;
-        std::vector<std::uint32_t> words(begin, begin + buffer.word_count);
-        const auto allocation = image.add(buffer.id, words, buffer.kind, buffer.read_only);
+        hpu::runtime::HpuMemAllocation allocation;
+        if (original.contains(buffer.id)) {
+            const auto begin = original.words().begin()
+                + buffer.original_span.line_offset * hpu::runtime::kHpuMemLineWords;
+            std::vector<std::uint32_t> words(begin, begin + buffer.word_count);
+            allocation = image.add(buffer.id, words, buffer.kind, buffer.read_only);
+        } else {
+            allocation = image.reserve(buffer.id, buffer.word_count, buffer.kind);
+        }
         placement.physical_allocation_id = allocation.id;
         placement.span = allocation.span;
     }
@@ -730,123 +734,184 @@ VirtualProgram import_resolved_program(
 
 VirtualProgram import_operator_program(
     const hpu::resource::OperatorProgram& source,
-    const std::vector<hpu::EncodedInstruction>& baseline,
-    const std::vector<ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image)
 {
-    using Role = hpu::resource::Role;
-    if (source.operations.empty() || source.operations.size() != baseline.size())
-        throw std::invalid_argument("operator IR does not cover the complete baseline program");
-    const auto lookup = dma_by_instruction(baseline, dma);
-    const auto pairs = deferred_store_pairs(baseline, dma, image);
-    std::map<std::size_t, ObjectId> pending_reload;
-    std::map<Role, ObjectId> live;
-    std::map<std::string, BufferId> buffer_ids;
+    if (source.operations.empty()) throw std::invalid_argument("operator program is empty");
     VirtualProgram result;
     result.origin = ResourceIrOrigin::operator_emission;
+    std::map<std::string, BufferId> buffer_ids;
     for (const auto& allocation : image.allocations()) {
-        VirtualBuffer buffer;
-        buffer.id = allocation.id;
-        buffer.original_span = allocation.span;
-        buffer.word_count = allocation.word_count;
-        buffer.kind = allocation.kind;
-        buffer.read_only = allocation.read_only;
-        buffer_ids.emplace(buffer.id, result.buffers.size());
-        result.buffers.push_back(std::move(buffer));
+        VirtualBuffer b;
+        b.id = allocation.id; b.original_span = allocation.span; b.word_count = allocation.word_count;
+        b.kind = allocation.kind; b.read_only = allocation.read_only;
+        buffer_ids.emplace(b.id, result.buffers.size());
+        result.buffers.push_back(std::move(b));
     }
-    auto object = [&](hpu::resource::Operand operand) -> ObjectId {
-        const auto found = live.find(operand.role);
-        if (found == live.end()) throw std::invalid_argument("operator IR uses an undefined operand");
-        return found->second;
+    std::vector<bool> defined(source.values.size());
+    std::vector<std::size_t> last_use(source.values.size(), 0);
+    std::vector<hpu::EncodedInstruction> semantic;
+    std::vector<ResolvedDma> dma;
+    std::vector<std::optional<std::size_t>> lookup(source.operations.size());
+    std::vector<bool> ports_seen(source.ports.size());
+    for (std::size_t i = 0; i < source.operations.size(); ++i) {
+        const auto& node = source.operations[i];
+        const auto mnemonic = node.instruction.mnemonic;
+        std::size_t input_count = 0, output_count = 0;
+        std::optional<std::size_t> tied;
+        switch (mnemonic) {
+        case hpu::Mnemonic::kDload: output_count = 1; break;
+        case hpu::Mnemonic::kDstore: case hpu::Mnemonic::kPfree: input_count = 1; break;
+        case hpu::Mnemonic::kPmodld: case hpu::Mnemonic::kPsync: break;
+        case hpu::Mnemonic::kPntt: case hpu::Mnemonic::kPintt:
+            input_count = 2; output_count = 1; tied = 0; break;
+        case hpu::Mnemonic::kPadd: case hpu::Mnemonic::kPsub:
+            input_count = 2; output_count = 1; break;
+        case hpu::Mnemonic::kPmul: case hpu::Mnemonic::kPmac:
+            input_count = node.instruction.imm8 < 0 ? 2 : 1;
+            output_count = 1;
+            if (mnemonic == hpu::Mnemonic::kPmac) tied = input_count++;
+            break;
+        default: throw std::invalid_argument("unsupported operator instruction");
+        }
+        if (node.inputs.size() != input_count || node.outputs.size() != output_count || node.tied_input != tied)
+            throw std::invalid_argument("operator has invalid SSA operands or tied input");
+        if (node.reuse && !defined.at(*node.reuse))
+            throw std::invalid_argument("operator reuses an undefined SSA value");
+        for (const auto value : node.inputs) {
+            if (!defined.at(value)) throw std::invalid_argument("operator SSA uses an undefined value");
+            if (mnemonic != hpu::Mnemonic::kPfree) last_use[value] = i;
+        }
+        for (const auto value : node.outputs) {
+            if (defined.at(value) || source.values.at(value).parameter)
+                throw std::invalid_argument("operator SSA value has multiple definitions");
+            defined[value] = true;
+        }
+        semantic.push_back({node.instruction, 0, 0, {}});
+        const bool memory = mnemonic == hpu::Mnemonic::kDload || mnemonic == hpu::Mnemonic::kDstore;
+        if (memory != node.port.has_value()) throw std::invalid_argument("operator has a missing or unexpected data port");
+        if (node.port) {
+            const auto& port = source.ports.at(*node.port);
+            if (ports_seen.at(*node.port) || port.operation_index != i ||
+                port.load != (mnemonic == hpu::Mnemonic::kDload) || !port.binding)
+                throw std::invalid_argument("operator data port is unbound or inconsistent");
+            ports_seen[*node.port] = true;
+            auto binding = *port.binding;
+            binding.instruction_index = i;
+            const auto& allocation = image.allocation(binding.allocation_id);
+            if (!contains(allocation.span, binding.span)) throw std::invalid_argument("operator port exceeds allocation");
+            if (!port.load && allocation.read_only) throw std::invalid_argument("operator writes a read-only allocation");
+            binding.allocation_id = allocation.id;
+            lookup[i] = dma.size();
+            dma.push_back(std::move(binding));
+        }
+    }
+    if (std::find(ports_seen.begin(), ports_seen.end(), false) != ports_seen.end())
+        throw std::invalid_argument("operator contains an unused data port");
+    analyze_buffers(result, dma, semantic, image);
+    const auto pairs = deferred_store_pairs(semantic, dma, image);
+    std::map<std::size_t, ObjectId> pending_reload;
+    std::vector<std::optional<ObjectId>> objects(source.values.size());
+    std::vector<std::size_t> object_last_use;
+    const auto assign = [&](hpu::resource::ValueId value, ObjectId object) {
+        objects.at(value) = object;
+        object_last_use.at(object) = std::max(object_last_use.at(object), last_use.at(value));
+    };
+    const auto new_object = [&](VirtualObject shape) {
+        const auto id = result.objects.size();
+        result.objects.push_back(shape); object_last_use.push_back(0);
+        return id;
+    };
+    const auto get = [&](hpu::resource::ValueId value) {
+        if (!objects.at(value)) throw std::invalid_argument("SSA input has no storage definition");
+        return *objects.at(value);
     };
     std::optional<ResolvedDma> origin;
-    for (std::size_t index = 0; index < source.operations.size(); ++index) {
-        const auto& node = source.operations[index];
-        const auto& physical = baseline[index].instruction;
-        const auto& instruction = node.instruction;
-        if (instruction.mnemonic != physical.mnemonic || instruction.imm8 != physical.imm8 ||
-            instruction.mod_id != physical.mod_id || instruction.mode != physical.mode ||
-            instruction.flag != physical.flag || instruction.type != physical.type ||
-            instruction.dma_flag != physical.dma_flag ||
-            ((instruction.mnemonic == hpu::Mnemonic::kPntt ||
-              instruction.mnemonic == hpu::Mnemonic::kPintt) && instruction.idx0 != physical.idx0))
-            throw std::invalid_argument("operator IR disagrees with its compatibility baseline");
+    for (std::size_t i = 0; i < source.operations.size(); ++i) {
+        const auto& node = source.operations[i];
         VirtualInstruction op;
-        op.instruction = instruction;
-        if (lookup[index]) {
-            origin = dma[*lookup[index]];
+        op.instruction = node.instruction;
+        if (lookup[i]) {
+            origin = dma.at(*lookup[i]);
             const auto& allocation = image.allocation(origin->allocation_id);
-            if (!contains(allocation.span, origin->span))
-                throw std::invalid_argument("operator DMA range exceeds allocation: " + allocation.id);
-            if (instruction.mnemonic == hpu::Mnemonic::kDstore && allocation.read_only)
-                throw std::invalid_argument("operator output targets read-only allocation: " + allocation.id);
-            origin->allocation_id = allocation.id;
             op.memory = BufferRange{buffer_ids.at(allocation.id),
                 origin->span.line_offset - allocation.span.line_offset, origin->span.line_count};
         }
         op.origin = origin;
-        switch (instruction.mnemonic) {
+        for (const auto value : node.inputs) op.uses.push_back(get(value));
+        switch (node.instruction.mnemonic) {
         case hpu::Mnemonic::kDload: {
-            const auto reused = pending_reload.find(*lookup[index]);
+            const auto found = pending_reload.find(*lookup[i]);
             ObjectId id;
-            if (reused != pending_reload.end()) {
-                id = reused->second;
-                op.reload_retained_object = true;
-            } else {
-                id = result.objects.size();
-                result.objects.push_back({op.memory->line_count, instruction.type, instruction.dma_flag});
-            }
-            live[node.outputs.at(0).role] = id;
-            op.definitions.push_back(id);
+            if (found != pending_reload.end()) { id = found->second; op.reload_retained_object = true; }
+            else id = new_object({op.memory->line_count, node.instruction.type, node.instruction.dma_flag});
+            assign(node.outputs.at(0), id); op.definitions = {id};
             break;
         }
         case hpu::Mnemonic::kDstore: {
-            const auto id = object(node.inputs.at(0));
+            const auto id = op.uses.at(0);
             if (result.objects[id].line_count != op.memory->line_count)
                 throw std::invalid_argument("operator output has an incompatible length");
-            op.uses.push_back(id);
-            const auto match = pairs.find(*lookup[index]);
-            if (match != pairs.end() && baseline[dma[match->second].instruction_index].instruction.type
-                    == result.objects[id].type &&
-                baseline[dma[match->second].instruction_index].instruction.dma_flag == result.objects[id].dma_flag) {
-                op.required_store = false;
-                pending_reload.emplace(match->second, id);
+            const auto pair = pairs.find(*lookup[i]);
+            if (pair != pairs.end() && semantic[dma[pair->second].instruction_index].instruction.type == result.objects[id].type &&
+                semantic[dma[pair->second].instruction_index].instruction.dma_flag == result.objects[id].dma_flag) {
+                op.required_store = false; pending_reload.emplace(pair->second, id);
+                // A deferred reload is an implicit SSA consumer. Keep the
+                // producer's storage intact across the gap, even though the
+                // load defines a different SSA value at the source level.
+                object_last_use[id] = std::max(object_last_use[id], dma[pair->second].instruction_index);
             }
-            live.erase(node.inputs.at(0).role);
             break;
         }
-        case hpu::Mnemonic::kPfree:
-            op.uses.push_back(object(node.inputs.at(0)));
-            live.erase(node.inputs.at(0).role);
-            break;
-        case hpu::Mnemonic::kPntt:
-        case hpu::Mnemonic::kPintt:
-            op.uses = {object(node.inputs.at(0)), object(node.inputs.at(1))};
-            op.definitions = {object(node.outputs.at(0))};
-            break;
-        case hpu::Mnemonic::kPadd:
-        case hpu::Mnemonic::kPsub:
-        case hpu::Mnemonic::kPmul:
-        case hpu::Mnemonic::kPmac: {
-            for (const auto input : node.inputs) op.uses.push_back(object(input));
-            const auto destination = node.outputs.at(0).role;
-            const auto found = live.find(destination);
-            if (found == live.end() || result.objects[found->second].line_count != result.objects[op.uses.at(0)].line_count) {
-                if (instruction.mnemonic == hpu::Mnemonic::kPmac)
-                    throw std::invalid_argument("operator accumulator shape differs from source");
-                const auto& operand = result.objects[op.uses.at(0)];
-                live[destination] = result.objects.size();
-                result.objects.push_back({operand.line_count, operand.type, 0});
+        case hpu::Mnemonic::kPntt: case hpu::Mnemonic::kPintt:
+        case hpu::Mnemonic::kPadd: case hpu::Mnemonic::kPsub:
+        case hpu::Mnemonic::kPmul: case hpu::Mnemonic::kPmac: {
+            const auto shape = result.objects.at(op.uses.at(0));
+            std::optional<ObjectId> reuse;
+            if (node.reuse && *node.reuse < objects.size() && objects[*node.reuse]) {
+                const auto id = *objects[*node.reuse];
+                if (result.objects[id].line_count == shape.line_count && object_last_use[id] <= i) reuse = id;
             }
-            op.definitions = {live.at(destination)};
+            if (node.tied_input) {
+                const auto id = op.uses.at(*node.tied_input);
+                if (result.objects[id].line_count != shape.line_count)
+                    throw std::invalid_argument("tied SSA input has incompatible shape");
+                if (object_last_use[id] <= i) reuse = id;
+                else {
+                    // Preserve exact words through DMA. Arithmetic copies would
+                    // change noncanonical/lazy residues or table payloads.
+                    const auto buffer = result.buffers.size();
+                    VirtualBuffer snapshot;
+                    snapshot.id = "$compiler/ssa_copy/" + std::to_string(node.outputs.at(0));
+                    snapshot.original_span = {0, shape.line_count};
+                    snapshot.word_count = shape.line_count * hpu::runtime::kHpuMemLineWords;
+                    snapshot.kind = hpu::runtime::AllocationKind::workspace;
+                    snapshot.retained = false; snapshot.fully_defined_before_read = true;
+                    snapshot.first_use = snapshot.last_use = i;
+                    result.buffers.push_back(std::move(snapshot));
+                    const BufferRange range{buffer, 0, shape.line_count};
+                    VirtualInstruction save;
+                    save.instruction.mnemonic = hpu::Mnemonic::kDstore;
+                    save.instruction.rs1 = 10; save.instruction.rs2 = 11;
+                    save.uses = {id}; save.memory = range; save.origin = origin;
+                    result.instructions.push_back(save);
+                    const auto copy = new_object(shape);
+                    VirtualInstruction load;
+                    load.instruction.mnemonic = hpu::Mnemonic::kDload;
+                    load.instruction.rs1 = 10; load.instruction.rs2 = 11;
+                    load.instruction.type = shape.type; load.instruction.dma_flag = shape.dma_flag;
+                    load.definitions = {copy}; load.memory = range; load.origin = origin;
+                    result.instructions.push_back(load);
+                    op.uses[*node.tied_input] = copy; reuse = copy;
+                }
+            }
+            const auto id = reuse ? *reuse : new_object({shape.line_count, shape.type, 0});
+            assign(node.outputs.at(0), id); op.definitions = {id};
             break;
         }
-        case hpu::Mnemonic::kPmodld: break;
-        case hpu::Mnemonic::kPsync: live.clear(); break;
+        case hpu::Mnemonic::kPfree: case hpu::Mnemonic::kPmodld: case hpu::Mnemonic::kPsync: break;
         }
         result.instructions.push_back(std::move(op));
     }
-    analyze_buffers(result, dma, baseline, image);
     return result;
 }
 
@@ -885,7 +950,9 @@ CompiledResources compile_resources(
         }
         found->layout = annotation.second;
     }
-    if (options.optimization == OptimizationMode::no_opt) {
+    const bool ssa_copies = std::any_of(program.buffers.begin(), program.buffers.end(),
+        [](const auto& buffer) { return buffer.id.rfind("$compiler/ssa_copy/", 0) == 0; });
+    if (options.optimization == OptimizationMode::no_opt && !instructions.empty() && !ssa_copies) {
         CompiledResources result(image.capacity_lines());
         result.image = image;
         result.instructions = instructions;
@@ -898,10 +965,17 @@ CompiledResources compile_resources(
         }
         return result;
     }
+    if (options.optimization == OptimizationMode::no_opt) {
+        for (auto& op : program.instructions) {
+            op.required_store = true;
+            op.reload_retained_object = false;
+        }
+    }
     auto scheduled = Scheduler(program, options).run();
     std::uint64_t capacity = image.used_lines();
     for (const auto& buffer : program.buffers) {
-        if (buffer.id.rfind("$compiler/spill/", 0) == 0) {
+        if (buffer.id.rfind("$compiler/spill/", 0) == 0 ||
+            buffer.id.rfind("$compiler/ssa_copy/", 0) == 0) {
             capacity += buffer.original_span.line_count;
         }
     }
@@ -909,10 +983,13 @@ CompiledResources compile_resources(
     result.instructions = std::move(scheduled.instructions);
     result.report = scheduled.report;
     result.report.ir_origin = program.origin;
-    result.report.original_dma_count = dma.size();
+    result.report.original_dma_count = dma.empty()
+        ? std::count_if(program.instructions.begin(), program.instructions.end(),
+              [](const auto& op) { return op.memory.has_value(); })
+        : dma.size();
     result.report.original_ddr_lines = image.used_lines();
     result.buffers = place_buffers(program, image, result.image,
-        result.report.scratch_arena_lines);
+        result.report.scratch_arena_lines, options.optimization == OptimizationMode::optimized);
     result.report.allocated_ddr_lines = result.image.used_lines();
     result.dma.reserve(scheduled.dma.size());
     for (auto& entry : scheduled.dma) {
@@ -979,10 +1056,27 @@ std::string render_resource_report(const CompiledResources& resources)
 
 namespace hpu::resource {
 hpu::compiler::VirtualProgram bind_program(const OperatorProgram& program,
+    const hpu::runtime::HpuMemImage& image)
+{
+    return hpu::compiler::import_operator_program(program, image);
+}
+hpu::compiler::VirtualProgram bind_program(const OperatorProgram& program,
     const std::vector<hpu::EncodedInstruction>& baseline,
     const std::vector<hpu::compiler::ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image)
 {
-    return hpu::compiler::import_operator_program(program, baseline, dma, image);
+    if (program.operations.size() != baseline.size())
+        throw std::invalid_argument("operator IR does not cover the complete baseline program");
+    for (std::size_t i = 0; i < baseline.size(); ++i) {
+        const auto& a = program.operations[i].instruction;
+        const auto& b = baseline[i].instruction;
+        if (a.mnemonic != b.mnemonic || a.imm8 != b.imm8 || a.mod_id != b.mod_id ||
+            a.mode != b.mode || a.flag != b.flag || a.type != b.type || a.dma_flag != b.dma_flag ||
+            ((a.mnemonic == hpu::Mnemonic::kPntt || a.mnemonic == hpu::Mnemonic::kPintt) && a.idx0 != b.idx0))
+            throw std::invalid_argument("operator IR disagrees with its compatibility baseline");
+    }
+    auto bound = program;
+    bound.bind_ports(dma);
+    return bind_program(bound, image);
 }
 } // namespace hpu::resource

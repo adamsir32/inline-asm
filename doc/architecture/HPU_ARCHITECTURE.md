@@ -156,41 +156,52 @@ context、编码、加密、密钥生成和解密继续使用 native SEAL。应�
 `hpu/compiler/operator_resources.hpp/.cpp`。CKKS、BFV、BGV 共用对象调度、
 DDR 生命周期复用和交付编译后端。
 
-算子通过 `Operand` 声明算法角色，并发出 typed `OperatorProgram`：`read` 声明
-数据输入端口，`publish` 声明结果端口，`discard` 给出生命周期提示；算术和变换
-引用这些虚拟操作数。算子中不选择物理 `p0..p7`，同一角色的不同读入会形成不同
-的 `VirtualObject`。最终对象编号、加载、释放、spill/reload 和可消除的内部写回
-由公共后端决定。
+算子通过 `make_operand(label, compatibility_slot=-1)` 创建独立变量，同名变量也具有
+不同身份。`Recording` 对每次加载、算术结果和 NTT stage 定义分配新的 `ValueId`，
+`Operation.inputs/outputs` 直接引用 SSA 版本。`value`、`auxiliary` 等旧别名仅供兼容
+入口使用，原生算子已使用独立变量。变量数量不受物理对象槽位数量限制。
 
 ```cpp
 namespace r = hpu::resource;
-// value/auxiliary/accumulator 表示算法角色。
-code << r::read(r::value, hpu::DataType::poly);
-code << r::read(r::auxiliary, hpu::DataType::poly);
-code << r::multiply(r::accumulator, r::value, r::auxiliary);
-code << r::discard(r::value) << r::discard(r::auxiliary);
-code << r::publish(r::accumulator);
+r::Recording recording;
+const auto a = r::make_operand("input");
+const auto b = r::make_operand("input"); // 与 a 是两个独立变量。
+const auto product = r::make_operand("product");
+r::read(a, hpu::DataType::poly);
+r::read(b, hpu::DataType::poly);
+r::multiply(product, a, b);
+r::accumulate(product, a, b); // 产生新的 SSA 版本，输入包含旧 product。
+r::publish(product);
+auto program = recording.finish();
 ```
 
-`Recording` 作用域收集嵌套算子发出的 typed 操作，在线程间隔离；退出和异常展开
-恢复外层作用域。CKKS/BFV lowering 携带原生资源程序；BGV 拼接原生子程序时同步
-拼接资源 IR。原生路径直接使用这些操作建立虚拟数据流。
+`read/publish` 直接建立显式 `PortId`，每个端口记录所属操作、方向和独立 binding。
+调用方用 `bind_port()` 或 `bind_ports()` 提供 allocation/span；
+`bind_program(program, image)` 从这些端口检查范围、只读属性和 SSA 定义使用关系，
+构建后端 `VirtualProgram`。未绑定端口、重复定义和未定义输入在此阶段报错。
 
-现有 `generate_*_body_asm` 返回接口保留，资源接口同时渲染兼容汇编作为 NoOpt
-基准。历史角色到物理编号的映射位于兼容渲染器；原始汇编和现有 DMA recipe
-用于端口绑定及对照验证。各方案的数据准备 recipe 仍分别维护。
+`Recording` 在线程间隔离，嵌套作用域和异常展开恢复外层记录器。程序片段通过
+`append()` 重新编号局部 SSA 值与端口，显式连接片段的活跃输入；CKKS/BFV 保存
+每个操作的原生片段，BGV 拼接独立子程序时同步处理这些身份。
 
-调用方提供每个数据端口的 allocation/span。`bind_program()` 验证端口范围、只读
-属性、长度、定义与使用，以及与兼容基准的操作一致性；`compile_resources()` 对
-生成的 `VirtualProgram` 分配资源。`optimize_resources()` 保留编码流导入入口，
-用于历史流回放与回归对照。
+SSA 降低时根据最后使用位置合并可安全复用的存储。NTT 的数据对象和 PMAC 的
+累加器是强制原地输入；旧 SSA 值仍有后续使用时，编译器通过独立 snapshot
+工作区和 DSTORE/DLOAD 初始化新版本，保留旧版本的精确 uint32 字值。
+延迟写回与唯一重载关联时，存储生命周期至少保留到该重载，避免跨间隔被其他值覆盖。
+
+现有 `generate_*_body_asm` 返回接口保留，操作数的可选槽位提示只供兼容汇编渲染。
+CKKS/BFV 从原生片段的端口声明构造 DMA 绑定，兼容汇编用于一致性检查；历史手工
+请求保留汇编导入路径。资源编译器的原生入口直接使用 SSA 与端口，不恢复汇编数据流。
+`render_operator_ir(program)` 可输出 SSA 值与端口文本。各方案的数据准备 recipe
+继续分别维护，前端 Evaluator API 和包 V1 协议保持兼容。
 
 ### 6.2 逻辑值、对象与缓冲区
 
 | 概念 | 职责 |
 | --- | --- |
 | 前端逻辑值 | 数学依赖、level、分量数、scale、correction factor |
-| `VirtualObject` | 一段片上对象生命周期及长度、加载类型 |
+| 算子 `ValueId` / `PortId` | 单次定义的值版本 / 显式内存访问端口 |
+| `VirtualObject` | SSA 降低后的片上存储对象及长度、加载类型；可承载不重叠的值版本 |
 | `VirtualBuffer` | DDR 逻辑分配、读写属性、首次/最后使用和布局标签 |
 | `VirtualInstruction` | 对象 uses/definitions、DDR range、原始指令及算子来源 |
 
@@ -238,9 +249,12 @@ NTT/INTT 每个 stage 执行 out-of-place，调度时除了数据和 twiddle 的
 bank，还计入一个额外输出 bank。固定的 128 个 NTT 运算寄存器由硬件 stage 调度
 使用，当前编译后端管理对象槽位和 bank，未提供 PE 寄存器分配接口。
 
-调度器根据后续使用安排保留、释放、spill 和 reload。腾出空间时避开当前指令
-操作数，优先处理更晚才再次使用的对象；可重载的干净数据直接释放，脏数据保存到
-可写 backing。分配与淘汰顺序保持确定性。
+调度器一次预计算对象的使用位置列表，按指令推进消费使用事件；PFREE 提示不算
+数据使用，延迟重载的定义算隐式使用。下一次使用查询为常数时间。驻留集合按对象
+ID 排序，槽位、bank 和淘汰检查只扫描至多 8 个驻留对象。
+
+腾出空间时保护当前操作数，优先淘汰下一次使用最远的对象，距离相同选择较小对象 ID。
+可重载的干净数据直接释放，脏数据保存到可写 backing。该索引化保持原有选择策略。
 
 `DSTORE` 按当前 executable ABI 写回并释放源对象，后续使用需要 DLOAD。
 证明内部 workspace 写回与唯一读取可由片上保留替代后，后端可延迟该写回；
@@ -251,6 +265,11 @@ bank，还计入一个额外输出 bank。固定的 128 个 NTT 运算寄存器�
 
 `OptimizationMode::no_opt` 保留原始指令字、每条 DMA 的 offset/count、原始镜像
 字节和分配，同时检查对象、DMA 与 bank 容量，并生成资源统计。
+
+上述保留行为适用于提供兼容指令基线的现有前端。直接编写原生 SSA IR、没有提供
+基线时，NoOpt 仍执行必要的槽位分配，但关闭 workspace 写回延迟和 DDR 复用。
+若旧 SSA 值跨 NTT/PMAC 原地更新继续存活，必须生成保留旧值的 DMA 副本；
+此时 NoOpt 也以 SSA 语义为准进行保守降级，不能直接返回无法表达该语义的旧指令。
 
 前端通过 `hpu::seal_adapter::CompileOptions.optimize_resources=false` 选择该模式，
 示例 CLI 使用 `--no-opt`。NoOpt 用于重现原始调度和比较优化结果；原始流与 oracle

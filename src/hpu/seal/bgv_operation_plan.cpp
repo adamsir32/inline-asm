@@ -490,6 +490,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             }
         }
     }
+    const auto native_modulus = hpu::resource::make_operand("modulus_table", 4);
     auto operator_program = std::make_shared<hpu::resource::OperatorProgram>();
     std::vector<hpu::EncodedInstruction> instructions;
     std::vector<BgvKeySwitchDmaBinding> bindings;
@@ -507,7 +508,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
     {
         hpu::resource::Recording recording;
         const auto body = hpu::assemble_source(hpu::resource::read(
-            hpu::resource::modulus_table, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank));
+            native_modulus, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank));
         const auto encoded = hpu::collect_dma_relocations(body);
         DmaRecipe recipe(image, encoded);
         recipe.load(4, "constants/modulus_table", hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
@@ -670,7 +671,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
         operator_program->append(recording.finish());
     }
     hpu::resource::Recording ending_recording;
-    auto ending_assembly = hpu::resource::discard(hpu::resource::modulus_table);
+    auto ending_assembly = hpu::resource::discard(native_modulus);
     ending_assembly += hpu::resource::finish_program();
     const auto ending = hpu::assemble_source(ending_assembly);
     append_program(ending, {});

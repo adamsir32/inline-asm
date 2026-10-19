@@ -11,9 +11,9 @@
 namespace hpu::scheme::bfv {
 namespace {
 
-constexpr auto kPolynomialObject = hpu::resource::value;
-constexpr auto kTwiddleObject = hpu::resource::transform_table;
-constexpr auto kModulusTableObject = hpu::resource::modulus_table;
+const auto kPolynomialObject = hpu::resource::make_operand("value", 0);
+const auto kTwiddleObject = hpu::resource::make_operand("transform_table", 3);
+const auto kModulusTableObject = hpu::resource::make_operand("modulus_table", 4);
 
 bool valid_config(int N, const hpu::RnsDecompositionLayout& layout,
                   std::uint32_t galois_element)

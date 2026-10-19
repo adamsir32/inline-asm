@@ -87,11 +87,11 @@ std::string generate_modswitch_body_asm(
         retained_contexts.push_back(i);
     }
 
-    const auto POBJ_VALUE = hpu::resource::value;
-    const auto POBJ_CORRECTION = hpu::resource::auxiliary;
-    const auto POBJ_U = hpu::resource::accumulator;
-    const auto POBJ_SCALAR = hpu::resource::transform_table;
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_VALUE = hpu::resource::make_operand("value", 0);
+    const auto POBJ_CORRECTION = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_U = hpu::resource::make_operand("accumulator", 2);
+    const auto POBJ_SCALAR = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* BGV MODSWITCH: coefficient/Q -> coefficient/Q_without_last */\n";
     asm_code << "        /* MOD_ID layout: Q[0.." << dropped_context << "], P["
@@ -238,10 +238,10 @@ std::string generate_modswitch_ntt_body_asm(
         return "        /* Invalid SEAL-facing BGV NTT ModSwitch layout */\n";
     }
 
-    constexpr auto value = hpu::resource::value;
-    constexpr auto auxiliary = hpu::resource::auxiliary;
-    constexpr auto twiddle = hpu::resource::transform_table;
-    constexpr auto modulus_table = hpu::resource::modulus_table;
+    const auto value = hpu::resource::make_operand("value", 0);
+    const auto auxiliary = hpu::resource::make_operand("auxiliary", 1);
+    const auto twiddle = hpu::resource::make_operand("transform_table", 3);
+    const auto modulus_table = hpu::resource::make_operand("modulus_table", 4);
     const int dropped_context = layout.q_mod_ids.back();
     std::ostringstream asm_code;
     asm_code << "        /* BGV MODSWITCH NTT: drop q_last; retain canonical HPU NTT output */\n";

@@ -16,7 +16,7 @@
 namespace hpu::seal_adapter {
 namespace {
 
-constexpr auto kModulusTableObject = hpu::resource::modulus_table;
+const auto kModulusTableObject = hpu::resource::make_operand("modulus_table", 4);
 
 const BfvLevelDescriptor& require_value_shape(const BfvLevelChain& level_chain,
                                               const BfvPlannedValue& value, std::size_t components,
@@ -242,8 +242,13 @@ BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
     for (const auto& step : plan.steps()) {
         BfvLoweredOperation lowered;
         lowered.operation = step;
-        lowered.body_asm = lower_step(step, level_chain,
-                                      static_cast<int>(key_data->parms().poly_modulus_degree()));
+        {
+            hpu::resource::Recording kernel;
+            lowered.body_asm = lower_step(step, level_chain,
+                                          static_cast<int>(key_data->parms().poly_modulus_degree()));
+            lowered.operator_program = std::make_shared<hpu::resource::OperatorProgram>(kernel.finish());
+        }
+        recording.append(*lowered.operator_program);
         result.body_asm += lowered.body_asm;
         result.operations.push_back(std::move(lowered));
     }

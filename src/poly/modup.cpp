@@ -76,11 +76,12 @@ std::string generate_hpu_modup_contexts_body_asm(
 
     asm_code << "        /* MODUP: Q_digit -> full Q union P (explicit global MOD_ID layout) */\n";
     asm_code << "        /* Retain source digit limbs in full-basis workspace */\n";
+    const auto copied_value = hpu::resource::make_operand("copied_value", 0);
     for (int context : source_contexts) {
         asm_code << "        /* Copy Q context " << context
                  << " (global MOD_ID " << context << ") */\n";
-        asm_code << hpu::resource::read(hpu::resource::value, hpu::DataType::poly);
-        asm_code << hpu::resource::publish(hpu::resource::value, 1);
+        asm_code << hpu::resource::read(copied_value, hpu::DataType::poly);
+        asm_code << hpu::resource::publish(copied_value, 1);
     }
     asm_code << generate_hpu_bconv_contexts_body_asm(
         source_contexts, target_contexts, false, manage_modulus_table);

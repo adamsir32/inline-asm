@@ -65,8 +65,13 @@ std::string generate_binary_body(
     std::ostringstream code;
     code << "        /* BGV NTT " << (subtract ? "SUB" : "ADD")
          << ": balance correction factors on HPU, then pointwise op */\n";
+    const auto native_modulus_table = hpu::resource::make_operand("modulus_table", 4);
+    const auto native_transform_table = hpu::resource::make_operand("transform_table", 3);
+    const auto native_accumulator = hpu::resource::make_operand("accumulator", 2);
+    const auto native_auxiliary = hpu::resource::make_operand("auxiliary", 1);
+    const auto native_value = hpu::resource::make_operand("value", 0);
     if (manage_modulus_table) {
-        code << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
+        code << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx,
                            hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
@@ -74,26 +79,26 @@ std::string generate_binary_body(
             code << "        /* component " << component << ", Q MOD_ID "
                  << basis << " */\n";
             code << hpu::resource::select_modulus(basis);
-            code << hpu::resource::read(hpu::resource::value, hpu::DataType::poly);
+            code << hpu::resource::read(native_value, hpu::DataType::poly);
             if (balance.left_scalar != 1) {
                 code << "        // prepared left balancing scalar splat\n";
-                code << hpu::resource::read(hpu::resource::transform_table, hpu::DataType::poly);
-                code << hpu::resource::multiply(hpu::resource::value, hpu::resource::value, hpu::resource::transform_table);
-                code << hpu::resource::discard(hpu::resource::transform_table);
+                code << hpu::resource::read(native_transform_table, hpu::DataType::poly);
+                code << hpu::resource::multiply(native_value, native_value, native_transform_table);
+                code << hpu::resource::discard(native_transform_table);
             }
-            code << hpu::resource::read(hpu::resource::auxiliary, hpu::DataType::poly);
+            code << hpu::resource::read(native_auxiliary, hpu::DataType::poly);
             if (balance.right_scalar != 1) {
                 code << "        // prepared right balancing scalar splat\n";
-                code << hpu::resource::read(hpu::resource::transform_table, hpu::DataType::poly);
-                code << hpu::resource::multiply(hpu::resource::auxiliary, hpu::resource::auxiliary, hpu::resource::transform_table);
-                code << hpu::resource::discard(hpu::resource::transform_table);
+                code << hpu::resource::read(native_transform_table, hpu::DataType::poly);
+                code << hpu::resource::multiply(native_auxiliary, native_auxiliary, native_transform_table);
+                code << hpu::resource::discard(native_transform_table);
             }
-            code << (subtract ? hpu::resource::subtract(hpu::resource::accumulator, hpu::resource::value, hpu::resource::auxiliary) : hpu::resource::add(hpu::resource::accumulator, hpu::resource::value, hpu::resource::auxiliary));
-            code << hpu::resource::discard(hpu::resource::value) << hpu::resource::discard(hpu::resource::auxiliary);
-            code << hpu::resource::publish(hpu::resource::accumulator, 1);
+            code << (subtract ? hpu::resource::subtract(native_accumulator, native_value, native_auxiliary) : hpu::resource::add(native_accumulator, native_value, native_auxiliary));
+            code << hpu::resource::discard(native_value) << hpu::resource::discard(native_auxiliary);
+            code << hpu::resource::publish(native_accumulator, 1);
         }
     }
-    if (manage_modulus_table) code << hpu::resource::discard(hpu::resource::modulus_table);
+    if (manage_modulus_table) code << hpu::resource::discard(native_modulus_table);
     if (append_psync) code << hpu::resource::finish_program();
     return code.str();
 }

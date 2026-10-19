@@ -159,7 +159,7 @@ target_link_libraries(inline_asm_codegen
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
-    target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core)
+    target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core hpu_hardware_model)
     add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)
     add_executable(hpu_instruction_executor_test test/instruction_executor_test.cpp)
     target_link_libraries(hpu_instruction_executor_test PRIVATE hpu_hardware_model hpu_runtime_core)
