@@ -15,6 +15,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", choices=("small", "full"), required=True)
     parser.add_argument("--record-index", type=int, required=True)
+    parser.add_argument("--expected-packages", type=int)
     args = parser.parse_args()
 
     output = pathlib.Path(args.output)
@@ -42,8 +43,24 @@ def main() -> int:
     if (output / "expected_record.bin").read_bytes() != (output / "actual_record.bin").read_bytes():
         raise RuntimeError("SealPIR binary golden differs from the recovered record")
     packages = manifest.get("packages", [])
-    if len(packages) < 4:
-        raise RuntimeError("SealPIR delivery is missing one or more HPU stages")
+    if args.expected_packages is None:
+        if len(packages) < 4:
+            raise RuntimeError("SealPIR delivery is missing one or more HPU stages")
+    elif len(packages) != args.expected_packages:
+        raise RuntimeError(
+            f"expected {args.expected_packages} SealPIR packages, got {len(packages)}"
+        )
+    if args.expected_packages == 2:
+        if manifest.get("package_strategy") != "concentrated recursive stages":
+            raise RuntimeError("two-package delivery is not marked as concentrated")
+        pipeline_steps = [step.get("step") for step in manifest.get("execution_pipeline", [])]
+        if pipeline_steps != [
+            "hpu_stage0",
+            "cpu_decompose",
+            "hpu_stage1",
+            "cpu_recompose_decrypt",
+        ]:
+            raise RuntimeError("concentrated delivery has an incomplete execution pipeline")
     for package in packages:
         directory = output / package["directory"]
         subprocess.run([args.validator, str(directory)], check=True)
