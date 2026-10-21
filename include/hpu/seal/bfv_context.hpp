@@ -21,10 +21,6 @@ struct BfvContextSpec {
     // B/m_sk base, so Q/P are restricted to at most 31 bits.
     std::vector<int> coeff_modulus_bits;
     int plain_modulus_bits = 17;
-    // Optional exact batching modulus. When set, this takes precedence over
-    // plain_modulus_bits. APSI parameter ports use it to preserve the protocol
-    // field instead of accepting a different same-bit-size prime.
-    std::optional<std::uint32_t> plain_modulus;
     // Optional deterministic SEAL randomness for reproducible application
     // packages. Production callers should normally leave this unset.
     std::optional<std::array<std::uint64_t, 8>> random_seed;

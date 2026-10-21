@@ -175,13 +175,11 @@ private:
 void bind_ciphertext_binary(OperationBindingBuilder& bindings, const BfvOperationStep& step,
                             const BfvLevelDescriptor& level)
 {
-    const auto component_count = step.inputs.empty() ? 0 : step.inputs[0].component_count;
-    if (step.inputs.size() != 2 || (component_count != 2 && component_count != 3) ||
-        step.inputs[1].component_count != component_count ||
-        step.output.component_count != component_count) {
+    if (step.inputs.size() != 2 || step.inputs[0].component_count != 2 ||
+        step.inputs[1].component_count != 2 || step.output.component_count != 2) {
         throw std::invalid_argument("invalid BFV Add/Subtract relocation manifest");
     }
-    for (std::size_t component = 0; component < component_count; ++component) {
+    for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.keyswitch_layout.q_mod_ids) {
             bindings.load(0, limb_id(step.inputs[0], component, modulus_id));
             bindings.load(1, limb_id(step.inputs[1], component, modulus_id));

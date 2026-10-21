@@ -20,10 +20,10 @@ bool valid_config(int num_q)
 }
 
 std::string generate_ciphertext_binary_body(int num_q, bool subtract, bool append_psync,
-                                            bool manage_modulus_table, int component_count)
+                                            bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    if (!valid_config(num_q) || (component_count != 2 && component_count != 3)) {
+    if (!valid_config(num_q)) {
         asm_code << "        /* Invalid BFV ciphertext binary config */\n";
         return asm_code.str();
     }
@@ -33,7 +33,7 @@ std::string generate_ciphertext_binary_body(int num_q, bool subtract, bool appen
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
-    for (int component = 0; component < component_count; ++component) {
+    for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
@@ -95,18 +95,14 @@ std::string generate_plain_binary_body(int num_q, bool subtract, bool append_psy
 
 } // namespace
 
-std::string generate_add_body_asm(int num_q, bool append_psync, bool manage_modulus_table,
-                                  int component_count)
+std::string generate_add_body_asm(int num_q, bool append_psync, bool manage_modulus_table)
 {
-    return generate_ciphertext_binary_body(
-        num_q, false, append_psync, manage_modulus_table, component_count);
+    return generate_ciphertext_binary_body(num_q, false, append_psync, manage_modulus_table);
 }
 
-std::string generate_subtract_body_asm(int num_q, bool append_psync, bool manage_modulus_table,
-                                       int component_count)
+std::string generate_subtract_body_asm(int num_q, bool append_psync, bool manage_modulus_table)
 {
-    return generate_ciphertext_binary_body(
-        num_q, true, append_psync, manage_modulus_table, component_count);
+    return generate_ciphertext_binary_body(num_q, true, append_psync, manage_modulus_table);
 }
 
 std::string generate_add_plain_body_asm(int num_q, bool append_psync, bool manage_modulus_table)

@@ -118,18 +118,6 @@ int main()
             [&] { (void)hpu::seal_adapter::create_bfv_context(invalid); },
             "32-bit Q/P was accepted despite the auxiliary-prime reservation");
 
-        auto exact_plain = spec;
-        exact_plain.plain_modulus = 65537;
-        const auto exact_plain_bundle =
-            hpu::seal_adapter::create_bfv_context(exact_plain);
-        require(exact_plain_bundle.plain_modulus == 65537,
-                "explicit BFV batching plaintext modulus was not preserved");
-        auto invalid_plain = exact_plain;
-        invalid_plain.plain_modulus = 65539;
-        require_invalid_argument(
-            [&] { (void)hpu::seal_adapter::create_bfv_context(invalid_plain); },
-            "non-batching explicit BFV plaintext modulus was accepted");
-
         ::seal::KeyGenerator key_generator(*bundle.context);
         ::seal::PublicKey public_key;
         ::seal::RelinKeys relin_keys;

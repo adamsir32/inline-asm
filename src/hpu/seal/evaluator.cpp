@@ -347,22 +347,13 @@ void Evaluator::binary(int raw_kind, const Ciphertext& a, const Ciphertext& b, C
 {
     const auto ai = require(a), bi = require(b);
     const auto left = state_->values[ai], right = state_->values[bi];
-    const auto kind = static_cast<Kind>(raw_kind);
-    const bool multiply = kind == Kind::multiply;
-    if (multiply) {
-        require_components(left, 2);
-        require_components(right, 2);
-    } else if (left.components != right.components ||
-               (left.components != 2 &&
-                !(scheme(*state_) == ::seal::scheme_type::bfv && left.components == 3))) {
-        throw std::invalid_argument(
-            "frontend Add/Sub requires matching two-component ciphertexts or BFV tensors");
-    }
+    require_components(left, 2); require_components(right, 2);
     if (left.parms_id != right.parms_id)
         throw std::invalid_argument("frontend binary operands require matching levels");
     Value value = left;
-    value.imported.reset(); value.kind = kind; value.inputs = {ai, bi};
-    value.components = multiply ? 3 : left.components;
+    value.imported.reset(); value.kind = static_cast<Kind>(raw_kind); value.inputs = {ai, bi};
+    const bool multiply = value.kind == Kind::multiply;
+    value.components = multiply ? 3 : 2;
     if (scheme(*state_) == ::seal::scheme_type::ckks) {
         if (!multiply && !ckks_scales_compatible(left.scale, right.scale))
             throw std::invalid_argument("frontend CKKS add/sub requires matching scales; use explicit set_scale");

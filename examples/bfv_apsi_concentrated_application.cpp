@@ -1,7 +1,5 @@
 #include "evaluator_application.hpp"
 
-#include "hpu/seal/bfv_context.hpp"
-
 #include <seal/seal.h>
 #include <seal/util/numth.h>
 
@@ -16,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <set>
 #include <sstream>
@@ -35,7 +34,7 @@ struct Profile {
     std::size_t receiver_size;
     std::size_t intersection_size;
     std::size_t degree;
-    int plain_modulus_bits;
+    std::uint64_t plain_modulus;
     std::size_t felts_per_item;
     std::size_t hash_function_count;
     std::size_t table_size;
@@ -292,13 +291,13 @@ std::vector<PowersNode> configure_powers_dag(const std::set<std::uint32_t>& sour
 
 Profile small_profile()
 {
-    return {"small", 10, 5, 2, 8192, 17, 8, 3, 4096, 16, 0, {1,3,5},
+    return {"small", 10, 5, 2, 8192, 65537, 8, 3, 4096, 16, 0, {1,3,5},
             "Poseidon Trident create_params1 / APSI UnlabeledSmall1"};
 }
 
 Profile medium_profile()
 {
-    return {"medium", 8192, 512, 32, 4096, 19, 5, 3, 1638, 125, 5,
+    return {"medium", 8192, 512, 32, 4096, 270337, 5, 3, 1638, 125, 5,
             {1,2,3,4,5,6,18,30,42,54,60},
             "Microsoft APSI 1M-1024-com parameter shape; sender/receiver counts reduced"};
 }
@@ -557,7 +556,7 @@ hpu::seal_adapter::Ciphertext evaluate_patstock(
                 std::to_string(index), coefficients[index]);
     };
 
-    std::vector<hpu::seal_adapter::Ciphertext> tensor_terms;
+    std::vector<hpu::seal_adapter::Ciphertext> high_terms;
     for (std::size_t block = 1; block <= high_count; ++block) {
         const auto last = block == high_count && degree % stride
             ? degree % stride
@@ -569,15 +568,19 @@ hpu::seal_adapter::Ciphertext evaluate_patstock(
                 powers.at(static_cast<std::uint32_t>(j)), coefficient(block * stride + j)));
         auto inner = sum_terms(graph, std::move(inner_terms));
         graph.mod_switch(inner);
-        tensor_terms.push_back(graph.multiply(
-            inner, powers.at(static_cast<std::uint32_t>(block * stride))));
+        auto term = graph.multiply(
+            inner, powers.at(static_cast<std::uint32_t>(block * stride)));
+        // The pre-PSI HPU API only adds two-component BFV ciphertexts. APSI's
+        // mathematically equivalent immediate-relinearization form keeps every
+        // product two-component before the additive reduction.
+        graph.relinearize(term);
+        high_terms.push_back(term);
     }
 
     hpu::seal_adapter::Ciphertext result;
     bool initialized = false;
-    if (!tensor_terms.empty()) {
-        result = sum_terms(graph, std::move(tensor_terms));
-        graph.relinearize(result);
+    if (!high_terms.empty()) {
+        result = sum_terms(graph, std::move(high_terms));
         initialized = true;
     }
 
@@ -644,6 +647,8 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
              << "  \"scenario\": \"" << options.scenario << "\",\n"
              << "  \"parameter_origin\": \"" << options.profile.parameter_origin << "\",\n"
              << "  \"oprf_mode\": \"deterministic CPU test fixture; FourQ network OPRF not embedded\",\n"
+             << "  \"bfv_context_source\": \"application-owned SEAL EncryptionParameters/SEALContext; no HPU context API extension\",\n"
+             << "  \"patstock_relinearization\": \"immediate after each ciphertext product, before two-component Add reduction\",\n"
              << "  \"sender_size\": " << dataset.sender.size() << ",\n"
              << "  \"receiver_size\": " << dataset.receiver.size() << ",\n"
              << "  \"poly_modulus_degree\": " << options.profile.degree << ",\n"
@@ -706,21 +711,34 @@ int main(int argc, char** argv)
             *options.evaluator.delivery.poly_modulus_degree != options.profile.degree)
             throw std::invalid_argument("--degree must match the selected APSI profile");
 
-        hpu::seal_adapter::BfvContextSpec spec;
-        spec.poly_modulus_degree = options.profile.degree;
-        // Four data Q primes plus one special P. This preserves APSI's explicit
-        // low-power chain-index 2 / high-power chain-index 1 split while keeping
-        // every HPU-visible modulus within the 31-bit ABI.
-        spec.coeff_modulus_bits = {31,31,31,31,31};
-        spec.plain_modulus_bits = options.profile.plain_modulus_bits;
-        spec.plain_modulus = options.profile.name == "small"
-            ? std::optional<std::uint32_t>{65537}
-            : std::optional<std::uint32_t>{270337};
-        spec.random_seed = std::array<std::uint64_t, 8>{
+        // Build the exact APSI/Trident plaintext fields with SEAL's existing
+        // public parameter API, then pass the resulting context directly to
+        // the pre-existing ApplicationBuilder constructor. No HPU context API
+        // or compiler path is extended for this application.
+        ::seal::EncryptionParameters parameters(::seal::scheme_type::bfv);
+        parameters.set_poly_modulus_degree(options.profile.degree);
+        // Four data Q primes plus one special P preserve APSI's low-power
+        // chain-index 2 / high-power chain-index 1 split while keeping every
+        // HPU-visible modulus within the existing 31-bit ABI.
+        parameters.set_coeff_modulus(::seal::CoeffModulus::Create(
+            options.profile.degree, {31,31,31,31,31}));
+        parameters.set_plain_modulus(options.profile.plain_modulus);
+        ::seal::prng_seed_type seed{};
+        const std::array<std::uint64_t, 8> seed_words{
             kSealSeed, 1, 2, 3, 4, 5, 6, 7};
-        const auto context_bundle = hpu::seal_adapter::create_bfv_context(spec);
-        const auto& context = *context_bundle.context;
-        const auto plain_modulus = static_cast<std::uint64_t>(context_bundle.plain_modulus);
+        std::copy(seed_words.begin(), seed_words.end(), seed.begin());
+        parameters.set_random_generator(
+            std::make_shared<::seal::Blake2xbPRNGFactory>(seed));
+        const auto context_pointer = std::make_shared<::seal::SEALContext>(
+            std::move(parameters), true, ::seal::sec_level_type::none);
+        require(context_pointer->parameters_set(),
+                std::string("SEAL rejected the APSI-compatible BFV parameters: ") +
+                    context_pointer->parameter_error_message());
+        const auto context_data = context_pointer->first_context_data();
+        require(context_data && context_data->qualifiers().using_batching,
+                "APSI plaintext field does not support SEAL batching");
+        const auto& context = *context_pointer;
+        const auto plain_modulus = context_data->parms().plain_modulus().value();
         require((plain_modulus - 1) % (2 * options.profile.degree) == 0,
                 "HPU-adapted APSI plaintext modulus does not support batching");
         const auto bits_per_felt = static_cast<std::uint32_t>(

@@ -8,11 +8,9 @@ namespace hpu::scheme::bfv {
 // A composed application passes manage_modulus_table=false so the outer
 // program owns the single application-lifetime modulus-table load/free pair.
 std::string generate_add_body_asm(int num_q, bool append_psync = true,
-                                  bool manage_modulus_table = true,
-                                  int component_count = 2);
+                                  bool manage_modulus_table = true);
 std::string generate_subtract_body_asm(int num_q, bool append_psync = true,
-                                       bool manage_modulus_table = true,
-                                       int component_count = 2);
+                                       bool manage_modulus_table = true);
 std::string generate_add_plain_body_asm(int num_q, bool append_psync = true,
                                         bool manage_modulus_table = true);
 std::string generate_subtract_plain_body_asm(int num_q, bool append_psync = true,

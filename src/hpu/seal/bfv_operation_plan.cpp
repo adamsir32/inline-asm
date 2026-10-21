@@ -561,20 +561,13 @@ PreparedBfvRnsObject BfvOperationPlan::append_ciphertext_binary(BfvOperationKind
     if (kind != BfvOperationKind::add && kind != BfvOperationKind::subtract) {
         throw std::invalid_argument("invalid BFV ciphertext binary kind");
     }
-    const auto component_count = left.components.size();
-    if ((component_count != 2 && component_count != 3) ||
-        right.components.size() != component_count) {
-        throw std::invalid_argument(
-            "BFV Add/Subtract requires matching two- or three-component inputs");
-    }
-    validate_value(left, component_count, hpu::runtime::PolynomialDomain::coefficient, false,
+    validate_value(left, 2, hpu::runtime::PolynomialDomain::coefficient, false,
                    "BFV binary left input");
-    validate_value(right, component_count, hpu::runtime::PolynomialDomain::coefficient, false,
+    validate_value(right, 2, hpu::runtime::PolynomialDomain::coefficient, false,
                    "BFV binary right input");
     require_same_level(left, right, "BFV ciphertext binary");
     auto output = image_builder_.reserve_ciphertext(
-        std::move(output_id), image_builder_.level_chain().require(left.parms_id),
-        component_count);
+        std::move(output_id), image_builder_.level_chain().require(left.parms_id));
 
     BfvOperationStep step;
     step.id = std::move(step_id);

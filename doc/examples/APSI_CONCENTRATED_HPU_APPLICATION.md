@@ -74,6 +74,11 @@ Q4 降到 APSI 指定的 chain index 1（Q2），求值后降到 Q1；PS 求值�
 polynomial 降到 Q2 后与 high power 相乘并重线性化，最后降到 Q1。
 没有删除 ModSwitch。
 
+精确的 `t=65537/270337` 由应用直接使用 SEAL 已有的
+`EncryptionParameters::set_plain_modulus` 和 `SEALContext` 构造，再把合法 context
+交给既有的 `ApplicationBuilder(const SEALContext&)`。本应用没有修改
+`BfvContextSpec`、`create_bfv_context()` 或任何 HPU 公共接口。
+
 ## 4. CPU / HPU 边界
 
 CPU：集合生成、确定性 OPRF-output fixture、Cuckoo hashing、sender DB
@@ -82,6 +87,11 @@ polynomial preprocessing、BatchEncoder、source-power 明文幂和加密、最�
 
 HPU 单包：所有 bundle 的 missing powers、Square/Multiply、Relinearize、
 MultiplyPlain、Add/AddPlain、普通或 PS 求值以及全部 required ModSwitch。
+
+原始 HPU Add 只接受两分量 BFV ciphertext。PS 的 `inner * high_power` 每次产生
+三分量 ciphertext 后立即通过既有 `relinearize` 变回两分量，再执行 Add 归约。
+这与先对多个三分量 tensor 相加、最后统一重线性化数学等价，但不依赖任何新增
+三分量 Add、Codegen、Relocation 或软件执行器能力。
 
 `ApplicationBuilder::compile` 对图中**每个节点**运行独立 SEAL oracle 和 HPU
 BFV software executor，并逐 RNS 系数比较。客户端恢复只读取
@@ -122,32 +132,33 @@ peak RSS。软件模型和 host 指令回放通过不等于真实 HPU/RTL ST 通
 `outputs/bfv_apsi_concentrated_{small,medium}` 中的交付包数据；一个 profile 的
 所有 bundle 都在同一个 HPU 计算图和应用包内。
 
-| 指标 | `small/multi` | `medium/multi` |
-| --- | ---: | ---: |
-| HPU 应用包 | 1 | 1 |
-| graph nodes | 244 | 286 |
-| encoded instructions | 452775 | 296737 |
-| DMA spans | 179317 | 117141 |
-| HPU_MEM lines（256 B/line） | 303110（约 74.0 MiB） | 179208（约 43.8 MiB） |
-| compile + software verify | 9.697 s | 4.583 s |
-| delivery process wall time | 13.126 s | 6.841 s |
-| delivery process peak RSS | 2376860 KiB | 1491836 KiB |
-| 最低输出 noise budget | 7 bit | 5 bit |
-| 实际最高 bin 多项式次数 | 1 | 28 |
+| 指标 | `small` 重构前 | `small` 重构后 | `medium` 重构前 | `medium` 重构后 |
+| --- | ---: | ---: | ---: | ---: |
+| HPU 应用包 | 1 | 1 | 1 | 1 |
+| graph nodes | 244 | 244 | 286 | 292 |
+| encoded instructions | 452775 | 452775 | 296737 | 301321 |
+| DMA spans | 179317 | 179317 | 117141 | 118953 |
+| HPU_MEM lines（256 B/line） | 303110 | 303110 | 179208 | 179976 |
+| compile + software verify | 9.697 s | 9.638 s | 4.583 s | 4.476 s |
+| delivery process wall time | 13.126 s | 12.972 s | 6.841 s | 6.685 s |
+| delivery process peak RSS | 2376860 KiB | 2376720 KiB | 1491836 KiB | 1509096 KiB |
+| 最低输出 noise budget | 7 bit | 7 bit | 5 bit | 5 bit |
+| 实际最高 bin 多项式次数 | 1 | 1 | 28 | 28 |
 
 `small` 的 sender 只有 10 个元素，实际 bin 次数因此只有 1；它仍会按配置执行
 PowersDag、幂次生成和四种集合语义回归，但不用于证明 PS 分支。`medium` 的实际
 次数为 28，确实执行 `ps_low_degree=5` 的 Paterson–Stockmeyer 分支。
 
-`medium/multi --optimize-resources` 的同机对照仍为一个包：290465 条指令、
-110813 个 DMA span、181320 条 HPU_MEM line，compile + software verify 为
-123.223 s，进程 wall time 为 123.50 s、最大 RSS 为 1023720 KiB。与默认配置
-相比，指令和 DMA 分别减少约 2.1% 和 5.4%，但 HPU_MEM 增加约 1.2%，编译验证
-耗时约为 25.5 倍。因此交付包使用默认模式；包数量减少或局部资源指标下降不被
-表述为端到端性能提升。
+`small` 不走 PS 分支，因此重构前后图结构和资源计数不变。`medium` 每个 PS 高项
+改为立即重线性化，Relinearize 从 30 次增至 36 次，因而增加 6 个节点、4584 条
+指令、1812 个 DMA span 和 768 条 HPU_MEM line；噪声预算仍为 5 bit，包数仍为 1。
+这里不把包数不变或局部资源变化表述为端到端性能结论。
 
 实际回归包括旧简化 PSI、二维集中式 SealPIR、四种 APSI 小规模场景、APSI 包
-生成/校验，以及 BFV context/evaluator 算子测试，共 9/9 通过。`small`、
+生成/校验，以及恢复到基准版本的 BFV context/evaluator 测试，均通过。`small`、
 `medium` 两个 `hpu_query` 均通过 `hpu_validate_package`。这些结果只覆盖 SEAL
 oracle、HPU 软件执行器和 host 编码指令模型，`real_hardware_verified` 保持
 `false`。
+
+底层目录相对 `8b3cbbf` 的逐文件 Git blob 证明和复现命令见
+[APSI PSI HPU 底层零改动审核报告](APSI_CONCENTRATED_HPU_DIFF_AUDIT.md)。
