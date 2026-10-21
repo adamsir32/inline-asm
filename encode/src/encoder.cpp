@@ -5,7 +5,7 @@
 namespace hpu {
 namespace {
 
-constexpr std::uint32_t kCustom2Opcode = 0b1011011;
+constexpr std::uint32_t kCustom0Opcode = 0b1011011;
 constexpr std::uint32_t kCustom1Opcode = 0b0101011;
 
 constexpr std::uint32_t kOpcPadd = 0b0000;
@@ -50,53 +50,51 @@ std::uint32_t opcode_for(Mnemonic mnemonic) {
 }
 
 std::uint32_t encode_ar3(const Instruction& instruction) {
-    ensure_range(instruction.pdst, 0, 7, "pdst");
-    ensure_range(instruction.psrc1, 0, 7, "psrc1");
-    ensure_range(instruction.mode, 0, 0x3, "mode");
-    ensure_range(instruction.flag, 0, 0x1, "flag");
+    ensure_range(instruction.pdst, 0, 63, "pdst");
+    ensure_range(instruction.psrc1, 0, 63, "psrc1");
+    if (instruction.mode != 0 || instruction.flag != 0) {
+        throw std::runtime_error("arithmetic mode/flag are reserved; use imm8 for I");
+    }
 
     std::uint32_t op2 = 0;
-    std::uint32_t mode = instruction.mode;
-    if (instruction.imm8 >= 0) {
+    const bool immediate = instruction.imm8 >= 0;
+    if (immediate) {
         if (instruction.mnemonic != Mnemonic::kPmul
             && instruction.mnemonic != Mnemonic::kPmac) {
             throw std::runtime_error("only pmul/pmac support cimm8");
         }
         ensure_range(instruction.imm8, 0, 0xFF, "cimm8");
         op2 = static_cast<std::uint32_t>(instruction.imm8);
-        mode |= 0b0001;
     } else {
-        ensure_range(instruction.psrc2, 0, 7, "psrc2");
+        ensure_range(instruction.psrc2, 0, 63, "psrc2");
         op2 = static_cast<std::uint32_t>(instruction.psrc2);
     }
 
     std::uint32_t word = 0;
     word |= opcode_for(instruction.mnemonic) << 28;
-    word |= static_cast<std::uint32_t>(instruction.pdst) << 25;
-    word |= static_cast<std::uint32_t>(instruction.psrc1) << 22;
-    word |= op2 << 14;
-    word |= mode << 8;
-    word |= static_cast<std::uint32_t>(instruction.flag) << 7;
-    word |= kCustom2Opcode;
+    word |= static_cast<std::uint32_t>(instruction.pdst) << 22;
+    word |= static_cast<std::uint32_t>(instruction.psrc1) << 16;
+    word |= op2 << 8;
+    word |= static_cast<std::uint32_t>(immediate) << 7;
+    word |= kCustom0Opcode;
     return word;
 }
 
 std::uint32_t encode_stg(const Instruction& instruction) {
-    ensure_range(instruction.pdst, 0, 7, "pdata");
-    ensure_range(instruction.psrc1, 0, 7, "ptwiddle");
+    ensure_range(instruction.pdst, 0, 63, "pdata");
+    ensure_range(instruction.psrc1, 0, 63, "pparam");
     ensure_range(instruction.idx0, 0, 0xF, "stage");
     ensure_range(instruction.mode, 0, 0x3, "mode");
     ensure_range(instruction.flag, 0, 0x1, "flag");
 
     std::uint32_t word = 0;
     word |= opcode_for(instruction.mnemonic) << 28;
-    word |= static_cast<std::uint32_t>(instruction.pdst) << 25;
     word |= static_cast<std::uint32_t>(instruction.pdst) << 22;
-    word |= static_cast<std::uint32_t>(instruction.psrc1) << 14;
-    word |= static_cast<std::uint32_t>(instruction.idx0) << 10;
-    word |= static_cast<std::uint32_t>(instruction.mode) << 8;
-    word |= static_cast<std::uint32_t>(instruction.flag) << 7;
-    word |= kCustom2Opcode;
+    word |= static_cast<std::uint32_t>(instruction.psrc1) << 16;
+    word |= static_cast<std::uint32_t>(instruction.idx0) << 12;
+    word |= static_cast<std::uint32_t>(instruction.mode) << 10;
+    word |= static_cast<std::uint32_t>(instruction.flag) << 9;
+    word |= kCustom0Opcode;
     return word;
 }
 
@@ -105,21 +103,21 @@ std::uint32_t encode_mod(const Instruction& instruction) {
 
     std::uint32_t word = 0;
     word |= opcode_for(instruction.mnemonic) << 28;
-    word |= static_cast<std::uint32_t>(instruction.mod_id) << 14;
-    word |= kCustom2Opcode;
+    word |= static_cast<std::uint32_t>(instruction.mod_id) << 8;
+    word |= kCustom0Opcode;
     return word;
 }
 
 std::uint32_t encode_cfg(const Instruction& instruction) {
-    ensure_range(instruction.idx0, 0, 7, "idx0");
+    ensure_range(instruction.idx0, 0, 63, "obj_id");
     if (instruction.idx1 != 0 || instruction.cfg != 0) {
         throw std::runtime_error("pfree reserved fields must be zero");
     }
 
     std::uint32_t word = 0;
     word |= opcode_for(instruction.mnemonic) << 28;
-    word |= static_cast<std::uint32_t>(instruction.idx0) << 22;
-    word |= kCustom2Opcode;
+    word |= static_cast<std::uint32_t>(instruction.idx0) << 16;
+    word |= kCustom0Opcode;
     return word;
 }
 
@@ -130,17 +128,22 @@ std::uint32_t encode_sync(const Instruction& instruction) {
 
     std::uint32_t word = 0;
     word |= opcode_for(instruction.mnemonic) << 28;
-    word |= kCustom2Opcode;
+    word |= kCustom0Opcode;
     return word;
 }
 
 std::uint32_t encode_dma(const Instruction& instruction) {
     ensure_range(instruction.rs1, 0, 31, "rs1");
     ensure_range(instruction.rs2, 0, 31, "rs2");
-    ensure_range(instruction.obj_id, 0, 7, "obj_id");
-    ensure_range(instruction.type, 0, instruction.mnemonic == Mnemonic::kDstore ? 1 : 2, "type");
-    ensure_range(instruction.dma_flag, 0, instruction.mnemonic == Mnemonic::kDload ? 1 : 0,
-                 "dma_flag");
+    ensure_range(instruction.obj_id, 0, 63, "obj_id");
+    ensure_range(instruction.type, 0, instruction.mnemonic == Mnemonic::kDstore ? 1 : 3, "type");
+    ensure_range(instruction.dma_flag, 0, instruction.mnemonic == Mnemonic::kDload ? 63 : 0,
+                 "bank_mask");
+
+    if (instruction.mnemonic == Mnemonic::kDload && instruction.type == 2
+        && instruction.dma_flag != 0 && instruction.dma_flag != 0x20) {
+        throw std::runtime_error("modulus table bank mask must be 0 or 0x20");
+    }
 
     const std::uint32_t dir = instruction.mnemonic == Mnemonic::kDstore ? 1U : 0U;
     const std::uint32_t operation = dir != 0U
@@ -148,12 +151,13 @@ std::uint32_t encode_dma(const Instruction& instruction) {
         : static_cast<std::uint32_t>(instruction.type);
 
     std::uint32_t word = 0;
-    word |= static_cast<std::uint32_t>(instruction.obj_id) << 25;
+    word |= static_cast<std::uint32_t>(instruction.obj_id) << 26;
     word |= static_cast<std::uint32_t>(instruction.rs2) << 20;
     word |= static_cast<std::uint32_t>(instruction.rs1) << 15;
     word |= operation << 13;
     word |= dir << 12;
-    word |= static_cast<std::uint32_t>(instruction.dma_flag) << 7;
+    word |= static_cast<std::uint32_t>(instruction.dma_flag & 0x1FU) << 7;
+    word |= static_cast<std::uint32_t>(instruction.dma_flag >> 5U) << 25;
     word |= kCustom1Opcode;
     return word;
 }
@@ -181,14 +185,14 @@ std::uint32_t encode_instruction(const Instruction& instruction) {
 
 std::uint32_t precode_command26(std::uint32_t instruction_word) {
     const std::uint32_t opcode = instruction_word & 0x7FU;
-    if (opcode == kCustom2Opcode) {
+    if (opcode == kCustom0Opcode) {
         return instruction_word >> 7U;
     }
     if (opcode == kCustom1Opcode) {
         return (1U << 25U) | (instruction_word >> 7U);
     }
 
-    throw std::runtime_error("instruction is not custom2/custom1");
+    throw std::runtime_error("instruction is not custom0/custom1");
 }
 
 }  // namespace hpu

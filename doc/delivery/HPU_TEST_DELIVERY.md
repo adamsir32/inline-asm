@@ -1,5 +1,6 @@
 # HPU 指令流与验证数据交付说明
 
+> 64 对象迁移说明：本流水线已随编译器更新 v1.1 编码；下文历史 Nexus-AM/IT 完成记录不能作为新 ISA 的集成证据。旧 ELF、机器码和外部 runtime 需按 [RTL 集成交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 重新适配与验证。
 > 状态：Legacy fixed-profile demo。本文描述原仓库由
 > `config/fhe_test.conf` 驱动的 N=4096/Q=4/P=3/dnum=2 交付流水线，保留用于
 > 回归旧算子包，不再作为 N=65536 CKKS/SEAL 集成的参数或数学权威。默认 CTest
@@ -229,10 +230,10 @@ Relinearization 输入 span，runtime 只提交一份 HPU_MEM 镜像和一条完
 `{q[31:0], mu[47:0], reserved[47:0]}`，其中
 `mu=floor(2^64/q)`，且 `65537 <= q <= 2^32-1`。按 `uint32` word
 查看时是 `q`、`mu[31:0]`、`{16'b0,mu[47:32]}`、全零保留字。模表通过
-`dload type=2, flag[0]=1` 请求分配到 small Bank 5，DMA 与后续访问的
+`dload type=2, bank_mask=0x20` 请求分配到 small Bank 5，DMA 与后续访问的
 一致性由硬件维护，软件可直接由 `pmodld MOD_ID` 选择表项。Bank 5 固定为
-`0x1400..0x141F` 共 32 line，物理可放 512 条记录；`MOD_ID` 编码仍为 8 bit，
-但当前应用软件 ABI 要求 `MOD_ID[7:6]=0`，所以只允许 64 个 context，使用
+`0x1400..0x141F` 共 32 line，物理空间相当于 512 条记录，但默认仅前四条 line 保留模表，其余用于参数；
+`MOD_ID` 编码仍为 8 bit，本项目默认 R=4，仅允许 64 个 context，使用
 `0x1400..0x1403`。
 
 Twiddle 与硬件组 `autotest/hw_ntt_intt_complete.py` 的 128-register 模型一致。
@@ -286,14 +287,14 @@ slots 精确比较；CKKS 对全部 `N/2` 个复数 slots 按生成参数中的�
 
 `outputs/rv_interface_smoke/` 包含：
 
-- `rv_interface_smoke.asm`：覆盖 11 条体系结构指令、三种合法 DLoad type、DStore 的两种 `rel` 编码（当前 RTL 均释放）和最大合法字段；type 3 作为 reserved 负例。
+- `rv_interface_smoke.asm`：覆盖 11 条体系结构指令、四种合法 DLoad type、DStore 的两种 `rel` 编码（0 保留、1 成功后释放）和六位对象/六位 mask 最大合法字段；type 4 作为越界负例。
 - `rv_interface_smoke.inst32`：对应 32-bit 指令流。
 - `rv_interface_smoke.cmd26`：对应控制逻辑的 26-bit 命令流。
-- `test_data/expected_decode.csv`：逐条期望 word、command26、`custom2/custom1` 路由和归一化汇编。
-- `test_data/expected_cmd26.csv`：逐条验证 `cmd26[25]=custom_kind`，以及 custom2/custom1 的 `inst[31:7]` payload 原样直通。
+- `test_data/expected_decode.csv`：逐条期望 word、command26、`custom0/custom1` 路由和归一化汇编。
+- `test_data/expected_cmd26.csv`：逐条验证 `cmd26[25]=custom_kind`，以及 custom0/custom1 的 `inst[31:7]` payload 原样直通。
 - `test_data/negative_cases.asm.txt`：包含越界用例，以及必须拒绝的旧 `pshcfg/pshuf/pseed/psample` 助记符。
 
-建议 RV 接口 IT 依次验证 decode 路由、队列 backpressure、顺序发射、`dload -> pmodld -> compute` 的硬件一致性、`dload -> compute -> pfree/dstore` ownership，以及末尾 `psync` 的 CPU 完成通知。`pfree` 必须在目标对象最后一次使用后生效；当前 RTL 中已经由任意 `rel` 值的 `dstore` 释放的对象不得重复释放。
+建议 RV 接口 IT 依次验证 decode 路由、队列 backpressure、顺序发射、`dload -> pmodld -> compute` 的硬件一致性、`dload -> compute -> pfree/dstore` ownership，以及末尾 `psync` 的 CPU 完成通知。`pfree` 必须在目标对象最后一次使用后生效；`dstore rel=0` 保留对象；仅 `rel=1` 成功完成后释放，已释放的对象不得重复释放。
 
 ## 7. 硬件联调边界
 
@@ -318,8 +319,8 @@ slots 精确比较；CKKS 对全部 `N/2` 个复数 slots 按生成参数中的�
 2. `pntt/pintt stage` 从 `twiddle_map.csv` 绑定的两条参数 line 在线重构因子，以 `autotest` 定义的
    batch/lane 和 P/P^-1 次序执行，采用物理 out-of-place 提交和显式 pre/post
    PMUL；当前数据为 canonical residue，不是 Montgomery 域。
-3. DMA、allocator 和 PE 对 `pfree`、`dstore rel=0/1` 均释放对象、FAULT/IRQ 的
-   目标实现与软件 ABI 一致。
+3. DMA、allocator 和 PE 对 `pfree` 的释放、`dstore rel=0` 的保留、
+   `dstore rel=1` 成功后的释放及 FAULT/IRQ 的目标实现与软件 ABI 一致。
 4. 目标输出逐字等于 golden，尾部 guard 未被改写，并提供外部 monitor/波形或板端
    日志。只有这些证据完成后，才可把 `HARDWARE_EXECUTION` 从 `CONDITIONAL`
    升级为 `PASS`。

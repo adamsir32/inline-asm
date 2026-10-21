@@ -17,6 +17,10 @@ inline constexpr int kHpuWordsPerLine = 64;
 inline constexpr int kNttRegisterCount = 128;
 inline constexpr int kSmallBankId = 5;
 inline constexpr int kSmallBankLines = 32;
+inline constexpr int kModTableLines = 4;
+inline constexpr int kObjectSlotCount = 64;
+inline constexpr int kAllocationGranuleLines = 128;
+inline constexpr const char* kInstructionIsa = "hpu-objects64-v1.1";
 inline constexpr int kModTableBaseLine = 0x1400;
 inline constexpr int kModContextsPerLine = 16;
 inline constexpr int kPhysicalModContexts = kSmallBankLines * kModContextsPerLine;
@@ -26,6 +30,7 @@ inline constexpr int kMaxModContexts = 64;
 
 static_assert(kMaxModContexts <= kEncodedModContexts);
 static_assert(kMaxModContexts <= kPhysicalModContexts);
+static_assert(kMaxModContexts <= kModTableLines * kModContextsPerLine);
 
 inline constexpr int hpu_lines_for_words(int words) {
     return words > 0
@@ -57,12 +62,13 @@ inline std::string pobj(int id) {
 enum class DataType {
     seg = 0,
     poly = 1,
-    mod_ctx = 2
+    mod_ctx = 2,
+    twiddle_parameters = 3
 };
 
 enum class DloadFlag {
     regular_bank = 0,
-    small_bank = 1
+    small_bank = 0x20
 };
 
 inline std::string dload(
@@ -95,11 +101,11 @@ inline std::string dstore(int psrc, int rel) {
 }
 
 // ==========================================
-// 内部执行类指令 (custom2)
+// 内部执行类指令 (opcode 0x5B)
 // ==========================================
 
 // --- AR3 格式：三对象基础算术类 ---
-// 汇编显式给出 pdst、psrc1 和 OP2；pmul/pmac 的整数 OP2 会设置 MODE[0]
+// 汇编显式给出 pdst、psrc1 和 OP2；pmul/pmac 的整数 OP2 会设置 I[7]
 inline std::string padd(int pdst, int psrc1, int psrc2) {
     std::ostringstream ss;
     ss << "        \"padd " << pobj(pdst) << ", " << pobj(psrc1) << ", " << pobj(psrc2) << " \\n\\t\"\n";

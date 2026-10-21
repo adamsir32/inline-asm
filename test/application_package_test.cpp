@@ -682,64 +682,46 @@ void test_fixed_entry_compatibility_and_sideband_integrity()
     hpu::delivery::validate_application_package_on_disk(legacy.root);
 }
 
-void test_historical_full_twiddle_fixed_package()
+void test_rejects_incompatible_isa_and_stage_shape()
 {
     ScratchDirectory scratch;
-    Fixture fixture(true);
-    auto& program = fixture.request.program;
-    const std::string marker = "#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
-    program.header.insert(program.header.find(marker), "int hpu_run_minimal_app(void);\n\n");
-    // Start with the dynamic source so request validation does not claim the
-    // current target accepts this historical one-line N=128 stage table.
+    Fixture fixture;
     const auto package = hpu::delivery::write_application_package(
-        scratch.path() / "historical_full_twiddle", fixture.request);
-    const auto current_abi = read_file(package.root / "memory/abi.json");
-    std::vector<hpu::ExecutableDmaSpan> spans;
-    for (const auto& span : program.ordered_dma_spans)
-        spans.push_back({span.line_offset, span.line_count});
-    const auto historical_source = hpu::render_fixed_executable_source(
-        program.stem, program.instructions, fixture.image.capacity_lines(), spans,
-        hpu::ExecutableTwiddleFormat::legacy_full_table);
-    const std::string historical_abi =
-        "{\n"
-        "  \"schema\": \"hpu-dma-abi\",\n"
-        "  \"schema_version\": 1,\n"
-        "  \"rs1\": \"x10\",\n"
-        "  \"rs2\": \"x11\",\n"
-        "  \"word_bits\": 32,\n"
-        "  \"line_words\": 64,\n"
-        "  \"line_bytes\": 256,\n"
-        "  \"byte_order\": \"little-endian\"\n"
-        "}\n";
-    write_file(package.root / "program/minimal_app.c", historical_source);
-    write_file(package.root / "memory/abi.json", historical_abi);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
-    refresh_files_manifest_entry(package.root, "memory/abi.json");
-    hpu::delivery::validate_application_package_on_disk(package.root);
-
-    // Structural backward compatibility still verifies actual fixed DMA
-    // setup. Re-signing a changed address must not make it acceptable.
-    auto corrupt = historical_source;
-    const auto position = corrupt.find("li x10, 0");
-    require(position != std::string::npos, "historical fixture omitted its first fixed DMA address");
-    corrupt.replace(position, std::string("li x10, 0").size(), "li x10, 1");
-    write_file(package.root / "program/minimal_app.c", corrupt);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
-    require_throws_with_fragments(
-        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
-        {"program", "source"},
-        "historical package accepted a re-signed incorrect fixed DMA address");
-
-    // Declaring current K=8 metadata must enable current shape checks, even
-    // when all payload and source checksums have been recomputed.
-    write_file(package.root / "program/minimal_app.c", historical_source);
-    write_file(package.root / "memory/abi.json", current_abi);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+        scratch.path() / "target_abi", fixture.request);
+    auto abi = read_file(package.root / "memory/abi.json");
+    const std::string current = "hpu-objects64-v1.1";
+    const auto position = abi.find(current);
+    require(position != std::string::npos, "package omitted target instruction ISA");
+    abi.replace(position, current.size(), "hpu-objects8-legacy");
+    write_file(package.root / "memory/abi.json", abi);
     refresh_files_manifest_entry(package.root, "memory/abi.json");
     require_throws_with_fragments(
         [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"incompatible instruction ISA", "regenerate"},
+        "validator accepted a re-signed package for an incompatible target ISA");
+
+    // A consumer must not reinterpret REL0 according to incompatible metadata.
+    abi = read_file(package.root / "memory/abi.json");
+    const auto old_isa = abi.find("hpu-objects8-legacy");
+    abi.replace(old_isa, std::string("hpu-objects8-legacy").size(), current);
+    const auto rel = abi.find("\"dstore_rel0_retains\": true");
+    require(rel != std::string::npos, "fixture omitted REL0 target metadata");
+    abi.replace(rel, std::string("\"dstore_rel0_retains\": true").size(),
+                "\"dstore_rel0_retains\": false");
+    write_file(package.root / "memory/abi.json", abi);
+    refresh_files_manifest_entry(package.root, "memory/abi.json");
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"incompatible instruction ISA"},
+        "validator accepted incompatible REL0 semantics");
+
+    // Dynamic entry points must validate concrete stage shapes as strictly
+    // as fixed entry points; a historical one-line N=128 table is invalid.
+    Fixture wrong_stage(true);
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_request(wrong_stage.request); },
         {"fixed executable", "twiddles", "format"},
-        "current K=8 metadata accepted a historical one-line stage table");
+        "dynamic entry accepted a historical one-line stage table");
 }
 
 void test_validator_rejects_resigned_program_header_mismatch()
@@ -1506,8 +1488,8 @@ int main()
         test_fixed_entry_compatibility_and_sideband_integrity,
         failures);
     run_test(
-        "historical full-twiddle fixed package compatibility",
-        test_historical_full_twiddle_fixed_package,
+        "reject incompatible target ISA and stage shapes",
+        test_rejects_incompatible_isa_and_stage_shape,
         failures);
     run_test(
         "reject re-signed mismatched C program header",

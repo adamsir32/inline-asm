@@ -12,7 +12,7 @@
 | 为 IT 编写应用测试 | [应用编程手册](reference/HPU_SEAL_API_REFERENCE.md) → [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) |
 | 对接 Nexus-AM 或 HPU runtime | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) → [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) |
 | 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [底层 API 参考](reference/HPU_LOW_LEVEL_API_REFERENCE.md) |
-| 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
+| 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
 | 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
 | 对接 K=8 在线 twiddle 参数格式 | [硬件组编译器迁移说明](reference/TWIDDLE_COMPILER_MIGRATION.md) |
@@ -38,6 +38,8 @@
 - [HPU_PROGRAMMING_MANUAL.md](reference/HPU_PROGRAMMING_MANUAL.md)：HPU 指令、编码、对象生命周期、DMA 和方案算子底层约定。
 - [TWIDDLE_COMPILER_MIGRATION.md](reference/TWIDDLE_COMPILER_MIGRATION.md)：硬件组提供的 K=8 在线 twiddle ABI、512 B 参数布局、DMA 迁移与目标验收要求；文中硬件仓库路径和附属报告需到相应硬件工作区查看。
 
+- [HPU_BANK_ALLOCATION_GUIDE.md](reference/HPU_BANK_ALLOCATION_GUIDE.md)：64 对象、128-line 分配、Bank 5 隔离、确定性 bank 选择与预测边界。
+
 ### `architecture/`
 
 - [HPU_ARCHITECTURE.md](architecture/HPU_ARCHITECTURE.md)：整体分层、顶层 API、计算图编译流程、资源 IR 与统一资源管理、runtime 职责、验证边界和交付链路。
@@ -48,6 +50,8 @@
 - [HPU_APPLICATION_PACKAGE_V1.md](delivery/HPU_APPLICATION_PACKAGE_V1.md)：当前通用应用交付包格式，适用于 CKKS、BGV 和 BFV。
 - [IT_HANDOFF_CHECKLIST.md](delivery/IT_HANDOFF_CHECKLIST.md)：发布、归档、目标执行和 IT 签字所需的逐项检查。
 - [HPU_TEST_DELIVERY.md](delivery/HPU_TEST_DELIVERY.md)：由 `config/fhe_test.conf` 驱动的旧固定参数算子包，仅用于兼容和回归。
+
+- [HPU_64OBJ_INTEGRATION_HANDOFF.md](delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)：RTL 提供方交接、v1.1 冲突修正及 CPU/SoC 待同步范围。
 
 ### `audits/`
 

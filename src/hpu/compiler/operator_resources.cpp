@@ -1,6 +1,7 @@
 #include "hpu/compiler/operator_resources.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <iomanip>
 #include <sstream>
@@ -74,7 +75,7 @@ std::string transform(bool inverse, Operand data, Operand table,
 Operand make_operand(std::string label, int slot)
 {
     static std::atomic<std::size_t> next{1};
-    if (slot < -1 || slot > 7) throw std::invalid_argument("invalid compatibility slot");
+    if (slot < -1 || slot > 63) throw std::invalid_argument("invalid compatibility slot");
     return {next.fetch_add(1, std::memory_order_relaxed), std::move(label), slot};
 }
 
@@ -190,7 +191,16 @@ Operand compatibility_operand(int slot)
     case 5: return correction;
     case 6: return temporary;
     case 7: return extra;
-    default: throw std::invalid_argument("invalid compatibility object slot");
+    default:
+        if (slot < 8 || slot > 63)
+            throw std::invalid_argument("invalid compatibility object slot");
+        static const auto high = [] {
+            std::array<Operand, 56> result;
+            for (std::size_t i = 0; i < result.size(); ++i)
+                result[i] = make_operand("p" + std::to_string(i + 8), static_cast<int>(i + 8));
+            return result;
+        }();
+        return high[static_cast<std::size_t>(slot - 8)];
     }
 }
 
@@ -266,7 +276,7 @@ std::string render_operator_ir(const OperatorProgram& program)
             out << " stage=" << inst.idx0 << " mode=" << unsigned(inst.mode) << " flag=" << unsigned(inst.flag); break;
         case hpu::Mnemonic::kPmodld: out << " mod_id=" << inst.mod_id; break;
         case hpu::Mnemonic::kDload:
-            out << " type=" << unsigned(inst.type) << " flag=" << unsigned(inst.dma_flag); break;
+            out << " type=" << unsigned(inst.type) << " bank_mask=" << unsigned(inst.dma_flag); break;
         case hpu::Mnemonic::kDstore: out << " release=" << unsigned(inst.type); break;
         default: if (inst.imm8 >= 0) out << " imm=" << inst.imm8; break;
         }

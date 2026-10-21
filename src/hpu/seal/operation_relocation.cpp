@@ -41,13 +41,13 @@ std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
         if (instruction.direction == CkksDmaDirection::load) {
             if (!(*it)[4].matched
                 || operand < static_cast<int>(hpu::DataType::seg)
-                || operand > static_cast<int>(hpu::DataType::mod_ctx)) {
+                || operand > static_cast<int>(hpu::DataType::twiddle_parameters)) {
                 throw std::logic_error("generated dload has an invalid operand");
             }
             instruction.load_type = static_cast<hpu::DataType>(operand);
             const int flag = std::stoi((*it)[4].str());
             if (flag < static_cast<int>(hpu::DloadFlag::regular_bank)
-                || flag > static_cast<int>(hpu::DloadFlag::small_bank)) {
+                || flag > 63) {
                 throw std::logic_error("generated dload has an invalid bank flag");
             }
             instruction.load_flag = static_cast<hpu::DloadFlag>(flag);
@@ -153,10 +153,11 @@ public:
         const std::string& allocation_id,
         std::size_t expected_words)
     {
+        const bool stage = allocation_id.find("/stage") != std::string::npos;
         append(
             CkksDmaDirection::load, slot, allocation_id,
-            hpu::DataType::poly, hpu::DloadFlag::regular_bank, 0,
-            expected_words);
+            stage ? hpu::DataType::twiddle_parameters : hpu::DataType::poly,
+            hpu::DloadFlag::regular_bank, 0, expected_words);
     }
 
     void store(int slot, const std::string& allocation_id)

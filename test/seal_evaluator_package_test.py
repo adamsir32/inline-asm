@@ -77,7 +77,7 @@ def main():
         assert report["host_instruction_model"]["inverse_boundary_conversions"] > 0
         assert report["compiler_resources"]["ir_source"] == "operator"
         assert report["compiler_resources"]["peak_regular_banks"] <= 5
-        assert report["compiler_resources"]["peak_object_slots"] <= 8
+        assert report["compiler_resources"]["peak_object_slots"] <= 64
         buffers = report["compiler_resources"]["logical_buffers"]
         assert any(buffer["layout"] == "canonical_ntt_physical" for buffer in buffers)
         assert any(buffer["layout"] == "unspecified" for buffer in buffers)

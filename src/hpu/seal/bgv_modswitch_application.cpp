@@ -117,6 +117,7 @@ public:
               hpu::DataType type = hpu::DataType::poly,
               hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
     {
+        if (id.find("/stage") != std::string::npos) type = hpu::DataType::twiddle_parameters;
         bind(id, words, hpu::Mnemonic::kDload, slot,
              static_cast<std::uint8_t>(type), static_cast<std::uint8_t>(flag));
     }

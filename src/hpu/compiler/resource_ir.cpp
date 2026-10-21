@@ -1,6 +1,7 @@
 #include "hpu/compiler/resource_ir.hpp"
 #include "hpu/compiler/operator_resources.hpp"
 #include "hpu/compiler/detail/use_index.hpp"
+#include "hpu/runtime/bank_allocator.hpp"
 
 #include "encoder.hpp"
 #include "executable.hpp"
@@ -180,64 +181,61 @@ void analyze_buffers(VirtualProgram& program,
     }
 }
 
+hpu::runtime::BankAllocatorOptions bank_options(const CompileOptions& options)
+{
+    hpu::runtime::BankAllocatorOptions result;
+    result.regular_bank_count = options.regular_bank_count;
+    result.regular_bank_lines = options.regular_bank_lines;
+    result.mod_table_lines = options.mod_table_lines;
+    return result;
+}
+
+void record_bank_usage(ResourceReport& report,
+                       const hpu::runtime::BankAllocator& allocator)
+{
+    const auto stats = allocator.stats();
+    report.peak_regular_banks = stats.peak_regular_banks;
+    report.peak_object_slots = stats.peak_resident_objects;
+    report.peak_regular_lines = stats.peak_regular_lines;
+    report.peak_small_lines = stats.peak_small_lines;
+}
+
 ResourceReport inspect_original(const std::vector<hpu::EncodedInstruction>& instructions,
                                 const std::vector<ResolvedDma>& dma,
                                 const hpu::runtime::HpuMemImage& image,
                                 const CompileOptions& options)
 {
     const auto lookup = dma_by_instruction(instructions, dma);
-    std::array<std::uint64_t, 8> lines{};
-    std::array<bool, 8> small{};
+    hpu::runtime::BankAllocator allocator(bank_options(options));
     ResourceReport report;
     report.original_ddr_lines = image.used_lines();
     report.allocated_ddr_lines = image.used_lines();
     report.original_dma_count = report.dma_count = dma.size();
-    auto measure = [&](bool extra_bank) {
-        std::size_t banks = extra_bank ? 1 : 0;
-        std::size_t slots = 0;
-        std::uint64_t small_lines = 0;
-        for (std::size_t slot = 0; slot < lines.size(); ++slot) {
-            if (!lines[slot]) continue;
-            ++slots;
-            if (small[slot]) {
-                small_lines += lines[slot];
-            } else {
-                if (lines[slot] > options.regular_bank_lines) {
-                    throw std::invalid_argument("object exceeds one regular bank");
-                }
-                ++banks;
-            }
-        }
-        report.peak_regular_banks = std::max(report.peak_regular_banks, banks);
-        report.peak_object_slots = std::max(report.peak_object_slots, slots);
-        if (banks > options.regular_bank_count) {
-            throw std::invalid_argument("fixed schedule exceeds available regular banks");
-        }
-        if (small_lines > 32) {
-            throw std::invalid_argument("fixed schedule exceeds small bank capacity");
-        }
-    };
     for (std::size_t index = 0; index < instructions.size(); ++index) {
         const auto& op = instructions[index].instruction;
         switch (op.mnemonic) {
         case hpu::Mnemonic::kDload:
-            lines[op.obj_id] = dma[*lookup[index]].span.line_count;
-            small[op.obj_id] = op.dma_flag != 0;
+            allocator.load(op.obj_id, dma.at(*lookup[index]).span.line_count,
+                           op.type, op.dma_flag);
             break;
-        case hpu::Mnemonic::kDstore: lines[op.obj_id] = 0; break;
-        case hpu::Mnemonic::kPfree: lines[op.idx0] = 0; break;
+        case hpu::Mnemonic::kDstore:
+            if (op.type == 1) allocator.release(op.obj_id);
+            break;
+        case hpu::Mnemonic::kPfree: allocator.release(op.idx0); break;
         case hpu::Mnemonic::kPadd:
         case hpu::Mnemonic::kPsub:
         case hpu::Mnemonic::kPmul:
         case hpu::Mnemonic::kPmac:
-            lines[op.pdst] = lines[op.psrc1];
-            small[op.pdst] = false;
+            allocator.arithmetic(op.pdst, op.psrc1,
+                op.imm8 < 0 ? std::optional<std::uint8_t>(op.psrc2) : std::nullopt,
+                op.mnemonic == hpu::Mnemonic::kPmac);
             break;
+        case hpu::Mnemonic::kPntt:
+        case hpu::Mnemonic::kPintt: allocator.ntt(op.pdst); break;
         default: break;
         }
-        measure(op.mnemonic == hpu::Mnemonic::kPntt
-                || op.mnemonic == hpu::Mnemonic::kPintt);
     }
+    record_bank_usage(report, allocator);
     return report;
 }
 
@@ -256,7 +254,8 @@ struct ScheduledProgram {
 class Scheduler {
 public:
     Scheduler(VirtualProgram& program, const CompileOptions& options)
-        : program_(program), options_(options), states_(program.objects.size()), uses_(program) {}
+        : program_(program), states_(program.objects.size()), uses_(program),
+          allocator_(bank_options(options)) {}
 
     ScheduledProgram run()
     {
@@ -274,10 +273,12 @@ public:
                 if (next_use(op.uses.at(0)) == kNoUse) release(op.uses.at(0));
                 break;
             case hpu::Mnemonic::kPmodld:
+                if (modulus_) ensure(*modulus_);
                 emit(op.instruction);
                 break;
             case hpu::Mnemonic::kPsync:
-                while (!resident_.empty()) release(*resident_.begin());
+                // PSYNC only waits. In particular an intermediate wait must
+                // preserve dirty values and REL=0 objects used afterwards.
                 emit(op.instruction);
                 break;
             default: kernel(op); break;
@@ -302,33 +303,7 @@ private:
         return uses_.next(id);
     }
 
-    bool small(ObjectId id) const { return program_.objects[id].dma_flag != 0; }
-
-    std::size_t banks() const
-    {
-        std::size_t result = 0;
-        for (const auto id : resident_) if (!small(id)) ++result;
-        return result;
-    }
-
-    void measure(std::size_t extra = 0)
-    {
-        const auto regular = banks() + extra;
-        std::size_t slots = 0;
-        std::uint64_t small_lines = 0;
-        for (const auto id : resident_) {
-            ++slots;
-            if (small(id)) small_lines += program_.objects[id].line_count;
-        }
-        result_.report.peak_regular_banks = std::max(result_.report.peak_regular_banks, regular);
-        result_.report.peak_object_slots = std::max(result_.report.peak_object_slots, slots);
-        if (regular > options_.regular_bank_count) {
-            throw std::logic_error("scheduler exceeded regular bank capacity");
-        }
-        if (small_lines > 32) {
-            throw std::invalid_argument("schedule exceeds small bank capacity");
-        }
-    }
+    void measure() { record_bank_usage(result_.report, allocator_); }
 
     void emit(hpu::Instruction instruction) { result_.instructions.push_back(encode(instruction)); }
 
@@ -352,6 +327,7 @@ private:
         free.idx0 = *state.slot;
         free.idx1 = 0;
         emit(free);
+        allocator_.release(*state.slot);
         state.slot.reset();
         resident_.erase(id);
     }
@@ -379,9 +355,10 @@ private:
             store.rs1 = 10;
             store.rs2 = 11;
             store.obj_id = *state.slot;
-            store.type = 0;
+            store.type = 1;
             auto origin = current_origin_;
             emit_dma(store, spill, std::move(origin));
+            allocator_.release(*state.slot);
             state.slot.reset();
             resident_.erase(id);
             state.home = spill;
@@ -392,55 +369,74 @@ private:
         }
     }
 
-    void make_room(std::size_t requested_banks, bool need_slot)
+    void evict_one()
     {
-        auto available_slot = [&] {
-            std::array<bool, 8> used{};
-            used[4] = true;
-            for (const auto id : resident_) used[*states_[id].slot] = true;
-            return std::find(used.begin(), used.end(), false) != used.end();
-        };
-        while (banks() + requested_banks > options_.regular_bank_count
-               || (need_slot && !available_slot())) {
-            std::optional<ObjectId> victim;
-            std::size_t farthest = 0;
-            for (const auto id : resident_) {
-                if (excluded_.count(id) || small(id)) continue;
-                const auto next = next_use(id);
-                if (!victim || next > farthest || (next == farthest && id < *victim)) {
-                    victim = id;
-                    farthest = next;
-                }
+        std::optional<ObjectId> victim;
+        std::size_t farthest = 0;
+        for (const auto id : resident_) {
+            if (excluded_.count(id)) continue;
+            const auto next = next_use(id);
+            if (!victim || next > farthest || (next == farthest && id < *victim)) {
+                victim = id;
+                farthest = next;
             }
-            if (!victim) {
-                throw std::invalid_argument("kernel operands exceed regular bank capacity");
+        }
+        if (!victim) {
+            throw std::invalid_argument(
+                "kernel operands exceed aligned physical bank capacity");
+        }
+        evict(*victim);
+    }
+
+    std::uint8_t allocate_slot(ObjectId id)
+    {
+        for (;;) {
+            std::array<bool, 64> used{};
+            for (const auto other : resident_) used[*states_[other].slot] = true;
+            auto first = std::find(used.begin(), used.end(), false);
+            // Preserve the familiar modulus-table name when available; p4 is
+            // otherwise an ordinary usable logical object, just like p0..p63.
+            if (program_.objects[id].type == 2 && !used[4]) first = used.begin() + 4;
+            if (first != used.end()) {
+                states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
+                resident_.insert(id);
+                return *states_[id].slot;
             }
-            evict(*victim);
+            evict_one();
         }
     }
 
-    std::uint8_t allocate(ObjectId id)
+    template <class Request> void allocate_physical(Request request)
     {
-        if (program_.objects[id].line_count > options_.regular_bank_lines && !small(id)) {
-            throw std::invalid_argument("virtual object exceeds one regular bank");
+        for (;;) {
+            try {
+                request();
+                measure();
+                return;
+            } catch (const hpu::runtime::BankAllocationError&) {
+                // Hardware never spills automatically. Only explicit compiler
+                // writebacks/frees change ownership before retrying a request.
+                evict_one();
+            }
         }
-        const bool modulus = small(id) && program_.objects[id].type == 2;
-        if (modulus) {
-            const auto previous = std::find_if(resident_.begin(), resident_.end(),
-                [&](ObjectId other) { return states_[other].slot == 4; });
-            if (previous != resident_.end()) release(*previous);
-            states_[id].slot = 4;
-        } else {
-            make_room(small(id) ? 0 : 1, true);
-            std::array<bool, 8> used{};
-            used[4] = true;
-            for (const auto other : resident_) used[*states_[other].slot] = true;
-            const auto first = std::find(used.begin(), used.end(), false);
-            states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
+    }
+
+    void place_load(ObjectId id)
+    {
+        excluded_.insert(id);
+        const auto& shape = program_.objects[id];
+        // Bank 5 has one fixed modulus-table owner, even though its logical ID
+        // can be any of the 64 slots. A previously evicted table is reloadable.
+        if (shape.type == 2) {
+            for (auto it = resident_.begin(); it != resident_.end();) {
+                const auto other = *it++;
+                if (other != id && program_.objects[other].type == 2) evict(other);
+            }
         }
-        resident_.insert(id);
-        measure();
-        return *states_[id].slot;
+        const auto slot = states_[id].slot ? *states_[id].slot : allocate_slot(id);
+        allocate_physical([&] {
+            allocator_.load(slot, shape.line_count, shape.type, shape.dma_flag);
+        });
     }
 
     void ensure(ObjectId id)
@@ -450,7 +446,8 @@ private:
         if (!state.initialized || !state.home) {
             throw std::logic_error("virtual object has no reloadable definition");
         }
-        const auto slot = allocate(id);
+        place_load(id);
+        const auto slot = *state.slot;
         hpu::Instruction load;
         load.mnemonic = hpu::Mnemonic::kDload;
         load.rs1 = 10;
@@ -478,7 +475,9 @@ private:
         // reload into the same storage object. DLOAD replaces that definition.
         release(id);
         auto instruction = op.instruction;
-        instruction.obj_id = allocate(id);
+        place_load(id);
+        instruction.obj_id = *state.slot;
+        if (program_.objects[id].type == 2) modulus_ = id;
         emit_dma(instruction, *op.memory, *op.origin);
     }
 
@@ -493,8 +492,11 @@ private:
         auto instruction = op.instruction;
         instruction.obj_id = *states_[id].slot;
         emit_dma(instruction, *op.memory, *op.origin);
-        states_[id].slot.reset();
-        resident_.erase(id);
+        if (instruction.type == 1) {
+            allocator_.release(*states_[id].slot);
+            states_[id].slot.reset();
+            resident_.erase(id);
+        }
         states_[id].home = op.memory;
         states_[id].dirty = false;
     }
@@ -503,10 +505,9 @@ private:
     {
         for (ObjectId id : op.uses) ensure(id);
         const ObjectId destination = op.definitions.at(0);
-        if (!states_[destination].slot) allocate(destination);
+        if (!states_[destination].slot) allocate_slot(destination);
         const bool stage = op.instruction.mnemonic == hpu::Mnemonic::kPntt
             || op.instruction.mnemonic == hpu::Mnemonic::kPintt;
-        if (stage) make_room(1, false);
         auto instruction = op.instruction;
         instruction.pdst = *states_[destination].slot;
         if (stage) {
@@ -516,16 +517,23 @@ private:
             instruction.psrc1 = *states_[op.uses.at(0)].slot;
             if (instruction.imm8 < 0) instruction.psrc2 = *states_[op.uses.at(1)].slot;
         }
+        allocate_physical([&] {
+            if (stage) allocator_.ntt(instruction.pdst);
+            else allocator_.arithmetic(instruction.pdst, instruction.psrc1,
+                instruction.imm8 < 0 ? std::optional<std::uint8_t>(instruction.psrc2) : std::nullopt,
+                instruction.mnemonic == hpu::Mnemonic::kPmac);
+        });
         emit(instruction);
         states_[destination].initialized = true;
         states_[destination].dirty = true;
-        measure(stage ? 1 : 0);
+        measure();
     }
 
     VirtualProgram& program_;
-    const CompileOptions& options_;
     std::vector<State> states_;
     detail::UseIndex uses_;
+    hpu::runtime::BankAllocator allocator_;
+    std::optional<ObjectId> modulus_;
     std::set<ObjectId> resident_;
     ScheduledProgram result_;
     std::set<ObjectId> excluded_;
@@ -618,7 +626,7 @@ VirtualProgram import_resolved_program(
     const auto lookup = dma_by_instruction(instructions, dma);
     const auto pairs = deferred_store_pairs(instructions, dma, image);
     std::map<std::size_t, ObjectId> pending_reload;
-    std::array<std::optional<ObjectId>, 8> live;
+    std::array<std::optional<ObjectId>, 64> live;
     std::map<std::string, BufferId> buffer_ids;
     VirtualProgram result;
     for (const auto& allocation : image.allocations()) {
@@ -632,7 +640,7 @@ VirtualProgram import_resolved_program(
         result.buffers.push_back(std::move(buffer));
     }
     auto object = [&](int slot) -> ObjectId {
-        if (slot < 0 || slot >= 8 || !live[slot]) {
+        if (slot < 0 || slot >= 64 || !live[slot]) {
             throw std::invalid_argument("virtual instruction references a released object");
         }
         return *live[slot];
@@ -688,7 +696,7 @@ VirtualProgram import_resolved_program(
                 op.required_store = false;
                 pending_reload.emplace(match->second, id);
             }
-            live[instruction.obj_id].reset();
+            if (instruction.type == 1) live[instruction.obj_id].reset();
             break;
         }
         case hpu::Mnemonic::kPfree:
@@ -933,7 +941,8 @@ CompiledResources compile_resources(
     const CompileOptions& options)
 {
     if (options.regular_bank_count == 0 || options.regular_bank_count > 5
-        || options.regular_bank_lines == 0 || options.regular_bank_lines > 1024) {
+        || options.regular_bank_lines == 0 || options.regular_bank_lines > 1024
+        || options.mod_table_lines == 0 || options.mod_table_lines > 16) {
         throw std::invalid_argument("invalid resource limits for HPU ISA");
     }
     for (const auto& annotation : options.buffer_layouts) {
@@ -1030,6 +1039,8 @@ std::string render_resource_report(const CompiledResources& resources)
            << ",\n  \"dma_count\": " << report.dma_count
            << ",\n  \"peak_regular_banks\": " << report.peak_regular_banks
            << ",\n  \"peak_object_slots\": " << report.peak_object_slots
+           << ",\n  \"peak_regular_lines\": " << report.peak_regular_lines
+           << ",\n  \"peak_small_lines\": " << report.peak_small_lines
            << ",\n  \"deferred_scratch_stores\": " << report.deferred_scratch_stores
            << ",\n  \"spills\": " << report.spills
            << ",\n  \"reloads\": " << report.reloads

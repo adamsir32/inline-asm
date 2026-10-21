@@ -197,7 +197,7 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
     const std::string source =
         "dload x10, x11, p0, 0, 0\n"
         "dload x10, x11, p1, 1, 0\n"
-        "dload x10, x11, p4, 2, 1\n"
+        "dload x10, x11, p4, 2, 32\n"
         "pmodld 255\n"
         "padd p2, p0, p1\n"
         "psub p2, p0, p1\n"
@@ -209,6 +209,9 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
         "pntt p0, p3, 15, 3, 1\n"
         "pintt p0, p3, 0, 0, 0\n"
         "pfree p5\n"
+        "dload x30, x31, p63, 3, 63\n"
+        "padd p63, p62, p61\n"
+        "pfree p63\n"
         "dstore x10, x11, p2, 0\n"
         "dstore x10, x11, p0, 1\n"
         "psync\n";
@@ -236,7 +239,7 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
         const auto custom_kind = opcode == 0x2bU ? 1U : 0U;
         decode << i << ',' << hpu::format_word_hex(encoded[i].word) << ','
                << hpu::format_command26_hex(encoded[i].command26) << ','
-               << (opcode == 0x5bU ? "custom2" : "custom1") << ','
+               << (opcode == 0x5bU ? "custom0" : "custom1") << ','
                << csv_field(encoded[i].normalized_asm) << '\n';
         command_decode << i << ','
                        << hpu::format_command26_hex(encoded[i].command26) << ','
@@ -249,7 +252,7 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
 
     std::ofstream negative(test_data_dir / "negative_cases.asm.txt");
     negative << "# Each line must be rejected by the assembler/verifier.\n"
-             << "padd p8, p0, p1\n"
+             << "padd p64, p0, p1\n"
              << "padd p0, p1, 1\n"
              << "pmul p0, p1, 256\n"
              << "pntt p0, p1, 16, 0, 0\n"
@@ -258,8 +261,9 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
              << "pmodld 256\n"
              << "pmodld -1\n"
              << "pmodld p0, 0, 0\n"
-             << "pfree p8\n"
+             << "pfree p64\n"
              << "pfree p0, 0, 0\n"
+             << "pplace p0, 1\n"
              << "pshcfg p0, 0, 0\n"
              << "pshuf p0, p1, 0, 0, 0\n"
              << "pseed 0\n"
@@ -267,7 +271,7 @@ void write_rv_interface_smoke(const std::filesystem::path& outputs_root) {
              << "psync 0, 0\n"
              << "dload x32, x0, p0, 0, 0\n"
              << "dload x0, x0, p0, 4, 0\n"
-             << "dload x0, x0, p0, 3, 0\n"
+             << "dload x0, x0, p0, 1, 64\n"
              << "dload x0, x0, p0, 0\n"
              << "dload x0, x0, p0, 2, 2\n"
              << "dstore x0, x0, p0, 2\n"

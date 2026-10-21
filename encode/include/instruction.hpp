@@ -33,7 +33,7 @@ struct Instruction {
 
     // Semantic object operands reused by AR3 and STG encodings. For
     // pntt/pintt, pdst is pdata and psrc1 is ptwiddle; encode_stg maps them
-    // to the STG-specific duplicated-pdata and OP2 fields.
+    // to the STG-specific PDATA6 and PPARAM6 fields.
     int pdst = -1;
     int psrc1 = -1;
     int psrc2 = -1;
@@ -51,6 +51,7 @@ struct Instruction {
     int rs2 = -1;
     std::uint8_t obj_id = 0;
     std::uint8_t type = 0;
+    // DLOAD bank mask (0 means TYPE-dependent default); DSTORE must be zero.
     std::uint8_t dma_flag = 0;
 };
 

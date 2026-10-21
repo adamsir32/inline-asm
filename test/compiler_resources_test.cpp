@@ -53,7 +53,7 @@ std::vector<std::uint32_t> replay(
     const hpu::runtime::HpuMemImage& image)
 {
     auto memory = image.words();
-    std::array<std::vector<std::uint32_t>, 8> objects;
+    std::array<std::vector<std::uint32_t>, 64> objects;
     std::size_t dma_index = 0;
     constexpr std::uint32_t modulus = 65537;
     for (const auto& encoded : instructions) {
@@ -71,7 +71,7 @@ std::vector<std::uint32_t> replay(
                 require(objects[op.obj_id].size() == count, "replay store length mismatch");
                 std::copy(objects[op.obj_id].begin(), objects[op.obj_id].end(),
                     memory.begin() + begin);
-                objects[op.obj_id].clear();
+                if (op.type == 1) objects[op.obj_id].clear();
             }
             break;
         }
@@ -130,7 +130,7 @@ void test_scratch_reuse()
     image.add("scratch/initial", std::vector<std::uint32_t>(128, 9), AllocationKind::workspace, false);
     image.reserve("output/initial", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
         "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
         "padd p2, p0, p1\ndstore x10, x11, p2, 0\npfree p0\npfree p1\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
@@ -202,15 +202,15 @@ void test_scratch_reuse()
 
 void test_dirty_spill()
 {
-    hpu::runtime::HpuMemImage image(64);
+    hpu::runtime::HpuMemImage image(8192);
     image.add("moduli", {65537}, AllocationKind::modulus_table);
     for (int index = 0; index < 6; ++index) {
-        image.add("input/" + std::to_string(index), std::vector<std::uint32_t>(128, index + 1),
+        image.add("input/" + std::to_string(index), std::vector<std::uint32_t>(65536, index + 1),
             AllocationKind::ciphertext);
     }
-    image.reserve("output", 128, AllocationKind::output);
+    image.reserve("output", 65536, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\n"
         "dload x10, x11, p1, 1, 0\ndload x10, x11, p2, 1, 0\n"
         "dload x10, x11, p3, 1, 0\ndload x10, x11, p5, 1, 0\n"
@@ -223,7 +223,7 @@ void test_dirty_spill()
     const auto optimized = hpu::compiler::optimize_resources(instructions, dma, image);
     require(optimized.report.spills >= 1 && optimized.report.reloads >= 1,
             "dirty victim did not spill and reload");
-    require(optimized.report.peak_regular_banks <= 5 && optimized.report.peak_object_slots <= 8,
+    require(optimized.report.peak_regular_banks <= 5 && optimized.report.peak_object_slots <= 64,
             "scheduler confused logical slots and physical banks");
     for (const auto& entry : optimized.dma) {
         require(entry.operation_id == "node" && entry.operation_index.has_value(),
@@ -246,29 +246,29 @@ void test_dirty_spill()
 
 void test_stage_bank_and_multiple_readers()
 {
-    hpu::runtime::HpuMemImage image(32);
+    hpu::runtime::HpuMemImage image(16384);
     image.add("moduli", {65537}, AllocationKind::modulus_table);
-    for (int index = 0; index < 5; ++index) {
-        image.add("input/" + std::to_string(index), std::vector<std::uint32_t>(128, index + 1),
+    for (int index = 0; index < 6; ++index) {
+        image.add("input/" + std::to_string(index), std::vector<std::uint32_t>(index == 1 ? 128 : 65536, index + 1),
             AllocationKind::twiddle);
     }
-    image.reserve("scratch", 128, AllocationKind::workspace);
-    image.reserve("output/1", 128, AllocationKind::output);
-    image.reserve("output/2", 128, AllocationKind::output);
+    image.reserve("scratch", 65536, AllocationKind::workspace);
+    image.reserve("output/1", 65536, AllocationKind::output);
+    image.reserve("output/2", 65536, AllocationKind::output);
     const auto stages = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
+        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 3, 0\n"
         "dload x10, x11, p2, 1, 0\ndload x10, x11, p3, 1, 0\n"
-        "dload x10, x11, p5, 1, 0\npntt p0, p1, 0, 0, 0\n"
+        "dload x10, x11, p5, 1, 0\ndload x10, x11, p6, 1, 0\npntt p0, p1, 0, 0, 0\n"
         "pfree p1\npmul p2, p2, p3\npfree p3\npmul p2, p2, p5\npfree p5\n"
-        "pmul p0, p0, p2\npfree p2\ndstore x10, x11, p0, 0\npfree p4\npsync\n");
+        "pmul p2, p2, p6\npfree p6\npmul p0, p0, p2\npfree p2\ndstore x10, x11, p0, 0\npfree p4\npsync\n");
     const auto stage_dma = bindings(stages, image,
-        {"moduli", "input/0", "input/1", "input/2", "input/3", "input/4", "output/1"});
+        {"moduli", "input/0", "input/1", "input/2", "input/3", "input/4", "input/5", "output/1"});
     const auto staged = hpu::compiler::optimize_resources(stages, stage_dma, image);
     require(staged.report.peak_regular_banks <= 5 && staged.report.reloads >= 1,
             "NTT out-of-place output bank was not reserved");
     const auto multiple = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0\n"
@@ -300,7 +300,7 @@ void test_destination_shape_change()
     image.add("old_destination", std::vector<std::uint32_t>(64, 7), AllocationKind::constant);
     image.reserve("output", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
         "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
         "dload x10, x11, p2, 0, 0\npadd p2, p0, p1\n"
         "pfree p0\npfree p1\ndstore x10, x11, p2, 0\npfree p4\npsync\n");
@@ -326,7 +326,7 @@ void test_partial_initialization_and_overlapping_lifetimes()
     image.reserve("output/b", 128, AllocationKind::output);
     image.reserve("output/partial", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\npmodld 0\n"
+        "dload x10, x11, p4, 2, 32\npmodld 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
         "dload x10, x11, p0, 1, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0\n"
         "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
@@ -536,7 +536,80 @@ void test_unbounded_operand_ids()
     const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
     require(allocation_words(actual, compiled.image, "answer") == std::vector<std::uint32_t>(128, 210),
             "more than eight independent operands corrupted the sum");
-    require(compiled.report.peak_regular_banks <= 5, "unbounded IDs escaped physical capacity checks");
+    require(compiled.report.peak_regular_banks <= 5 && compiled.report.peak_object_slots > 8
+            && compiled.report.spills == 0 && compiled.report.reloads == 0,
+            "small independent objects did not share physical banks");
+}
+
+void test_full_64_object_bank_layout()
+{
+    // Forty N8192 objects share five ordinary banks, while fourteen stage
+    // parameter objects and one modulus table occupy all of Bank 5. This
+    // catches both the obsolete eight-slot limit and one-object-per-bank model.
+    hpu::runtime::HpuMemImage image(8192);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    std::string assembly = "dload x10, x11, p63, 2, 32\npmodld 0\n";
+    std::vector<std::string> names{"moduli"};
+    for (int id = 0; id < 40; ++id) {
+        const auto name = "data/" + std::to_string(id);
+        image.add(name, std::vector<std::uint32_t>(8192, id), AllocationKind::ciphertext);
+        assembly += "dload x10, x11, p" + std::to_string(id) + ", 1, 0\n";
+        names.push_back(name);
+    }
+    for (int id = 40; id < 54; ++id) {
+        const auto name = "parameters/" + std::to_string(id);
+        image.add(name, std::vector<std::uint32_t>(128, 1), AllocationKind::twiddle);
+        assembly += "dload x10, x11, p" + std::to_string(id) + ", 3, 0\n";
+        names.push_back(name);
+    }
+    for (int id = 0; id < 54; ++id) assembly += "pfree p" + std::to_string(id) + "\n";
+    assembly += "pfree p63\npsync\n";
+    const auto instructions = hpu::assemble_source(assembly);
+    const auto dma = bindings(instructions, image, names);
+    for (const auto mode : {hpu::compiler::OptimizationMode::no_opt,
+                            hpu::compiler::OptimizationMode::optimized}) {
+        hpu::compiler::CompileOptions options;
+        options.optimization = mode;
+        const auto compiled = hpu::compiler::optimize_resources(instructions, dma, image, options);
+        require(compiled.report.peak_object_slots == 55
+                && compiled.report.peak_regular_banks == 5
+                && compiled.report.peak_regular_lines == 5120
+                && compiled.report.peak_small_lines == 32,
+                "compiler failed to reproduce the 40-poly plus 14-parameter physical layout");
+        require(compiled.report.spills == 0 && compiled.report.reloads == 0,
+                "fitting bank intervals caused unnecessary spills");
+    }
+}
+
+void test_store_retention_and_pmac_capacity()
+{
+    hpu::runtime::HpuMemImage image(8192);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("a", std::vector<std::uint32_t>(65536, 2), AllocationKind::ciphertext);
+    image.add("b", std::vector<std::uint32_t>(65536, 3), AllocationKind::ciphertext);
+    image.reserve("before", 65536, AllocationKind::output);
+    image.reserve("after", 65536, AllocationKind::output);
+    const auto instructions = hpu::assemble_source(
+        "dload x10, x11, p63, 2, 32\npmodld 0\n"
+        "dload x10, x11, p32, 1, 1\ndload x10, x11, p33, 1, 2\n"
+        "pmul p34, p32, p33\npsync\ndstore x10, x11, p34, 0\npsync\n"
+        "pmac p34, p32, p33\ndstore x10, x11, p34, 1\n"
+        "pfree p32\npfree p33\npfree p63\npsync\n");
+    const auto dma = bindings(instructions, image, {"moduli", "a", "b", "before", "after"});
+    for (const auto mode : {hpu::compiler::OptimizationMode::no_opt,
+                            hpu::compiler::OptimizationMode::optimized}) {
+        hpu::compiler::CompileOptions options;
+        options.optimization = mode;
+        const auto compiled = hpu::compiler::optimize_resources(instructions, dma, image, options);
+        const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+        require(allocation_words(actual, compiled.image, "before")
+                    == std::vector<std::uint32_t>(65536, 6)
+                && allocation_words(actual, compiled.image, "after")
+                    == std::vector<std::uint32_t>(65536, 12),
+                "REL=0 lost the accumulator before PMAC");
+        require(compiled.report.peak_regular_lines == 4096,
+                "PMAC did not budget old and new accumulator regions simultaneously");
+    }
 }
 
 void test_ntt_preserves_live_ssa_input()
@@ -561,7 +634,7 @@ void test_ntt_preserves_live_ssa_input()
         const auto mod = r::make_operand("moduli"), data = r::make_operand("data"), twiddle = r::make_operand("table");
         r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
         r::select_modulus(0);
-        r::read(data, hpu::DataType::poly); r::read(twiddle, hpu::DataType::seg);
+        r::read(data, hpu::DataType::poly); r::read(twiddle, hpu::DataType::twiddle_parameters);
         const auto old = recording.value(data);
         if (inverse) r::intt_stage(data, twiddle, 3);
         else r::ntt_stage(data, twiddle, 3);
@@ -690,6 +763,8 @@ int main()
         test_use_index();
         test_ssa_versions_and_ports();
         test_unbounded_operand_ids();
+        test_full_64_object_bank_layout();
+        test_store_retention_and_pmac_capacity();
         test_ntt_preserves_live_ssa_input();
         test_deferred_reload_storage_lifetime();
         test_native_operator_resources();

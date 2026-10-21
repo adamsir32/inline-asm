@@ -198,11 +198,11 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 }
 ```
 
-当前 PNTT/PINTT 的 src2 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
+当前 PNTT/PINTT 的 PPARAM 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
 第一条 line 是 64-lane 模板 U；第二条 line 保存 7 个 slot 初始化倍率 V、有效
 stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使用这个布局，
-PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word，指令编码不变。
-精确字段与重构公式见 [硬件组迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word；64 对象指令字段按 v1.1 重新编码。
+精确字段与重构公式见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
 
 `memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
 `stage_parameter_lines`，供直接消费镜像的 IT 程序识别目标格式。package schema
@@ -217,7 +217,7 @@ schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，
 
 旧完整 stage 表即使通过包结构和 checksum 验证，也不代表兼容在线生成 RTL。
 当前 target 无完整表执行分支，必须重新生成镜像、DMA spans、sidecar 和 checksum；
-不能只改 ABI 字段。已有包的结构验证仍允许用于安全替换历史产物。
+不能只改 ABI 字段。旧 ISA 包会被当前 validator 拒绝；请在新输出目录重新生成。
 
 ## 验证依据
 
@@ -358,3 +358,15 @@ Evaluator 和 CKKS/BFV/BGV Plan 应用携带算子直接生成的资源 IR 与�
 原始/最终 DDR、DMA、bank 峰值及 spill/reload。导出要求所有保留输出逐字匹配 SEAL
 golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不由 host 对拍置为 true。
 原始 `--print-asm` 可以用于对照，消费最终程序时应使用包内的指令及 DMA 清单。
+
+## 64 对象目标 ABI
+
+`memory/abi.json` 的 `instruction_isa` 为 `hpu-objects64-v1.1`，`object_slots=64`，
+`allocation_granule_lines=128`，`mod_table_lines=4`。TYPE=3 stage 参数默认使用 Bank 5；
+默认模表仅保留前四条 line，最大 64 contexts，后续 14 个参数槽按两条 line 对齐。
+DLOAD mask 不继承到结果，DSTORE REL=0 保留、REL=1 成功后释放。
+
+v1.1 重排了原始指令字段，旧包必须重新生成。生成器不会把旧包认定为新目标可执行包，
+也不会删除无法通过当前校验的旧目录；升级时请使用新的输出根目录，例如
+`-DHPU_APPLICATION_OUTPUT_ROOT=$PWD/outputs/isa64`，保留旧包便于追溯。
+CPU/SoC 集成与板上执行须按 [RTL 交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 单独验收。

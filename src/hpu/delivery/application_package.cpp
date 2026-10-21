@@ -346,6 +346,13 @@ std::string render_abi_json()
         "{\n"
         "  \"schema\": \"hpu-dma-abi\",\n"
         "  \"schema_version\": 1,\n"
+        "  \"instruction_isa\": \"hpu-objects64-v1.1\",\n"
+        "  \"object_slots\": 64,\n"
+        "  \"allocation_granule_lines\": 128,\n"
+        "  \"mod_table_lines\": 4,\n"
+        "  \"stage_parameter_load_type\": 3,\n"
+        "  \"dload_mask_scope\": \"load_only\",\n"
+        "  \"dstore_rel0_retains\": true,\n"
         "  \"rs1\": \"x10\",\n"
         "  \"rs2\": \"x11\",\n"
         "  \"word_bits\": 32,\n"
@@ -854,6 +861,20 @@ private:
     const std::filesystem::path& path_;
     std::size_t position_ = 0;
 };
+
+bool extract_json_bool(
+    const std::string& json, const std::string& key,
+    const std::filesystem::path& path)
+{
+    const auto fields = JsonReader(json, path).read_document();
+    const auto found = fields.find(key);
+    if (found == fields.end() || found->second.kind != JsonKind::literal
+        || (found->second.text != "true" && found->second.text != "false")) {
+        throw std::runtime_error("application package JSON '" + path.string()
+            + "' is missing boolean field '" + key + "'");
+    }
+    return found->second.text == "true";
+}
 
 std::uint64_t extract_json_u64(
     const std::string& json,
@@ -1436,6 +1457,12 @@ void validate_program_source(
     const std::vector<hpu::runtime::HpuMemSpan>& spans,
     hpu::ExecutableTwiddleFormat twiddle_format = hpu::ExecutableTwiddleFormat::online_k8)
 {
+    // All packages carry resolved spans, even when their entry accepts a
+    // dynamic span table. Validate the same target shapes for both renderers.
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
+    for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
+    const auto fixed = hpu::render_fixed_executable_source(
+        stem, instructions, capacity_lines, fixed_spans, twiddle_format);
     const std::string base = hpu::render_executable_source(
         stem, instructions, capacity_lines);
     if (source == base) return;
@@ -1458,10 +1485,7 @@ void validate_program_source(
     }
     expected << "_DMA_COUNT);\n}\n";
     if (source == expected.str()) return; // Historical V1 fixed-table wrapper.
-    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
-    for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
-    if (source != hpu::render_fixed_executable_source(stem, instructions, capacity_lines, fixed_spans,
-                                                    twiddle_format)) {
+    if (source != fixed) {
         throw std::runtime_error(
             "application package program source differs from encoded instructions or DMA spans");
     }
@@ -1588,6 +1612,20 @@ void validate_physical_artifacts(const std::filesystem::path& root)
 
     const std::string descriptor = read_file(root / "package.json");
     const std::filesystem::path descriptor_path = root / "package.json";
+    const auto target_abi_path = root / "memory/abi.json";
+    const auto target_abi = read_file(target_abi_path);
+    if (extract_json_string(target_abi, "instruction_isa", target_abi_path, false)
+            != "hpu-objects64-v1.1"
+        || extract_json_u64(target_abi, "object_slots", target_abi_path) != 64
+        || extract_json_u64(target_abi, "allocation_granule_lines", target_abi_path) != 128
+        || extract_json_u64(target_abi, "mod_table_lines", target_abi_path) != 4
+        || extract_json_u64(target_abi, "stage_parameter_load_type", target_abi_path) != 3
+        || extract_json_string(target_abi, "dload_mask_scope", target_abi_path, false) != "load_only"
+        || !extract_json_bool(target_abi, "dstore_rel0_retains", target_abi_path)) {
+        throw std::runtime_error(
+            "application package targets an incompatible instruction ISA or bank configuration; "
+            "regenerate for hpu-objects64-v1.1 in a new output directory");
+    }
     const std::string asm_path = extract_json_string(
         descriptor, "program_asm", descriptor_path, true);
     const std::string inst32_path = extract_json_string(
@@ -1617,19 +1655,14 @@ void validate_physical_artifacts(const std::filesystem::path& root)
         read_file(root / "program/dma_relocation_manifest.csv"),
         root / "program/dma_relocation_manifest.csv", assembled, memory,
         used_lines, nullptr);
-    // Historical packages must remain structurally verifiable so managed
-    // generation can safely replace them. This does not execute their data on
-    // the current target. New requests are always validated with online_k8.
     const auto abi_path = root / "memory/abi.json";
     const auto abi = read_file(abi_path);
     const auto format = extract_json_string(abi, "stage_twiddle_format", abi_path, false);
-    auto twiddle_format = hpu::ExecutableTwiddleFormat::online_k8;
-    if (format.empty()) {
-        twiddle_format = hpu::ExecutableTwiddleFormat::legacy_full_table;
-    } else if (format != hpu::model::kStageTwiddleParameterFormat
-               || extract_json_u64(abi, "twiddle_chains", abi_path) != hpu::model::kTwiddleChains
-               || extract_json_u64(abi, "stage_parameter_lines", abi_path)
-                   != hpu::model::kStageTwiddleParameterLines) {
+    const auto twiddle_format = hpu::ExecutableTwiddleFormat::online_k8;
+    if (format != hpu::model::kStageTwiddleParameterFormat
+        || extract_json_u64(abi, "twiddle_chains", abi_path) != hpu::model::kTwiddleChains
+        || extract_json_u64(abi, "stage_parameter_lines", abi_path)
+            != hpu::model::kStageTwiddleParameterLines) {
         throw std::runtime_error("application package memory ABI has unsupported stage twiddle format");
     }
     validate_program_source(

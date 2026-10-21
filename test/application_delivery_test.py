@@ -28,6 +28,12 @@ def main():
         descriptor = json.loads((package / "package.json").read_text())
         assert descriptor["scheme"] == scheme
         assert descriptor["schema_version"] == 1
+        abi = json.loads((package / "memory/abi.json").read_text())
+        assert abi["instruction_isa"] == "hpu-objects64-v1.1"
+        assert abi["object_slots"] == 64 and abi["mod_table_lines"] == 4
+        assert abi["allocation_granule_lines"] == 128
+        assert abi["stage_parameter_load_type"] == 3
+        assert abi["dload_mask_scope"] == "load_only" and abi["dstore_rel0_retains"] is True
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         assert parameters["scheme"] == scheme
         assert parameters["poly_modulus_degree"] > 0
@@ -55,7 +61,7 @@ def main():
         }[scheme]
         assert report["compiler_resources"]["ir_source"] == "operator"
         assert report["compiler_resources"]["peak_regular_banks"] <= 5
-        assert report["compiler_resources"]["peak_object_slots"] <= 8
+        assert report["compiler_resources"]["peak_object_slots"] <= 64
         assert report["host_instruction_model_verified"] is True
         assert report["optimization_equivalence_verified"] is True
         assert report["host_instruction_model"]["required"] is True

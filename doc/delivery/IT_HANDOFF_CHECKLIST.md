@@ -4,6 +4,22 @@
 包内已经包含指令、resolved DMA、初始 HPU_MEM 镜像、逐算子 golden 和软件验证报告；
 RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 
+## 64 对象版本接收要求
+
+本轮改为 `hpu-objects64-v1.1` ISA。接收时检查 `memory/abi.json` 的
+`instruction_isa`、`object_slots=64`、`allocation_granule_lines=128`、
+`mod_table_lines=4`，以及 TYPE3 两条 line 参数和 REL0 保留语义。
+所有旧 `.inst32/.cmd26` 与 ELF 必须重新生成。CPU/SoC 的有效 RTL、六位 fault
+通路及命令 sideband 仍需按 [RTL 交接说明](HPU_64OBJ_INTEGRATION_HANDOFF.md)
+同步；HPU 子模块的局部验证不代表 SoC IT 通过。
+
+升级时保留旧包，以新根目录生成，例如：
+
+```sh
+cmake -S . -B build-ckks-delivery -DHPU_APPLICATION_OUTPUT_ROOT="$PWD/outputs/isa64"
+cmake --build build-ckks-delivery --target hpu_frontend_delivery -j6
+```
+
 ## 1. 当前交付判定
 
 满足以下条件时，应用包可以交给 IT 开展功能联调：
@@ -28,7 +44,7 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 前端的命令及当前验证边界见 [Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
 
 新应用 builder 为三个方案统一保存自然系数位置。完整变换的软件契约见
-[编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)，表 ABI 和迁移
+[编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，表 ABI 和迁移
 要求见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 该契约不声称复现 RTL 每 stage 地址。接收时记录
 `forward_boundary_conversions`、`inverse_boundary_conversions` 及

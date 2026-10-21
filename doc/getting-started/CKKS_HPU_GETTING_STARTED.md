@@ -41,7 +41,7 @@ include/hpu/seal, src/hpu/seal
     SEALContext、level descriptor、NTT bridge、评估密钥和 HPU_MEM image
 
 include/hpu/runtime, src/hpu/runtime
-    应用生命周期、五个 regular-bank 槽位、dstore/psync 状态、DDR image
+    应用生命周期、64 个逻辑对象与五个普通 bank 的区间分配、dstore/psync 状态、DDR image
     和基础模运算软件执行器
 
 include/scheme/ckks, src/scheme/ckks

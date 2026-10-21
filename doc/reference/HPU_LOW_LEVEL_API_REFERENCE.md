@@ -25,17 +25,17 @@
 
 | 指令 | 类型 | 语义 |
 | --- | --- | --- |
-| `dload` | custom1 | 从 HPU_MEM 搬运到对象槽位；`flag[0]=1` 分配到 small Bank 5 |
-| `dstore` | custom1 | 对象槽位写回 HPU_MEM；当前 RTL 对 `rel=0/1` 都在 DMA 完成后释放对象，传输长度取 `OBJ.len` |
-| `padd` | custom2 | 对象级逐点模加 |
-| `psub` | custom2 | 对象级逐点模减 |
-| `pmul` | custom2 | 对象级逐点模乘（或 `pmul imm` 整数乘） |
-| `pmac` | custom2 | 对象级逐点乘加（乘积累加） |
-| `pntt` | custom2 | 按 stage 的负循环前向 NTT（数据对象 + twiddle 对象） |
-| `pintt` | custom2 | 按 stage 的负循环逆 NTT |
-| `pmodld` | custom2 | 激活 small-bank 模上下文表项 |
-| `pfree` | custom2 | 释放对象槽位 |
-| `psync` | custom2 | 通知 CPU 整个 HPU 程序完成（仅程序末尾一次） |
+| `dload` | custom1 | 从 HPU_MEM 搬运到对象槽位；六位 mask=0x20 选择 Bank 5；TYPE2/3 在 mask=0 时也默认 Bank 5 |
+| `dstore` | custom1 | 对象槽位写回 HPU_MEM；REL=0 保留对象，REL=1 成功完成后释放，传输长度取 `OBJ.len` |
+| `padd` | custom0 | 对象级逐点模加 |
+| `psub` | custom0 | 对象级逐点模减 |
+| `pmul` | custom0 | 对象级逐点模乘（或 `pmul imm` 整数乘） |
+| `pmac` | custom0 | 对象级逐点乘加（乘积累加） |
+| `pntt` | custom0 | 按 stage 的负循环前向 NTT（数据对象 + twiddle 对象） |
+| `pintt` | custom0 | 按 stage 的负循环逆 NTT |
+| `pmodld` | custom0 | 激活 small-bank 模上下文表项 |
+| `pfree` | custom0 | 释放对象槽位 |
+| `psync` | custom0 | 等待此前操作完成并通知 CPU；本项目生成器统一在程序末尾发出一次 |
 
 ---
 

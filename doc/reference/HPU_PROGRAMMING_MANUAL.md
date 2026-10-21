@@ -1,1500 +1,264 @@
-# HPU 软件编程手册
+# HPU 软件编程手册：64 逻辑对象 ISA
 
-版本：0.4
-适用实现：`inline-asm` 当前软件实现
-日期：2026-08-23
+版本：1.1；日期：2026-10-21。规范对应 `rtl/cpu/SCPU_RTL/RTL/hpu/rtl/`。
 
-## 前言
+**本版删除 PPLACE，OPC=9…F 保留且译码非法。DLOAD mask 只约束本次装入，不保存为对象的后续策略。新结果按第 5 节的固定规则分配，编译器须同步此规则。**
 
-本手册描述当前 `inline-asm` 仓库实际支持的 HPU 汇编语言、32-bit 指令编码和软件可见编程约定。章节组织参考 RISC-V 指令集手册：先定义编程模型和公共指令格式，再逐条说明指令的语法、操作、约束和编码示例。
+本版替代附件《HPU_PROGRAMMING_MANUAL.pdf》0.4 的指令编码、对象编号和分配约定。数学算子语义保持；旧 `.inst32/.cmd26` 必须重新生成。当前 SoC 的 `RTL/latest/` 尚未同步本版，接入要求见 [集成交接](../delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)。
 
-本手册的规范对象是以下代码：
+## 1. 编程模型与容量
 
-- `encode/include/instruction.hpp`：助记符、格式和结构化字段。
-- `encode/src/parser.cpp`：文本语法和操作数检查。
-- `encode/src/encoder.cpp`：32-bit 机器指令编码。
-- `include/util/hpu_asm.hpp`：算子生成器使用的汇编封装。
-- `src/`：算子级和完整密文乘法指令流。
+- 指令固定 32 bit。计算/控制类 opcode **0x5B**，DMA 类 **0x2B**。沿用项目名称 custom0/custom1；这里的 custom0 不是 opcode 0x0B。
+- **64 个逻辑对象 p0…p63**，全都可用，包括 p0。对象号不是 bank 编号，也不是 RISC-V GPR。
+- 系数为 32-bit canonical residue；1 line=64 系数=2048 bit=256 B。
+- Bank 0…4：各 1024 line，总共 5120 line=1.25 MiB。
+- 普通分配单元为 128 line=32 KiB；请求容量为 `128*next_pow2(ceil(len/128))`，对象不跨 bank。
+- 对象表记录实际 `len`；DMA 按实际长度传输，释放按 allocator 的向上取整容量回收。
+- N=8192 的多项式占 128 line。每个普通 bank 最多 8 个，五个最多 40 个。**40 是静态存储上限；NTT/PMAC 异址结果及普通常量也占空间。** 编译器必须预留工作区，并检查候选 bank，不能只累计总容量。
 
-除特别说明外，本文中的“当前实现”均指上述软件实现。26-bit HPU 命令以 `cmd26[25]` 区分计算类 custom2 和 DMA 类 custom1；两类指令的 `inst[31:7]` 都直接成为 `cmd26[24:0]`。`pmodld` 采用 8-bit 编码字段，但应用软件 ABI 只使用 `MOD_ID=0..63`；模表对象通过 `dload type=2, flag[0]=1` 分配到 small Bank 5。
+| N | 数据长度/line | 分配容量/line | 每普通 bank 上限 |
+|---|---:|---:|---:|
+| 4096 | 64 | 128 | 8 |
+| 8192 | 128 | 128 | 8 |
+| 16384 | 256 | 256 | 4 |
+| 32768 | 512 | 512 | 2 |
+| 65536 | 1024 | 1024 | 1 |
 
-## 1. 编程模型
+## 2. Bank 5：固定模表与 twiddle 小对象
 
-### 1.1 指令类别
+Bank 5 物理为 **32 line=8 KiB**，全局 line 地址 `0x1400…0x141F`。`MOD_TABLE_LINES=R` 沿 HPU 层次传递，默认 **R=4**，支持 1…16：
 
-HPU 指令均为 32-bit 定长指令，使用两个 RISC-V custom opcode：
+- `[0,R)` 永久保留给模表，模表对象始终从 Bank 5 line 0 开始。
+- `[R,32)` 是小对象区；以两条 line 对齐搜索，twiddle 对象长度必须为 2 line。
+- 模表没有装满时，保留区内剩余空间也不能分给 twiddle。
+- 模表同一时间最多一个 live 对象。重新装载同一对象可以替换；不同对象必须先释放旧对象。
+- `pmodld mod_id` 保留原语法，固定从 Bank 5 取模表；不携带模表对象号。
+- 每条 line 容纳 16 个 128-bit context；`mod_id` 编码仍为 8 bit，必须满足 `(mod_id>>4)<实际已装载模表长度`。默认配置最多 64 个 context，并非任意 0…255 都可执行。
 
-| 类别 | 低 7-bit opcode | 用途 |
-| --- | --- | --- |
-| `custom2` | `1011011` (`0x5B`) | 模运算、NTT/INTT、配置、完成通知和对象释放 |
-| `custom1` | `0101011` (`0x2B`) | 外部存储器与 HPU 对象之间的数据搬运 |
+| R | 模表最大 context 数 | 模表 line 地址 | 可用两条 line 参数槽 |
+|---:|---:|---|---:|
+| **4（默认）** | **64** | `0x1400…0x1403` | **14**，`0x1404…0x141F` |
+| 8 | 128 | `0x1400…0x1407` | 12 |
+| 16 | 256 | `0x1400…0x140F` | 8 |
 
-当前软件 ISA 包含 11 条指令：
+非偶数 R 时，小对象区起点向上对齐到偶数 line，槽数为 `floor((32-align_up(R,2))/2)`。
 
-| 指令 | 格式 | OPC/DIR | 功能 |
-| --- | --- | --- | --- |
-| `padd` | AR3 | `OPC=0000` | 逐系数模加 |
-| `psub` | AR3 | `OPC=0001` | 逐系数模减 |
-| `pmul` | AR3 | `OPC=0010` | 逐系数模乘或小常数乘 |
-| `pmac` | AR3 | `OPC=0011` | 逐系数模乘加 |
-| `pntt` | STG | `OPC=0100` | 前向 NTT 的一个 stage |
-| `pintt` | STG | `OPC=0101` | 逆向 NTT 的一个 stage |
-| `pmodld` | MOD | `OPC=0110` | 按 `MOD_ID` 选择并激活固定模表项 |
-| `psync` | SYNC | `OPC=0111` | 在程序末尾通知 CPU 执行完成 |
-| `pfree` | CFG | `OPC=1000` | 释放对象槽位 |
-| `dload` | DMA | `DIR=0` | 外部存储器到 HPU 对象 |
-| `dstore` | DMA | `DIR=1` | HPU 对象到外部存储器 |
+**N=8192 一方向有 13 个 stage，参数总共 26 line=6656 B。默认 4-line 模表加这 13 个参数对象，共 30 line，剩余一个两条 line 参数槽。** 这只对应一个 N、一个模数/根和一个变换方向的 stage 参数集合；不能据此认为全部 RNS limb、NTT 与 INTT 参数都能同时常驻。
 
-`OPC=1001..1111` 保留。旧助记符 `pshcfg`、`pshuf`、`pseed` 和 `psample` 不属于当前 ISA，汇编器必须拒绝。
+模上下文布局保持 128 bit：低位依次为 q32、mu48、reserved48。q/mu 在 PMODLD 完成后保存在活动上下文寄存器；换模数前必须完成上一批依赖计算。
 
-### 1.2 多项式对象槽位
+## 3. 在线 twiddle：只读种子，不向参数对象写回
 
-HPU 软件使用 `p0` 到 `p7` 表示 8 个 3-bit 对象槽位。对象槽位不是 RISC-V 通用寄存器或 SRAM bank 编号，而是对象状态表的逻辑标识。每个对象由硬件维护 `ALLOC/V/busy/base/len`；allocator 再将其映射到具体 SRAM bank。
+TYPE=3 对象的实际长度固定为 **2 line=512 B**：
 
-每个 live 对象至少具有以下软件可见属性：
+| line | word | 内容 |
+|---|---|---|
+| 0 | 0…63 | 当前 stage 的 U[64] 模板 |
+| 1 | 0…K-2 | V[1]…V[K-1]，V[0]=1 隐含 |
+| 1 | K-1+t | stride-K 进位倍率 R[t] |
+| 1 | 其余 | 建议填 1 |
 
-- 对象类型，例如多项式、模上下文或 twiddle。
-- 系数数据，硬件镜像使用 little-endian `uint32` canonical residue。
-- 以 HPU line 为单位的长度。
-- 生命周期状态：未分配、正在搬运、有效、忙或可释放。
+默认 K=8。参数必须匹配 N、模数、本原根、方向、stage 和硬件 K。
 
-编码器只检查对象编号为 0..7，不检查对象是否 live、长度是否匹配或数据域是否正确。这些条件由指令生成器、runtime 和硬件对象状态机共同保证。
-
-### 1.3 数据粒度
-
-当前硬件数据包采用以下基本布局：
+从当前 stage 按**硬件实际消费顺序**排列的完整因子表 T[b][ell] 提取参数：B=N/128，b=0…B-1，ell=0…63。标准根表要求 T[0][0]=1。
 
 ```text
-1 coefficient = 32 bit
-1 HPU line     = 64 coefficients = 2048 bit = 256 byte
+U[ell] = T[0][ell]
+V[a]   = T[a][0]                  # 1 <= a < min(8,B)
+R[t]   = T[8*2^t][0] / T[8*(2^t-1)][0] (mod q)
+                                  # 仅当 8*2^t < B
 ```
 
-`dload/dstore` 对应的硬件数据来自 `test_data/hardware/` 下的 `uint32` 镜像。对象的 line offset 和 line count 记录在 `line_map.csv`。
-
-### 1.4 活动模上下文
-
-`padd`、`psub`、`pmul`、`pmac`、`pntt` 和 `pintt` 均使用当前活动模上下文。上下文至少包含：
+除法表示乘模逆。未使用的 V/R word 填 1。编译器必须按以下过程重建全部因子，与原表逐元素一致后才输出两条参数 line：
 
 ```text
-q  = 32-bit modulus, 65537 <= q <= 2^32 - 1
-mu = floor(2^64 / q), 48-bit Barrett reciprocal
+C[a][ell] = U[ell] * V[a] mod q    # V[0]=1
+for b = 0…B-1:
+    a = b % 8
+    require C[a][ell] == T[b][ell] for every ell
+    if b+8 < B:
+        t = ctz((b >> 3)+1)
+        C[a][ell] = C[a][ell] * R[t] mod q
 ```
 
-每条上下文是一个 little-endian 128-bit record，从最低位到最高位为
-`{q[31:0], mu[47:0], reserved[47:0]}`。按 `uint32` word 查看时依次为：
-`word0=q`、`word1=mu[31:0]`、`word2[15:0]=mu[47:32]`，
-`word2[31:16]` 与 `word3` 全部为 0。生成器会同时检查 q 范围和
-`mu >> 48 == 0`。
+这是 stride-8 递推，不是相邻批次倍率。不能用软件参考实现中的数学下标顺序代替硬件物理消费顺序；如曾融合额外 scale，必须重新验证模板与倍率可分解性。
 
-模上下文对象通过 `dload type=2, flag[0]=1` 请求 small-bank 分配。最新硬件
-配置包含 Bank 0-4 五个 1024-line 普通 bank，以及
-`SMALL_BANK_ID=5` 的 32-line small bank；Bank 5 固定 line 范围为
-`0x1400..0x141F`，模表基址 `MOD_TABLE_BASE_LINE=0x1400`。Bank 5 物理上
-可容纳 512 个 128-bit context，`pmodld` 的 `MOD_ID` 编码字段仍为 8 bit；但
-当前应用软件 ABI 只允许 `MOD_ID=0..63`，即 `MOD_ID[7:6]` 必须为 0，对应
-`0x1400..0x1403`。其余 Bank 5 空间和 8-bit 保留编码不扩展当前软件上限。
-DMA 与后续访问的一致性由硬件维护，软件可在模表
-`dload` 后直接通过 `pmodld MOD_ID` 选择当前上下文；切换 Q/P limb 前必须重新执行 `pmodld`。
+每个 stage 读取两条参数 line 一次，在模块内部初始化八条因子链。链的 2 KiB 状态在寄存器中；递推复用 PE 内部 PMUL，结果按 slot 标签返回寄存器。**不生成完整 SRAM 表，不覆盖种子，不向 Bank 5 写递推结果。** 参数对象可被多个多项式依次复用；每次 stage 重新初始化。
 
-### 1.5 指令顺序和对象生命周期
+模表读取和两条参数读取共用既有 rd2 通路；NTT 稳态不再持续读取 Bank 5。DMA 只在装载/替换参数时写 Bank 5。使用期间禁止覆盖或释放参数对象。
 
-当前生成器按程序顺序建立数据依赖，推荐遵循以下规则：
+软件可选择一个参数对象逐 stage 重载，或者预加载多个参数对象。默认 TYPE=3 自动选择 Bank 5；也可以显式选择普通 bank，代价是两条 line 会占一个 128-line 单元。
 
-1. 使用对象前先执行对应 `dload`；硬件负责等待对象有效并维护 DMA 一致性。
-2. 先执行 `pmodld`，再发出使用该模数的计算指令。
-3. `pmac` 的目的对象是读写操作数，执行前必须已有有效累加值。
-4. `pntt/pintt` 的数据对象在软件层面是读写对象。
-5. 不再使用的输入、常量、twiddle 和模上下文使用 `pfree` 释放。
-6. 输出使用 `dstore` 写回后由当前 DMA 完成路径释放；`rel=0/1` 均不得再对同一对象执行 `pfree`。
-7. 一段完整 HPU 程序只在最后发出一次 `psync`，向 CPU 报告程序完成；组合算子的内部阶段不发出 `psync`。
+pre-twist、post-untwist/scale 仍是普通向量常量；本版没有把它们并入在线 twiddle 生成。
 
-## 2. 汇编语言约定
+## 4. 32-bit 指令编码
 
-### 2.1 寄存器和立即数
+以下位段均相对原始 32-bit 指令。保留位必须为 0。内部 OPC：0 padd、1 psub、2 pmul、3 pmac、4 pntt、5 pintt、6 pmodld、7 psync、8 pfree；9…F 保留且非法。
 
-| 写法 | 范围 | 含义 |
-| --- | --- | --- |
-| `p0`..`p7` | 0..7 | HPU 对象槽位 |
-| `x0`..`x31` | 0..31 | custom1 使用的 RISC-V 通用寄存器编号 |
-| `cimm8` | 0..255 | `pmul/pmac` 小立即数 |
-| `stage` | 0..15 | NTT/INTT stage |
-| `mode` | 0..3 | custom2 2-bit 模式 |
-| `flag` | 0..1 | custom2 1-bit 标志 |
-| `mod_id` | 编码 0..255，当前软件使用 0..63 | 模上下文表编号；软件要求高两位为 0 |
-| `small_bank` | 0..1 | `dload flag[0]`，1 请求 small Bank 5 |
+### 4.1 算术
 
-整数支持十进制和 `0x` 前缀十六进制。助记符不区分大小写，但对象和寄存器前缀应写成小写 `p`、`x`。
+| 位段 | 含义 |
+|---|---|
+| `[31:28]` | OPC4 |
+| `[27:22]` | PDST6 |
+| `[21:16]` | PSRC1_6 |
+| `[15:8]` | OP2_8 |
+| `[7]` | I：0 对象，1 立即数 |
+| `[6:0]` | **0x5B** |
 
-### 2.2 注释和源文件
+对象模式 OP2[5:0] 为 PSRC2，OP2[7:6]=0。立即数模式保留 cimm8=0…255，只允许 PMUL/PMAC。
 
-解析器接受单条 ASM，也可以从生成的 C++ 内联汇编字符串中提取指令。支持以下注释：
+`padd/psub/pmul pdst,psrc1,psrc2`：逐系数模运算。`pmac` 的 pdst 还必须已有有效累加值。兼容长度的 padd/psub/pmul 允许覆盖既有目的对象；新目的对象由硬件分配。
 
-```text
-// comment
-# comment
-; comment
-/* comment */
-```
+### 4.2 NTT/INTT stage
 
-项目生成的 `.cpp` 文件是中间表示；当前编码流程由项目自身的 parser/encoder 产生 `.inst32`，不要求系统 GNU assembler 原生认识这些 HPU 助记符。
+| 位段 | 含义 |
+|---|---|
+| `[31:28]` | 4 / 5 |
+| `[27:22]` | PDATA6，逻辑读写对象 |
+| `[21:16]` | PPARAM6，两条 line 参数对象 |
+| `[15:12]` | STAGE4 |
+| `[11:10]` | MODE2；编译器写 0 |
+| `[9]` | FLAG；编译器写 0 |
+| `[8:7]` | 保留 0 |
+| `[6:0]` | **0x5B** |
 
-### 2.3 26-bit precode
+语法仍为 `pntt/pintt pdata,pparam,stage,mode,flag`。N 为 128…65536 的二次幂，stage 必须小于 log2(N)。N=8192 对应 stage 0…12。
 
-控制逻辑命令固定把类别放在最高位：
+物理执行继续 out-of-place：申请新结果区间，实际执行完成后更新 PDATA.base 并释放旧区间。NTT 结果必须与输入不同 bank。PMAC 同样申请新结果区间，完成后更新同一逻辑目的对象并释放旧区间。两者在计算完成前均保留旧数据，不能把旧区间当成本次申请的空闲空间。分配规则见第 5 节。
 
-```text
-cmd26[25]   = command_kind: 0=custom2 compute, 1=custom1 DMA
-cmd26[24:0] = payload
-```
+### 4.3 配置和生命周期
 
-custom0 的 payload 与原始指令去掉低 7-bit opcode 后完全相同：
+| 指令 | 格式（未列位为 0） |
+|---|---|
+| `pmodld mod_id` | OPC=6，MOD_ID8=`[15:8]`，opcode=0x5B |
+| `psync` | OPC=7，opcode=0x5B |
+| `pfree pID` | OPC=8，OBJ6=`[21:16]`，opcode=0x5B |
 
-```text
-custom2: cmd26 = {1'b0, inst[31:7]}
-```
+PFREE 在对象不忙且已分配时，由控制器本地释放，不进入 PE 或 DMA。PSYNC 等待此前操作完成并通知软件。
 
-custom1 的 `rs1/rs2` 编号保留在命令本体中，由核侧读取对应 GPR。DLOAD 使用
-`GPR[rs1]` 作为 line offset、`GPR[rs2]` 作为 line count；DSTORE 使用前者作为
-offset，实际传输长度取对象表中的 `OBJ.len`。旧《RISC-V核内接口设计》中的 DTLB
-descriptor 方案不再作为本项目 ABI。custom1 precode 直接保留原始指令 payload：
+### 4.4 DMA：rs1/rs2 位置不变
 
-```text
-cmd26[25]    = 1
-cmd26[24:21] = 4'b0000
-cmd26[20:18] = OBJ_ID
-cmd26[17:13] = RS2
-cmd26[12:8]  = RS1
-cmd26[7:6]   = dload: TYPE
-                 dstore: {REL, 1'b0}
-cmd26[5]     = DIR
-cmd26[4:1]   = 4'b0000
-cmd26[0]     = flag[0]
-```
+| 位段 | DLOAD | DSTORE |
+|---|---|---|
+| `[31:26]` | OBJ6 | OBJ6 |
+| `[25]` | BANK_MASK[5] | 0 |
+| `[24:20]` | **rs2** | **rs2** |
+| `[19:15]` | **rs1** | **rs1** |
+| `[14:13]` | TYPE2 | `{REL,0}` |
+| `[12]` | DIR=0 | DIR=1 |
+| `[11:7]` | BANK_MASK[4:0] | 0 |
+| `[6:0]` | **0x2B** | **0x2B** |
 
-项目为每个可编码算子同时生成 `.inst32` 和 `.cmd26`。`outputs/rv_interface_smoke/test_data/expected_cmd26.csv` 提供逐条 32→26-bit 对拍数据。
+TYPE：0 普通片段，1 多项式/向量常量，2 固定模表，3 在线 twiddle 参数。原 small_bank 单独字段删除，改为 bank mask。
 
-## 3. 32-bit 指令格式
+建议新汇编接口：`dload rs1,rs2,pdst,type,bank_mask`，`dstore rs1,rs2,psrc,rel`。旧调用最后一个 small_bank=1 不能原样当作新 mask=1；后者表示 Bank 0。
 
-### 3.1 AR3 格式
+- mask=0：TYPE=0/1 默认 Bank 0…4；TYPE=2/3 默认 Bank 5。
+- 非零 mask：bit b 对应 Bank b。指定单 bank 或一组 bank。TYPE=2 只接受 0 或 0x20。
+- 同时允许 Bank 5 和普通 bank 时，allocator 优先符合容量的 Bank 5 区间，否则尝试允许的普通 bank。
+- Bank 5 分配受模表保留区与物理 32-line 边界约束，普通 bank 分配粒度仍为 128 line。
+- **mask 仅约束本次 DLOAD。** 不存入对象表，不限制后续 NTT/PMAC 或其他结果的分配。例如 mask=1 将输入装到 Bank 0，NTT 结果仍可分配到 Bank 1…4。
+- `GPR[rs1]` 为外部 HPU memory window 的 line offset；DLOAD 的 `GPR[rs2]` 为实际 line count。DSTORE 的传输长度来自 OBJ.len，rs2 仍占固定寄存器字段。
+- DLOAD len 必须非零；TYPE=2 长度不超过 R；TYPE=3 必须为 2；普通请求不超过 1024 line。offset+实际传输长度必须位于 memory window。
+- DSTORE REL=0 保留对象 ALLOC/V，REL=1 仅在成功完成后释放。传输期间对象不得覆盖或释放。
 
-```text
- 31      28 27    25 24    22 21             14 13       10 9    8 7 6       0
-+----------+--------+--------+-----------------+-------------+------+--+---------+
-|   OPC4   |  PDST  | PSRC1  |      OP2_8      | STAGE4=0    | MODE2| F| 1011011 |
-+----------+--------+--------+-----------------+-------------+------+--+---------+
-```
+## 5. 确定性的 bank 分配：编译器必须同步
 
-编码公式：
+无需新增指令。编译器根据程序顺序、对象生命周期与相同 allocator 规则维护 bank/区间映射。仅知道对象号或 `id%5` 不足以预测结果；必须同时维护每个 bank 的占用与对齐空洞。完整伪代码和调度建议见 [Bank 分配与编译器调度](HPU_BANK_ALLOCATION_GUIDE.md)。
 
-```text
-word = (OPC4 << 28) | (PDST << 25) | (PSRC1 << 22)
-     | (OP2_8 << 14) | (MODE2 << 8) | (FLAG1 << 7) | 0x5B
-```
+### 5.1 什么时候申请新区间
 
-- 对象模式：`OP2_8[2:0]=PSRC2`，高 5-bit 为 0，`MODE2=0`。
-- 立即数模式：`OP2_8=cimm8`，编码器设置 `MODE2[0]=1`。
-- 算术文本语法不直接暴露 `FLAG1`，其值为 0。
+| 操作 | 分配行为 |
+|---|---|
+| DLOAD | 每次申请；替换既有对象时，将旧区间纳入搜索视图，只有成功才提交回收 |
+| PADD/PSUB/PMUL | 已分配且实际长度匹配时直接复用原目的；否则分配/替换目的 |
+| PMAC | 始终申请新结果；旧累加对象计算完成后才回收 |
+| PNTT/PINTT | 每个 stage 都申请新结果；同一逻辑数据对象在完成后迁移 |
+| PFREE | 对象不忙时立即回收 |
+| DSTORE REL=0 / 1 | 成功完成后分别保留 / 回收；发射时不会提前回收 |
 
-### 3.2 STG 格式
+### 5.2 选择 bank 和区间的固定规则
 
-```text
- 31      28 27    25 24    22 21             14 13       10 9    8 7 6       0
-+----------+--------+--------+-----------------+-------------+------+--+---------+
-|   OPC4   | PDATA  | PDATA  |     PTWID       |   STAGE4    | MODE2| F| 1011011 |
-+----------+--------+--------+-----------------+-------------+------+--+---------+
-```
+1. 计算保留容量 `C=128*next_pow2(ceil(len/128))`。对每个普通 bank，在起点为 C 的整数倍的区间中，找出能容纳 C 条 line 的**最低地址空闲区间**。累计空闲容量够、但没有合适连续区间的 bank 不算可用。
+2. 计算结果只考虑 Bank 0…4；NTT/INTT 额外排除当前输入 bank。DLOAD 按本次有效 mask 筛选；若允许 Bank 5 且其中有合适小区间，优先使用 Bank 5。
+3. 对有合适区间的普通 bank，计算 `read_cost[b]`。算术结果取本次 stream 在该 bank 的读操作数；**PMAC 包括旧目的、第一源和非立即数第二源**。同 bank 的多个读分别计数，立即数不计 SRAM 读。DLOAD 的 cost 全部为 0。
+4. 优先取 cost 最小的可用 bank；并列时从 preference 起，按 `(preference+k)%5, k=0…4` 的固定顺序选择第一个。选中 bank 后使用第 1 步的最低地址区间。
 
-编码公式：
+| 申请类别 | preference | 算术读集合 |
+|---|---|---|
+| DLOAD | `OBJ%5` | 空，所有 cost=0 |
+| 新 PADD/PSUB/PMUL 目的 | `PDST%5` | PSRC1，以及非立即数 PSRC2 |
+| PMAC 新累加结果 | `(旧目的bank+1)%5` | 旧 PDST、PSRC1，以及非立即数 PSRC2 |
+| NTT/INTT 新数据 | `(输入bank+1)%5` | 同一输入 bank 的两次读；该 bank 已从候选排除 |
 
-```text
-word = (OPC4 << 28) | (PDATA << 25) | (PDATA << 22)
-     | (PTWID << 14)
-     | (STAGE4 << 10) | (MODE2 << 8) | (FLAG1 << 7) | 0x5B
-```
+对于 Bank 5 输入，NTT preference 归一为 0；正常多项式位于 Bank 0…4。两条 line 的小对象在非模表保留区按最低偶数起点 first-fit；模表固定 line 0。
 
-`stage`、`mode` 和 `flag` 均由汇编显式给出；当前生成器使用 `mode=0, flag=0`。
+**性能偏好是有空间前提下的选择顺序。** 若无读冲突的 bank 都装不下，但其他允许的 bank 有空间，普通算术/PMAC 选读次数最少的剩余 bank，不因性能偏好而直接失败。NTT 的不同 bank 约束不放宽。所有候选都无空间才 fault，旧对象保留。
 
-### 3.3 MOD 格式
+### 5.3 消除异步完成时序带来的分配漂移
 
-```text
- 31      28 27             22 21             14 13              7 6       0
-+----------+-----------------+-----------------+------------------+---------+
-|   0110   |   reserved=0    |     MOD_ID8     |    reserved=0    | 1011011 |
-+----------+-----------------+-----------------+------------------+---------+
-```
+所有新区间申请都等此前在途 DMA 结束后再选择。计算 stream 之间按现有控制串行，NTT/PMAC 的旧区间在执行完成时回收。因此在无 fault、命令有序、无外部并发改写的前提下，编译器可按程序顺序复现占用变化，无需模拟 DMA 延迟。
 
-编码公式：
+已有匹配长度目的的 PADD/PSUB/PMUL 无需申请，仍可与独立 DMA 重叠。代价是新目的算术/PMAC 不能在前一 DMA 尚未结束时提前申请并发启动；这一限制换来布局可预测性。DMA 竞争不是 read_cost 的输入，编译器安排重叠时还须避开 DMA 所在 bank。
 
-```text
-word = (0b0110 << 28) | (MOD_ID8 << 14) | 0x5B
-```
+### 5.4 能避免什么，仍需要软件做什么
 
-经过 custom2 precode 后，`MOD_ID8` 位于 `cmd26[14:7]`。其余操作数字段必须为 0。
+硬件优先避免**本条计算新增的写结果与读取冲突**，不会搬走已装载的两个源，也不会自动搬迁匹配长度的既有普通算术目的。编译器用 DLOAD 单 bank mask 分散常用输入，用逻辑对象重命名生成新目的，并预留候选 bank 的工作空间；不要只依赖逻辑编号。
 
-### 3.4 PFREE 格式
+例如源在 Bank 0/1，新目的 ID=5，preference=0。若 Bank 2…4 都有空间，结果选 Bank 2；若只有 Bank 0 有空间，则结果选 Bank 0。PMAC 旧目的/两个源在 Bank 0/1/2 时，有空间的 Bank 3 优先于 Bank 2。
 
-```text
- 31      28 27    25 24    22 21                                  7 6       0
-+----------+--------+--------+--------------------------------------+---------+
-|   1000   | reserved| OBJ_ID |             reserved=0               | 1011011 |
-+----------+--------+--------+--------------------------------------+---------+
-```
+这些规则减少冲突，不保证所有操作都无冲突，也不保证全程序吞吐最优。NTT 的双输入读取本就共用一个 bank；不能宣称因此达到每周期处理一个双 line 批次。编译器应对关键路径做 bank 调度与空间预算。
 
-编码公式：
+## 6. 核侧命令通路
 
-```text
-word = (0b1000 << 28) | (OBJ_ID << 22) | 0x5B
-```
+统一 `cmd26={kind,inst[31:7]}`，kind=0 对应 0x5B，kind=1 对应 0x2B。**custom1 不做字段重排。** GPR 值继续通过 line_offset32、len_lines16 sideband 同命令传递。
 
-`OBJ_ID` 使用 custom2 的 `PSRC` 位段，其他载荷位必须为 0。
+核侧必须按 opcode 识别两类指令。custom1 固定读取 rs1/rs2，不得把 `[11:7]` 的 mask 当作 GPR 目的寄存器并产生写回。
 
-### 3.5 SYNC 格式
+## 7. 编程示例
 
-```text
- 31      28 27                                                       7 6       0
-+----------+----------------------------------------------------------+---------+
-|   0111   |                       reserved=0                         | 1011011 |
-+----------+----------------------------------------------------------+---------+
-```
-
-编码公式：
-
-```text
-word = (0b0111 << 28) | 0x5B
-```
-
-`psync` 不携带 tag/mode，所有载荷位必须为 0。
-
-### 3.6 DMA 格式
-
-```text
- 31        28 27    25 24      20 19      15 14    13 12 11      8 7 6       0
-+------------+--------+----------+----------+---------+--+----------+-+---------+
-|   0000     | OBJ_ID |   RS2    |   RS1    |   OP2   |D |   0000   |F| 0101011 |
-+------------+--------+----------+----------+---------+--+----------+-+---------+
-```
-
-编码公式：
-
-```text
-OP2 = dload ? TYPE : {REL, 1'b0}
-word = (OBJ_ID << 25) | (RS2 << 20) | (RS1 << 15)
-     | (OP2 << 13) | (DIR << 12)
-     | (SMALL_BANK << 7) | 0x2B
-```
-
-`SMALL_BANK` 是 dload 的 `flag[0]`；1 表示请求 allocator 将小对象放入 `SMALL_BANK_ID=5`。dstore 中该位必须为 0。`OP2` 对 dload 直接编码 2-bit `TYPE`；对 dstore 编码 `{REL, 1'b0}`。`RS1/RS2` 编码的是寄存器编号，不是寄存器值。
-
-32-bit custom1 的 `inst[31:7]` 已经等于 `cmd26[24:0]`，precode 不再重排字段。
-
-## 4. 算术指令
-
-本章伪代码使用：
-
-```text
-P[n][i]  对象 pn 的第 i 个系数
-q        当前活动模数
-L        对象的系数数量
-```
-
-除 `pmac` 外，算术指令的目的对象可以是新对象或可覆盖对象。编码器不检查对象别名和长度；后端必须保证源对象和目的对象具有兼容布局。
-
-### 4.1 PADD - 多项式模加
-
-**语法**
+以下为新语法，运行时必须给 x 寄存器装入正确的 offset/count：
 
 ```asm
-padd pdst, psrc1, psrc2
+# x10=模表 offset，x11=4；默认可装载 64 个 context
+ dload  x10, x11, p40, 2, 0x20
+ psync
+ pmodld 0
+
+# x12=本 stage 参数 offset，x13=2；精确占 Bank 5 两条 line
+ dload  x12, x13, p63, 3, 0x20
+
+# x14=多项式 offset，x15=128；N=8192
+ dload  x14, x15, p39, 1, 0
+ pntt   p39, p63, 0, 0, 0
+
+# 当前 stage 完成后，参数可继续复用，或者释放/重新装载
+ pfree  p63
+ dstore x16, x17, p39, 0  # 保留 p39
+ psync
 ```
 
-**操作**
+DLOAD 的显式 mask 可安排输入 bank；后续结果按第 5 节自动放置，无需额外指令。两条种子 line 在普通 bank 分配所得的其余空间不是软件可写 scratch；本版没有该 workspace ABI。
 
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = (P[psrc1][i] + P[psrc2][i]) mod q
-```
+## 8. 生命周期、失败与状态
 
-**编码**：AR3，`OPC4=0000`，只支持对象形式。
+对象要先有效再使用；算术源长度须匹配；PMAC 的目的也必须有效。参数格式和模数匹配由编译器保证。PNTT/PINTT 参数实际长度必须为 2。源在计算期间不能被修改。计算 stream 之间串行；DMA 与计算的重叠限制见第 5 节。
 
-**示例**
+无空间、不能满足 bank mask 或非法分配长度会返回失败；失败不回收旧对象、不更新 base/len、不发射 DMA/PE，并消费失败命令，避免队首永久阻塞。失败通过既有 fault 通知输出携带对象号；与 memory-window fault 共用通知通道，本版没有增加独立原因码。
 
-```asm
-padd p2, p0, p1       # 0x0400405B
-```
+编码非法由 dec_err 通知并丢弃。未分配/无效对象依赖、非法释放等仍由现有依赖检查阻止发射，编译器必须避免这些生命周期错误。
 
-### 4.2 PSUB - 多项式模减
+HPU 本地 CSR FAULT_STATUS 的对象号扩展为 `[9:4]`；VALID=[0]，IS_LOAD=[1]，W1C=[0] 不变。SoC 外层还需同步六位对象号，见集成交接。发生 fault 后软件应检查状态并停止依赖失败结果的后续计算，PSYNC 不是成功状态检查的替代品。
 
-**语法**
+## 9. 本项目的接入约定
 
-```asm
-psub pdst, psrc1, psrc2
-```
+- 顶层 `ApplicationBuilder`、`Evaluator`、密文/明文句柄 API 不变，应用写法见 [应用编程手册](HPU_SEAL_API_REFERENCE.md)。ISA 更新作用于编译、编码、资源调度与指令模型。
+- 本项目默认 `R=4`；64 个模上下文与 64 个逻辑对象是不同资源。交付包 `memory/abi.json` 声明 `instruction_isa=hpu-objects64-v1.1`、对象数、分配粒度和模表保留长度。旧 ISA 包必须重新生成，不能混用旧 `.inst32/.cmd26`。
+- 算子仍采用独立 pre-twist 和 post-untwist/scale PMUL。系数域边界为自然顺序；NTT 域按 HPU 物理排列与 SEAL 转换后对拍。PNTT 的内部 shuffle 由功能模型模拟，不额外向指令流添加输入位反转。
+- stage 参数使用 `TYPE=3, mask=0`，默认放入 Bank 5；pre/post 向量使用 `TYPE=1`。同一参数句柄可以逐 stage 重载，也可以同时保留多个参数对象。
+- 编译器和逐指令模型共用 `runtime::BankAllocator`；采用正常完成顺序预测物理 bank/区间，不模拟 DMA 周期。容量与数学对拍通过不代表周期性能或 CPU/SoC 已验证。
+- 本项目生成器仍在完整程序末尾统一发出 PSYNC，避免在内部算子重复通知 CPU；ISA 本身允许等待此前操作完成，PSYNC 不隐式释放对象。
+- 目标侧代码在最终布局完成后生成。DMA offset 逐条装入 x10；x11 首次设置后仅在长度变化时更新。DSTORE 长度来自 OBJ.len，生成代码检查 span 长度一致。
 
-**操作**
-
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = (P[psrc1][i] - P[psrc2][i]) mod q
-```
-
-结果按 canonical residue 归一化到 `[0,q)`。
-
-**编码**：AR3，`OPC4=0001`，只支持对象形式。
-
-**示例**
-
-```asm
-psub p2, p0, p1       # 0x1400405B
-```
-
-### 4.3 PMUL - 多项式逐点模乘
-
-**语法**
-
-```asm
-pmul pdst, psrc1, psrc2
-pmul pdst, psrc1, cimm8
-```
-
-**对象模式操作**
-
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = P[psrc1][i] * P[psrc2][i] mod q
-```
-
-PE 算术路径允许两个乘数分别为任意 `uint32`，结果仍归一化到 `[0,q)`。
-跨模数读取的系数可先执行 `pmul pdst, psrc, 1`，再交给要求规范余数的
-`padd`、`psub` 或 NTT。
-
-**立即数模式操作**
-
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = P[psrc1][i] * cimm8 mod q
-```
-
-对象模式设置 `MODE2=0`；立即数模式设置 `MODE2[0]=1`。`cimm8` 范围为 0..255。
-
-**示例**
-
-```asm
-pmul p2, p0, p1       # 0x2400405B
-pmul p2, p0, 255      # 0x243FC15B
-```
-
-### 4.4 PMAC - 多项式逐点模乘加
-
-**语法**
-
-```asm
-pmac pdst, psrc1, psrc2
-pmac pdst, psrc1, cimm8
-```
-
-**对象模式操作**
-
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = (P[pdst][i] + P[psrc1][i] * P[psrc2][i]) mod q
-```
-
-**立即数模式操作**
-
-```text
-for i = 0 .. L-1:
-    P[pdst][i] = (P[pdst][i] + P[psrc1][i] * cimm8) mod q
-```
-
-`pdst` 是读写累加器，执行前必须已经包含当前模数下的有效数据。第一个累加项通常使用 `pmul` 初始化，后续项使用 `pmac`。
-两个乘数可以是任意 `uint32`，但累加器必须是当前模数下的规范余数；
-不可用 `pmac` 来直接规约非规范累加器。
-
-**示例**
-
-```asm
-pmac p2, p0, p1       # 0x3400405B
-pmac p2, p0, 255      # 0x343FC15B
-```
-
-## 5. 变换指令
-
-### 5.1 PNTT - 前向 NTT stage
-
-**语法**
-
-```asm
-pntt pdata, ptwiddle, stage, mode, flag
-```
-
-**操作**
-
-```text
-P[pdata] = NTT_STAGE(P[pdata], P[ptwiddle], stage, mode, flag, q)
-```
-
-当前生成器把 `pdata` 视为同一 logical object id 下的读写对象，每条 `pntt`
-只执行一个 stage。物理执行固定为 out-of-place：controller 分配下一物理
-base，完成后提交给同一 logical object id 并释放旧 base。完整长度为 `N` 的
-NTT 发出 `log2(N)` 条指令，stage 从 0 递增到 `log2(N)-1`。
-
-| 操作数 | 范围 | 当前用法 |
-| --- | --- | --- |
-| `pdata` | `p0`..`p7` | 数据对象 |
-| `ptwiddle` | `p0`..`p7` | 当前 stage 的两条 line、K=8 参数对象 |
-| `stage` | 0..15 | 编入 `STAGE4` |
-| `mode` | 0..3 | 当前生成器写 0 |
-| `flag` | 0..1 | 当前生成器写 0 |
-
-**示例**
-
-```asm
-pntt p0, p3, 15, 0, 0    # 0x4000FC5B
-```
-
-软件在每个 stage 前加载两条 line 的 twiddle 参数，并在该 stage 后释放。
-参数仍使用普通对象 DLOAD；MODE2、opcode 和对象 ID 编码不变：
-
-```asm
-dload x12, x13, p3, 1, 0
-pntt  p0, p3, 0, 0, 0
-pfree p3
-```
-
-完整 negacyclic NTT 在 stage 0 前显式加载 pre-twist 表，并执行
-`pmul pdata, pdata, ptwiddle`。新 BFV、CKKS、BGV 应用 builder 以自然位置保存
-系数，表为 `pre_twist[i] = psi^i mod q`；PMUL 逐位置消费原表，不隐式重索引。
-twist 不是 `pntt stage=0` 的隐含行为。
-
-默认逐指令功能软件契约为 `natural_coefficient_boundaries`。它在 PNTT stage 0
-的 raw stage 前执行数学边界 BR，使自然系数进入递增 m 的 raw DIT schedule。
-这个整体边界转换不对应额外编码指令，也不声称复现 RTL 每个 stage 的地址。
-软件报告继续记录 `hardware_contract_verified=false`。
-
-`test/reference/main.cpp` 的历史固定 profile 算子包仍使用
-`memory[p] = coefficient[bit_reverse(p)]` 和 `pre_twist[p] = psi^bit_reverse(p)`；
-使用 `legacy_raw_stage` 回放，不增加整体边界转换。选择契约不会修改镜像或表，
-新自然镜像使用 legacy profile 可能比较失败。独立反例及修复验收见
-[2026-10 审计](../audits/HPU_NTT_CONTRACT_AUDIT_2026-10.md)。
-
-raw stage 模型沿用 `autotest/hw_ntt_intt_complete.py` 的 loader/BF/P 规则。
-每个 stage 处理 `N/128` 个 batch；每个
-batch 装入 128 个寄存器，由 64 个 BF lane 顺序消费 64 个 twiddle，BF 后
-对 7-bit 寄存器索引执行一次 P 网络，再写回本 batch。`m=2^stage < 128`
-时 loader 连续装入 128 words；`m >= 128` 时从蝶形的上下两半各取 64 words
-交错装入。离线数学 oracle 的完整表按“batch 顺序、batch 内 lane 顺序”排列，
-包含 `N/2` 个因子；生产镜像将其压缩为固定 **128 个 little-endian u32、
-2 条 256B line**。PNTT 内部按 K=8 交错链递推重构这些因子，不再从 src2
-读取完整表。所有支持的 N 都使用相同的两条 line 布局。
-
-| 参数位置 | 内容 |
-| --- | --- |
-| line 0 word 0..63 | batch 0 的 lane 模板 U |
-| line 1 word 0..6 | slot 1..7 的初始化倍率 V，V[0]=1 隐含 |
-| line 1 word 7+t | stride-8 进位倍率 R[t]，有效数量为 `max(0,log2(N/128)-3)` |
-| 其余 word | 填 1；B<8 时未使用的 V 也填 1 |
-
-参数中不放 q、N、stage、K 或 header；模上下文仍由 PMODLD 提供。
-N 从数据对象推导，数据长度为 `N/64` line，src2 参数长度固定为 2 line。
-生产 packer 必须重构所有物理 BF 因子并与原完整表逐项一致，否则拒绝生成。
-参数量减少不改变普通对象的物理 bank 分配规则。精确 ABI 和迁移样例见
-[硬件组迁移说明](TWIDDLE_COMPILER_MIGRATION.md)。
-
-完成所有 stage 后，NTT 域数据保持 P 网络产生的物理排列：
-`memory[p] = logical_ntt[forward_layout[p]]`。因此 NTT 域明文、密钥和中间
-结果也必须使用同一排列；不能把自然顺序 NTT 数据直接作为硬件镜像。
-
-### 5.2 PINTT - 逆向 NTT stage
-
-**语法**
-
-```asm
-pintt pdata, ptwiddle, stage, mode, flag
-```
-
-**操作**
-
-```text
-P[pdata] = INTT_STAGE(P[pdata], P[ptwiddle], stage, mode, flag, q)
-```
-
-操作数范围和生命周期与 `pntt` 相同。当前汇编生成器按
-`stage=0..log2(N)-1` 的顺序执行 INTT；`pdata` 的逻辑对象号在所有 stage
-之间保持不变，控制器对每个 stage 执行物理 out-of-place，完成后提交新的
-base 并释放旧空间。每个 stage 依次生成 `dload`、`pintt` 和 `pfree`：
-
-```asm
-dload ..., ptwiddle, 1, 0
-pintt pdata, ptwiddle, stage, 0, 0
-pfree ptwiddle
-```
-
-raw PINTT 软件 stage 使用与前向变换严格对偶的 schedule。指令的 `stage=k` 对应前向
-`stage=log2(N)-1-k` 的 loader；每个 batch 先执行一次 P 的逆网络 `P^-1`，
-再进入 64 个 BF lane。逆表不是简单的自然顺序 `omega^-j` 表，而是由 dual
-schedule 跟踪每个物理位置的 lazy scale，逐 lane 生成
-`w_bf = alpha * beta^-1 mod q`。stage 表始终按 loader batch、batch 内 lane
-顺序保存，不随完整变换边界做 BR。
-
-默认 `natural_coefficient_boundaries` 在最后一个 PINTT raw stage 后执行数学
-边界 BR，将 raw 系数位置转换到自然位置；随后显式加载 post 表并执行
-`dload + pmul + pfree`。新应用镜像在自然位置 `i` 的表值为
-`post_untwist_scale[i] = raw_inverse.post_scale[bit_reverse(i)] * psi^-i mod q`，
-其中 raw post scale 已包含 lazy scale 抵消和 `N^-1`。最后 PINTT 的软件边界
-转换不执行 normalization 或 untwist，这些乘法仍由显式 PMUL 完成。
-modified-root INTT 使用对应 root 的 raw scale，并将 `psi` 换成 modified root。
-`raw_inverse.post_scale[BR(i)]` 必须保留，即使生成的 raw scale 恰好全部为 `N^-1`。
-公开 `HardwareNttModel::inverse` 按 raw 位置消费 supplied post scale 后再做 BR；
-高层适配器用 `InverseNttTables::set_natural_post_scale()` 将自然 post 表映射给该
-数学 API，避免重复 normalization 或错用 untwist 索引。公共
-`create_fused_inverse_automorphism_tables()` 保留 raw post 输出，应用 builder
-在导入 modified-root 表时转为自然 post。
-
-旧固定 profile reference 包保留 raw 位置 `p` 的 post 因子
-`lazy_scale[p]^-1 * N^-1 * psi^-bit_reverse(p)`，输出为 BR 系数镜像。
-其历史验证与新自然边界契约的验证分别记录；新默认契约的实际测试规模和结果以
-测试日志、应用包报告为准，host 对拍不构成 RTL 每 stage 地址或目标执行证据。
-runtime 按 `twiddle_map.csv` 绑定 pre-twist、各 stage twiddle 和 post factor
-的 line offset/count。
-
-**示例**
-
-```asm
-pintt p0, p3, 15, 0, 0   # 0x5000FC5B
-```
-
-## 6. 配置与生命周期指令
-
-### 6.1 PMODLD - 激活模上下文
-
-**语法**
-
-```asm
-pmodld mod_id
-```
-
-**操作**
-
-```text
-line = MOD_TABLE_BASE_LINE + (mod_id >> 4)
-slot = mod_id & 0xF
-active_mod_context = MOD_TABLE[line][slot]
-```
-
-| 操作数 | 范围 | 含义 |
-| --- | --- | --- |
-| `mod_id` | 编码 0..255；当前软件 0..63 | Bank 5 模上下文表编号，软件要求 `mod_id[7:6]=0` |
-
-一条 256B HPU line 可容纳 16 个 128-bit 模上下文，因此
-`mod_id[7:4]` 编码相对 line，`mod_id[3:0]` 选择 line 内 slot。虽然 Bank 5
-共 32 line 且编码字段为 8 bit，当前应用软件 ABI 额外规定 `mod_id[7:6]=0`，
-所以生成器最多使用 64 个 context，即 `0x1400..0x1403`。`pmodld` 不携带对象号，也不产生多项式
-结果；它改变后续模运算使用的 q/Barrett mu。
-
-模表的数据搬入与上下文选择是两个独立步骤。`dload type=2, flag[0]=1` 为模表逻辑对象建立 `ALLOC/V/busy/base/len` 状态，并请求 allocator 将物理 base 放到 Bank 5。DMA 与 `pmodld` 之间的一致性由硬件维护，软件无需插入 `psync`；`pmodld` 只携带 `MOD_ID`，通过 cfg 读口访问模表并更新活动 q/mu。
-
-**示例**
-
-```asm
-pmodld 0              # 0x6000005B
-pmodld 1              # 0x6000405B
-pmodld 255            # 0x603FC05B
-```
-
-旧语法 `pmodld psrc, idx1, cfg` 已删除，汇编器必须拒绝。
-
-### 6.2 PFREE - 释放对象
-
-**语法**
-
-```asm
-pfree psrc
-```
-
-**操作**
-
-```text
-require OBJ[psrc] is allocated and not busy
-release OBJ[psrc]
-```
-
-`pfree` 的目标对象编码在 custom2 `PSRC/OBJ_ID` 位段，其他载荷位为 0。它必须排在对象最后一次读取之后。
-
-**示例**
-
-```asm
-pfree p4              # 0x8100005B
-```
-
-对已经使用任意 `rel` 值执行成功的 `dstore` 对象再次执行 `pfree` 属于非法生命周期操作。
-
-### 6.3 PSYNC - 程序完成通知
-
-**语法**
-
-```asm
-psync
-```
-
-**当前软件语义**
-
-```text
-notify_cpu(program_complete)
-```
-
-`psync` 没有操作数。根据硬件负责人确认的软件使用约定，它只在一段完整 HPU 程序的最后发出一次，用于向 CPU 报告整个程序完成。DMA 与计算之间的依赖、顺序和可见性由硬件维护；生成器不得在模表 `dload` 与 `pmodld` 之间或任何算子内部阶段插入 `psync`。
-
-**示例**
-
-```asm
-psync                  # 0x7000005B
-```
-
-## 7. 外部访存指令
-
-### 7.1 DLOAD - 外部存储器加载
-
-**语法**
-
-```asm
-dload rs1, rs2, pdst, load_type, small_bank
-```
-
-**操作**
-
-```text
-enqueue_load(GPR[rs1], GPR[rs2], pdst, load_type, small_bank)
-on completion:
-    OBJ[pdst] becomes valid
-```
-
-| `load_type` | 名称 | 当前项目用途 |
-| --- | --- | --- |
-| 0 | `seg` | 多项式片段/普通分段数据 |
-| 1 | `poly` | 完整多项式、twiddle 或多项式常量 |
-| 2 | `mod_ctx` | 模上下文集合 |
-| 3 | reserved | 当前软件 ABI 不定义语义，parser/encoder 必须拒绝 |
-
-`small_bank=0` 使用普通 bank 分配；`small_bank=1` 设置 `flag[0]`，请求把
-长度不超过 32 line 的小对象分配到 Bank 5。模上下文生成器固定使用
-`type=2, small_bank=1`，模表固定从 `0x1400` 开始。
-
-完整多项式对象包含 `N` 个 32-bit word。由于每个 HPU line 包含 64 word、
-普通 bank 最多容纳 1024 line，所有 NTT、INTT、KeySwitch 和完整密文乘法
-生成入口都要求 `ceil(N/64) <= 1024`。结合 radix-2 要求，当前允许的最大
-多项式次数为 `N=65536`；超出该范围时生成器返回 invalid config，不生成指令流。
-
-`rs1` 和 `rs2` 是编码进 32-bit custom1 word 的 5-bit RISC-V 寄存器编号。
-当前生成的可执行程序固定使用 `x10/x11`。DLOAD 将其运行时值解释为 HPU_MEM
-line offset 和 line count，单位均为 256B；DSTORE 只使用 `x10` 的 offset，
-实际传输长度取对象表中的 `OBJ.len`，当前 RTL 忽略 `x11` 的值。为保持统一
-relocation 接口，生成的 `hpu_program_*` 仍为 DSTORE 装入非零
-`span.line_count`，并检查它与软件跟踪的 `OBJ.len` 相等后再发射。
-调用方必须使用与硬件布局一致、已通过范围和生命周期检查的 span 数组。
-
-**示例**
-
-```asm
-dload x10, x11, p0, 0, 0  # 0x00B5002B
-dload x10, x11, p4, 2, 1  # 0x08B540AB
-```
-
-### 7.2 DSTORE - 外部存储器写回
-
-**语法**
-
-```asm
-dstore rs1, rs2, psrc, rel
-```
-
-**操作**
-
-```text
-require span.line_count == OBJ[psrc].len
-enqueue_store(GPR[rs1], OBJ[psrc].len, psrc)
-on completion:
-    clear OBJ[psrc].V, OBJ[psrc].ALLOC, OBJ[psrc].busy
-```
-
-| `rel` | 语义 |
-| --- | --- |
-| 0 | 编码值保留；当前 RTL 写回成功后仍释放源对象 |
-| 1 | 当前 RTL 写回成功后释放源对象 |
-
-`rel` 只允许 0 或 1。源对象必须已经有效，且在 DMA 读取期间不得被覆盖或提前
-`pfree`。当前 RTL 不使用 `rs2` 决定 DSTORE 长度，也不根据 `rel` 区分释放行为；
-因此软件生命周期分析把两种 `rel` 都视为对象终点。
-
-**示例**
-
-```asm
-dstore x10, x11, p2, 1    # 0x04B5502B
-```
-
-<!-- ### 7.3 HPU_MEM CSR
-
-HPU_MEM window 使用以下已冻结的 CSR 偏移：
-
-| 偏移 | 名称 | 访问 | 有效字段 |
-| --- | --- | --- | --- |
-| `0x00` | `HPU_MEM_BASE_LO` | RW | `base[31:0]` |
-| `0x04` | `HPU_MEM_BASE_HI` | RW | `base[39:32]` |
-| `0x08` | `HPU_MEM_SIZE_LINES_LO` | RW | `size_lines[31:0]` |
-| `0x0C` | `HPU_MEM_SIZE_LINES_HI` | RW | `size_lines[32]` |
-| `0x10` | `HPU_MEM_COMMIT` | W1 | `commit[0]` |
-| `0x14` | `HPU_STATUS` | RO | `window_valid[0]`、`hpu_busy[1]`、`fault_valid[2]` |
-| `0x18` | `HPU_FAULT_STATUS` | RO/W1C | `fault_valid[0]`、`is_load[1]`、`obj_id[6:4]` |
-
-软件先写 base low/high 和 size low/high，再向 `HPU_MEM_COMMIT` 写 1，最后读
-`HPU_STATUS`，要求 `window_valid=1` 且 `fault_valid=0`。故障处理完成后向
-`HPU_FAULT_STATUS.fault_valid` 写 1 清除。生成文件
-`hardware/hpu_mem_config.json` 给出当前镜像的具体值和同一编程顺序。 -->
-
-## 8. 推荐编程序列
-
-### 8.1 逐点模乘
-
-以下序列展示一个 RNS limb 上的多项式逐点乘。寄存器中的实际 offset/count 由 runtime 准备：
-
-```asm
-dload  x10, x11, p4, 2, 1  # allocate the mod-table object in small Bank 5
-pmodld 0                   # activate q0 by MOD_ID
-dload  x12, x13, p0, 1, 0  # left polynomial
-dload  x14, x15, p1, 1, 0  # right polynomial
-pmul   p2, p0, p1
-pfree  p0
-pfree  p1
-dstore x16, x17, p2, 1
-pfree  p4
-psync                       # final instruction: notify CPU of program completion
-```
-
-### 8.2 乘加累积
-
-```asm
-pmul p2, p0, p1            # initialize accumulator
-pmac p2, p3, p5            # p2 += p3 * p5
-pmac p2, p6, 7             # p2 += p6 * 7
-```
-
-### 8.3 完整 NTT
-
-对于 `N=4096`，当前生成器发出 12 个 stage。下面使用新应用镜像的自然系数表；
-默认软件契约的 stage 0 边界 BR 由逐指令模型执行，不额外发出汇编指令：
-
-```asm
-# q already selected with pmodld
-dload x10, x11, p0, 1, 0   # polynomial
-
-dload x12, x13, p3, 1, 0   # pre_twist = psi^i
-pmul  p0, p0, p3
-pfree p3
-
-dload x12, x13, p3, 1, 0   # stage 0 twiddle
-pntt  p0, p3, 0, 0, 0
-pfree p3
-
-# repeat for stage 1 .. 11
-dload x14, x15, p3, 1, 0
-pntt  p0, p3, 11, 0, 0
-pfree p3
-
-dstore x16, x17, p0, 1
-psync
-```
-
-完整 INTT 在最后一个 `pintt` 的软件边界 BR 后还必须加载
-`post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i` 并显式 `pmul`，
-再执行 `dstore`。生成的 raw scale 若全部为 `N^-1`，此表才可简写为
-`N^-1 * psi^-i`。历史 raw reference 包继续按 BR 系数位置准备 pre/post 表。
-
-### 8.4 RNS 循环
-
-HPU 同一时刻只有一个活动模上下文。对 Q/P 多个 limb 执行同一算子时，软件按 limb 循环：
-
-```text
-for each modulus context i:
-    pmodld i
-    dload operands for limb i
-    execute arithmetic/NTT instructions
-    dstore result for limb i
-```
-
-不能在一次 `pmodld` 后混合处理不同模数的数据。
-
-### 8.5 公共算子层与方案算子层
-
-`util`、`poly` 和 `operator` 提供方案无关的 RNS、NTT、KeySwitch、
-Relinearization 和原始 CiphertextMultiply。`scheme/ckks`、`scheme/bgv` 与 `scheme/bfv`
-位于其上，只组合方案特有步骤并维护软件元数据。正式 SEAL-facing CKKS 路径采用
-canonical HPU NTT 边界；BGV/BFV 及保留的公共 demo 仍以系数域边界为主。需要的
-NTT/INTT 由各算子按其边界契约生成。
-
-三个 `scheme/*/encode` 分别定义纯 host 的方案数学。CKKS 使用 generator-3
-槽位映射、共轭半区和 radix-2 复数 FFT，把最多 `N/2` 个复数槽位量化为带 scale
-的 signed 系数；BGV/BFV 支持 signed coefficient encoding，并在 `t` 为素数且
-`2N | (t-1)` 时以 generator-3 映射提供两行、共 `N` 槽 batching。Decode 均在
-host 执行。三种 Encode/Decode 都不生成 HPU 指令；Encrypt/runtime 或具体同态算子
-若需要 RNS-Q、NTT-Q 表示，必须在自身边界内完成 lift 和域转换。
-
-BGV/BFV 的模 `t` 负循环 NTT 从全部 primitive `2N` 次单位根中选择数值最小者，
-再应用 generator-3 两行索引映射；该选择与本项目使用的 SEAL BatchEncoder ABI
-一致。选择另一个 primitive root 虽可形成自洽 Encode/Decode，但会改变明文
-多项式系数，不能混入本交付数据。
-
-### 8.6 CKKS Rescale 与完整乘法
-
-CKKS Rescale 对每个密文分量执行：
-
-```text
-rounded_i = x_i + floor(q_last/2) mod q_i
-out_i = (rounded_i - BConv_q_last_to_q_i(rounded_last))
-        * q_last^-1 mod q_i
-```
-
-输出基为 `Q_without_last`，level 减一。HPU 指令不携带浮点 scale；调用方必须使用
-`multiply_scale(scale_a, scale_b)` 和 `rescale_scale(product_scale, q_last)` 更新
-软件元数据。`ckks_ciphertext_multiply` 的固定顺序是公共 tensor product、
-重线形化、CKKS Rescale，最终只发出一次 `psync`。
-
-CKKS Add/Sub、MultiplyPlain、AddPlain/SubPlain 直接消费同一 `parms_id` 下的
-canonical HPU NTT 多项式并逐 limb 运算，不生成 NTT/INTT。Add/Sub 及 Plain 加减
-要求 host 检查 scale 兼容；MultiplyPlain 的软件 scale 更新为
-`ciphertext_scale * plaintext_scale`。这些元数据不进入 HPU 指令流。
-
-### 8.7 BGV legacy 乘法和 ModSwitch
-
-BGV 固定模上下文顺序为：
-
-```text
-MOD_ID 0 .. num_q-1              : Q
-MOD_ID num_q .. num_q+num_p-1    : P
-MOD_ID num_q+num_p               : plaintext modulus t
-```
-
-因此配置必须满足 `num_q + num_p + 1 <= 64`。当前默认 `t=65537`，可作为
-`q32+mu48` 模上下文由 `dload type=2, flag[0]=1` 安装。BGV 乘法复用公共
-CiphertextMultiply，软件同时更新：
-
-```text
-correction_factor_out = correction_factor_a * correction_factor_b mod t
-```
-
-BGV ModSwitch 对每个分量先用单源 BConv 得到 `c_last mod t`，然后计算：
-
-```text
-u = -c_last * q_last^-1 mod t
-delta_i = c_last + q_last * u mod q_i
-c_i' = (c_i - delta_i) * q_last^-1 mod q_i
-```
-
-`c_last` 和 `u` 分别通过单源 BConv 从 `q_last`/`t` 提升到各个保留的 `q_i`。
-输出仍为系数域，level 减一，软件元数据更新为：
-
-```text
-correction_factor_out = correction_factor_in * q_last^-1 mod t
-```
-
-该流程不需要比较或条件选择，但要求 `gcd(q_last,t)=1`。完整中间值和常量位于
-`outputs/bgv_modswitch/test_data/`。
-
-#### SEAL-facing BGV NTT ModSwitch 生成器
-
-`generate_modswitch_ntt_body_asm` 是独立于上述系数域 legacy 流程的组合层。
-输入、输出均为 canonical HPU NTT；使用显式 Q MOD_ID 列表与固定的 `t` MOD_ID，
-因此 Q 降 level 时不会重编号 `t`。每个密文分量仅对被丢弃的 `q_last` limb 执行
-PINTT，并在系数域计算 `u=-c_last*q_last^-1 mod t`。对每个保留的 `q_i`，先用
-`pmul p1,p1,1` 将跨模数读取的 `c_last` 归一化，再计算
-`delta_i=c_last+q_last*u mod q_i`，把 `delta_i` 做 canonical PNTT，最后在 NTT
-域计算 `(c_i-NTT(delta_i))*q_last^-1 mod q_i`。PNTT 的 pre-twist PMUL 前修正量已
-归一化。该流不对保留的 `c_i` 做不必要的 PINTT/PNTT。
-
-`build_bgv_modswitch_application` 将原密文、`c_last`/`u` 工作区、canonical
-twiddle、预制常量及输出装入 HPU_MEM，逐条核对编码后 custom1 与 resolved span。
-`render_bgv_modswitch_runtime_artifacts` 输出固定指令字、span 数组、
-`hpu_run_<stem>()` 入口和 DMA manifest。常量均按 `N` 个 32-bit word 展开。
-`correction_factor` 由 host 用 `modswitch_correction_factor` 更新；它不是密文系数的
-CPU 运算。这个单次操作包只加载一次模表，最后发一次 `psync`。目前已做
-codegen/编码/DMA 生命周期检查、HPU_MEM 常量与 modified-SEAL 两级逐 limb 差分；
-现已接入 BGV 分支图 planner 和 `BgvSoftwareExecutor`，支持独立 Multiply/Relinearize；
-仍无逐指令软件执行或实体 HPU 执行证据。
-
-#### SEAL-facing BGV NTT KeySwitch 指令体
-
-`generate_keyswitch_ntt_body_asm` 接收 singleton-Q digit 的 `RnsDecompositionLayout`
-和固定 `t` MOD_ID。对切换分量的每个 `q_j` limb 做一次 PINTT；同模数目标直接
-使用原 NTT limb，跨 `Q_i`/`P` 目标先以 `PMUL(x,1)` 规约再 PNTT，并分别累加
-evaluation key 的两个 NTT 分量。对每个特殊素数 `P` 累加器做 PINTT，计算
-`u=-c_P*P^-1 mod t`，然后在各 `Q_i` 下构造
-`delta_i=c_P+P*u mod q_i`。输出为
-`base_i+(acc_i-NTT(delta_i))*P^-1 mod q_i`，保持 canonical HPU NTT。
-Relinearize 的 `base=(c0,c1)`、切换分量为 `c2`；Galois 的输入需要先完成
-自同构。指令体可嵌套在应用内，默认不重复加载模表或发 `psync`。当前通过
-N=128/65536 的编码与生命周期测试，以及 modified-SEAL 顶层/降一级
-Relinearize 逐 limb 公式差分。单次三分量产品的 Relinearize 应用包现已装入
-evaluation key、`P` 修正常量和工作区；逐条 custom1 DMA 与镜像 span 对齐，
-可渲染 RV runtime 入口和 resolved DMA manifest。顶层与降一级的镜像内容经
-HPU 物理 NTT 数学模型对照 modified-SEAL。单次 KeySwitch 由线性 planner 的
-Multiply+Relinearize 和旋转步骤复用；仍无逐指令软件执行或实体 HPU 执行证据。
-当前镜像保存各 active Q 与 P 的双向 K=8 stage 参数和完整 pre/post；
-`N=65536,Q=3,P=1` 总计需 70913 个 256B line（其中 twiddle 类分配
-8448 line，包含 pre/post）。容量估算 API 在
-构建前精确检查 `capacity_lines`。若平台允许更大的 HPU_MEM window，可直接
-按估计值配置；旧 65536-line 软件 profile 不是该应用的硬件上限。实体
-DMA/window 仍需单独验证。该配置包含 475 条 resolved DMA 绑定。
-
-#### SEAL-facing BGV NTT Multiply+Relinearize
-
-`generate_ciphertext_multiply_ntt_body_asm` 直接消费两个二分量 canonical
-HPU NTT 密文。先在各 active Q 下执行逐点 tensor product，得到三分量 NTT
-中间结果，再执行上述 BGV 专用 KeySwitch。应用包的三分量 span 由 HPU
-`DSTORE` 写入并由 KeySwitch `DLOAD` 重用；全流只加载一次模表，末尾一个
-`psync`。host 只做输入/evaluation key 的表示准备和
-`correction_factor_a*correction_factor_b mod t` 元数据更新，不计算 tensor
-或 KeySwitch 系数。顶层和降一级的 tensor 与 modified-SEAL 逐 limb 一致，
-后半段复用已验证的单次 KeySwitch DMA 后缀。`N=65536,Q=3,P=1` 的镜像
-需 83201 个 256B line，含 508 条 resolved DMA 绑定。线性 planner 可将
-乘法、ModSwitch 及后继算子拼入单次程序；仍无逐指令软件解释或实体 HPU 执行证据。
-
-#### SEAL-facing BGV NTT Add/Sub/Negate
-
-BGV `Add/Sub` 在两输入 `correction_factor` 相同时直接在 canonical HPU
-NTT 下逐 limb 执行 `PADD/PSUB`；不同时，host 仅按 modified-SEAL 的扩展
-Euclid 规则求出 `(factor_out,scalar_left,scalar_right)`，各 Q limb 的实际
-密文缩放由 HPU `PMUL` 执行，再进行 `PADD/PSUB`。`Negate` 复用逐点
-`0-c` 流程且保持 factor 不变。单次应用包预制标量 splat、输入与输出镜像，
-逐条绑定 custom1 DMA，并提供可渲染的 RV runtime。顶层、降一级及多个
-非相等因子组合均与 modified-SEAL 逐 limb 对齐。预制明文的
-`AddPlain/SubPlain/MultiplyPlain` 也提供单次镜像：Add/Sub 在镜像准备阶段
-按 ciphertext factor 模 `t` 缩放明文并转成 HPU NTT，HPU 只更新 `c0`；
-MultiplyPlain 在 HPU 上逐点乘两个密文分量。顶层与降一级均与
-modified-SEAL 差分。
-
-BGV 行旋转与列交换使用同一自同构 + Galois KeySwitch 单次包：每个
-`c0/c1` 的 Q limb 经改根 INTT 得到 `sigma_k` 系数，再经 canonical NTT
-写入 KeySwitch 输入；`c1` 作为切换分量，零基分量与旋转后的 `c0`
-构成最终输出。Galois key 按元素 `k` 选取，`correction_factor` 不变。
-正/负行步长及列交换已在顶层/降一级与 modified-SEAL 逐 limb 差分；
-`N=65536,Q=3,P=1` 镜像容量估算为 80225 line。该路径已接入通用
-`BgvOperationPlan` 和整图功能模型；逐指令软件执行与实体 HPU 验证仍待完成。
-
-`BgvOperationPlan` 支持分支计算图中的 `AddPlain/SubPlain/MultiplyPlain`、密文 `Add/Sub`、
-独立 Multiply（三分量）、Relinearize（二分量）、融合 Multiply+Relinearize、
-行旋转、列交换及跨 level ModSwitch。每个步骤独立占用可写输出 span，多个节点可引用同一输入，
-后继 DMA 按输入句柄读取相应 span；level 和 correction factor 从该输入推导。
-相同只读 key、常量和 twiddle 按实际内容共享物理分配，节点 scratch 和输出保持独立。
-程序只在开头加载一次模表、末尾 `psync` 一次。密文 Add/Sub 的不等 factor 平衡
-由 HPU `PMUL` 执行，后续明文按对应输入 factor 预制；CPU 不计算中间密文。
-`BgvLinearOperationPlan` 和 `BgvPlainOperationPlan` 保留为兼容别名；旧调用沿尾节点追加。
-原三个 chain 示例继续展示线性流程，`hpu_bgv_composed_application_example` 展示旋转分支、
-汇合、独立乘法/重线性化、降层和后继明文操作。所有示例支持 `--degree 65536` 部署配置。
-`BgvSoftwareExecutor` 从同一初始 HPU_MEM 读取 operand、key、常量和 twiddle，
-按 plan edge 写回每一步 output/workspace；交付适配器将各步物理 NTT word 与独立
-modified-SEAL oracle 比较后才允许写包。
-
-### 8.8 BFV comparison-free BEHZ、重线形化和 ModSwitch
-
-| 方案能力 | 状态 | 当前边界 |
-| --- | --- | --- |
-| CKKS Encode/Decode / Rescale / Multiply | 已实现 | host-only 复数编解码 + HPU Rescale/Multiply |
-| BGV coefficient/batch Encode/Decode / Multiply / ModSwitch | 已实现 | host-only 模 t 编解码 + HPU Multiply/ModSwitch |
-| BFV coefficient/batch Encode/Decode | 已实现 | host-only 模 t 编解码 |
-| BFV BEHZ Multiply / Relinearization / ModSwitch | 已实现 | no-SMRQ + branchless-SK 单 kernel 乘法功能通路 |
-
-BFV 使用修改版 SEAL 对应的 `NO_SMRQ + BRANCHLESS_SK` 关系，不生成 `m_tilde`，
-也不执行依赖阈值判断的 centered correction。legacy 功能包的模上下文固定为：
-
-```text
-Q    = MOD_ID [0, num_q)
-Pks  = MOD_ID [num_q, num_q+num_p)
-B    = MOD_ID [num_q+num_p, num_q+num_p+bfv_num_b)
-m_sk = MOD_ID num_q+num_p+bfv_num_b
-t    = MOD_ID m_sk+1
-```
-
-其中 `Pks` 仅供乘法流后半段的 KeySwitch 使用，不能与 BEHZ 的 B 基混用。参数必须满足
-总 context 不超过 64、所有模数互异且为 `1 mod 2N` 的 32-bit 素数、
-`m_sk > 2*bfv_num_b`，并满足：
-
-```text
-log2(B) > 33 + bitlen(t) + bitlen(Q) + ceil(log2(num_q^2))
-```
-
-单 kernel 的 BEHZ 阶段对两个二分量密文执行：
-
-```text
-FastBConv Q -> Bsk                 // 不做 SmMRq
-NTT under Q and Bsk
-three-component tensor product
-INTT under Q and Bsk
-multiply every limb by t
-v = FastConv(Q -> Bsk)
-z = (x_Bsk - v) * Q^-1 mod Bsk    // FastFloor
-y = FastConv(B -> Q)
-temp = FastConv(B -> m_sk)
-alpha = (temp - z_msk) * B^-1 mod m_sk
-out = y + alpha * (-B) mod Q       // branchless-SK
-```
-
-参数门禁保证 `alpha` 位于已证明的下半区；最后一步始终执行同一条模算术路径，
-所以 11 条 ISA 不需要新增比较、掩码或条件选择。该阶段把三分量系数域 Q 密文
-`dstore` 到统一 HPU_MEM 中，随后的 Q/Pks Relinearization 直接从相同 span `dload`，
-把三分量密文变回二分量；中间不发出 `psync`，也不需要 host copy 或 window 切换。
-完整 `bfv_ciphertext_multiply` 只在 Relinearization 完成后发出一个终止 `psync`。
-默认统一镜像为 20833 line；软件 profile 通过 `hpu_mem_max_lines=65536` 设置验收
-上限，`HPU_MEM_SIZE_LINES` 仍写入当前镜像的真实 line 数。
-
-BFV ModSwitch 对单 kernel 输出的两个
-输出分量复用公共 rounded drop-last：
-
-```text
-c' = round(c / q_last) mod Q_without_last
-```
-
-level 减一；BFV 没有 CKKS scale 或 BGV correction factor 元数据。主硬件包使用
-零噪声、Pks 可整除的精确功能 key，以便逐 stage 定位；
-`outputs/bfv_ciphertext_multiply/test_data/host/noise_smoke/` 另用确定性非零误差完成
-Encode、Multiply、Relinearization、ModSwitch、Decrypt、Decode 闭环。
-
-面向 SEAL 4.4 的 BFV KeySwitch 另有严格路径：只接受一个固定 special prime，且
-每个 active-Q limb 对应一个有序 singleton key digit。两个 Q|P accumulator 完成
-INTT 后，先在 Q 与 P 各 limb 加载预计算的 `floor(P/2)` residue，再执行 P→Q
-ModDown。因此舍入只使用 `padd`、BConv、`psub` 和 `pmul`，不需要系数比较或 CPU
-数值计算。legacy `Pks=3,dnum=2` 功能包不冒充该 SEAL key layout。
-
-SEAL-facing BFV context/level 路径以仓库内 `third_party/modified-SEAL` 为唯一参数
-权威，并同时启用 `SEAL_EXPERIMENTAL_BFV_NO_SMRQ`、
-`SEAL_EXPERIMENTAL_BFV_BRANCHLESS_SK` 和
-`SEAL_EXPERIMENTAL_BFV_HPU_32BIT_AUX`。当前 profile 限制 Q/P/t 至多 31 bit，B 与
-`m_sk` 使用 modified-SEAL 选择的 32-bit 素数。全局模表以 `Qmax|P` 为固定前缀，
-随后登记所有 level 实际 `B/m_sk` 的 union，最后登记 t；相同辅助素数跨 level 复用，
-总数不得超过 64。每个 level descriptor 记录 active Q、固定 single-P、singleton-Q
-KeySwitch digits、B、`m_sk`、t 及对应 MOD_ID，不再从 legacy `bfv_num_b/dnum` 推断。
-
-当前 `BfvApplicationImageBuilder` 已把全局 Q/P/B/`m_sk`/t 模表、canonical evaluator
-twiddle、指定 level 的 RelinKeys Q|P limbs、rounded single-P KeySwitch 常量和
-comparison-free BEHZ 常量序列化到 HPU_MEM。`floor(P/2)` residue、P→Q、Q→Bsk、
-B→Q/`m_sk`、`B^{-1} mod m_sk`、`m_sk`→Q 与 `-B mod Q` 均为预计算只读对象，
-运行时不需要 CPU 数值计算或系数比较；B→Q 与 B→`m_sk` 共享同一组 B-source inverse。
-
-同一 builder 还按 level 打包系数域 BFV Ciphertext、预留输出，并把 plaintext 显式
-预制成两种不可混用的对象：Add/SubPlain 使用 SEAL scaling variant 的系数域
-`Delta*m`，MultiplyPlain 使用中心提升到 Q 后的 canonical HPU NTT 表示。对象注册保留
-level、MOD_ID、domain、key-domain 和 required-output 元数据，因此算子执行期间不需要
-host plaintext lift、缩放或 NTT。
-
-BFV planner/codegen 已支持同 level、系数域的 Ciphertext Add/Subtract/Multiply/Negate、
-AddPlain/SubPlain、MultiplyPlain 与显式 ModSwitch。普通算子保持二分量 Q shape、
-`parms_id`、输出 coefficient domain 和 `key_domain=1`。Add/SubPlain 只接受预制
-`Delta*m`；MultiplyPlain 只接受预制
-canonical HPU NTT plaintext，并对两个密文分量逐 Q limb 执行显式 NTT、`pmul`、INTT。
-lowering 对整个计划只装载一次模表并只发出一次终止 `psync`，包括所有 twiddle 在内的
-每条 DMA 都由 relocation 绑定到具体 HPU_MEM limb，不存在 CPU 数值计算回退。
-
-Ciphertext Multiply 额外要求同 level 的 RelinKeys、rounded single-P KeySwitch 常量和
-comparison-free BEHZ 常量。builder 为 Q→Bsk、四路输入变换、三分量 tensor、FastFloor、
-branchless SK、ModUp 累加器及 rounded ModDown 预留全部 workspace；relocation 严格按融合
-汇编的 DMA 顺序绑定这些对象。三分量 tensor 只在 HPU_MEM 阶段内存在，随后直接送入
-KeySwitch，host 只观察最终二分量系数域输出。
-
-显式 ModSwitch 要求 source level 存在相邻下一层。builder 为每个 source-Q limb 预制
-`floor(q_last/2)` residue，并准备 dropped-Q→retained-Q 的单源 BConv、
-`q_last^{-1} mod q_i` 与全部工作区。planner 将输出直接登记为下一 `parms_id`；codegen
-严格复现 modified-SEAL 的 coefficient-domain rounded drop-last。Multiply→ModSwitch
-能够留在同一计划中完成 relocation、指令编码和 runtime artifact 生成，过程中没有
-系数比较、host 同步或 CPU 数值回退。
-
-`lower_bfv_runtime_program` 进一步使用项目 assembler 把完整 body 编成固定 32-bit 指令，
-并将每条 encoded custom1 的 DMA 序号、对象槽、方向、type/release 与 flag 重新和
-relocation 对拍。`render_bfv_runtime_artifacts` 输出 resolved span 数组、零参数
-`hpu_run_<stem>()` 包装及带 operation/allocation 来源的 CSV；span 越界或 schedule
-不完整时不会生成可执行包。
-
-`BfvSoftwareExecutor` 已能从相同 application image 执行 BFV Add/Subtract/Negate、
-AddPlain/SubtractPlain、MultiplyPlain、融合 Multiply、显式 ModSwitch。MultiplyPlain
-保持 BFV 密文的系数域边界，在内部使用预制 canonical twiddle 完成 NTT/逐点乘法/INTT；
-Ciphertext Multiply 按 HPU 阶段执行 Q→Bsk、NTT tensor、FastFloor、branchless-SK 和
-rounded single-P Relinearization。执行器只读取镜像中的输入、twiddle、常量和
-evaluation key，不调用 `seal::Evaluator`。基本算子测试及
-`bfv_multiply_modswitch_application` 均与 modified-SEAL 独立 oracle 逐字比较。
-
-BFV Rotation 的预制资源层支持任意预定 RotateRows 步长和 RotateColumns。host 将步长
-映射为 SEAL Galois element `k`，按活动 level 截取对应 GaloisKey，并为每个 active-Q
-模数预加载 `psi'=psi^(1/k)` 的 PINTT stage 与 post-untwist 表。真实 HPU_MEM 表已对
-左移、负向步长和 `k=2N-1` 列交换与系数域 `X->X^k` oracle 对拍；本段只描述资源准备，
-后续 BFV Rotation kernel 负责 canonical PNTT、modified-root PINTT 和 rounded KeySwitch。
-
-生产密钥生成、安全参数选择、随机数接口与噪声预算管理由 host runtime 负责。
-Encode/Decode 是自包含的功能实现，
-不承担生产参数选择或密文元数据持久化。当前主硬件测试使用确定性零噪声、P 可整除的功能 fixture，必须标记为
-`TEST_VECTOR_SCOPE=FUNCTIONAL_ONLY`。
-
-## 9. 汇编器检查和错误
-
-当前汇编器在编码前检查：
-
-- 助记符是否属于 11 条当前指令。
-- 操作数数量是否正确。
-- `p` 对象和 `x` 寄存器是否越界。
-- stage、mode、flag、立即数、type/rel 和 small-bank hint 是否在编码范围内。
-- 只有 `pmul/pmac` 可以使用整数第三操作数。
-- `pfree` 只能有一个对象操作数。
-- `dstore rel` 只能为 0 或 1。
-
-这些是软件编码错误，表现为 assembler 抛出错误，不等价于 RISC-V 运行时 trap。对象未加载、长度不匹配、模上下文错误、DMA 越界和 busy 冲突属于硬件/runtime 验证范围。
-
-## 10. 构建与输出
-
-生成指令流、编码和测试数据：
-
-```bash
-cmake -S . -B build
-cmake --build build -j --target hpu_delivery
-ctest --test-dir build --output-on-failure
-```
-
-主要输出：
-
-| 文件 | 内容 |
-| --- | --- |
-| `outputs/<case>/<case>.asm` | HPU 汇编指令流；三个 `*_encode` host-only 包不生成 |
-| `outputs/<case>/<case>.cpp` | C++ 内联汇编形式 |
-| `outputs/<case>/<case>.inst32` | 每行一个 32-bit 二进制字符串 |
-| `outputs/<case>/<case>.cmd26` | 每行一个控制逻辑 26-bit 二进制命令 |
-| `outputs/rv_interface_smoke/test_data/expected_decode.csv` | 指令字、路由和规范化汇编 |
-| `outputs/<case>/test_data/hardware/` | `uint32` HPU 数据镜像和 line map |
-
-`.inst32`/`.cmd26` 分别是每行 32/26 个 `0/1` 字符的文本，不是可直接按字节加载的 little-endian ELF 或 binary。接入硬件测试平台时应明确其文本解析或另行打包为目标字节序。
-
-## 附录 A：指令编码速查
-
-| 指令示例 | 32-bit 机器码 | 26-bit 控制命令 |
-| --- | --- | --- |
-| `padd p2, p0, p1` | `0x0400405B` | `0x0080080` |
-| `psub p2, p0, p1` | `0x1400405B` | `0x0280080` |
-| `pmul p2, p0, p1` | `0x2400405B` | `0x0480080` |
-| `pmul p2, p0, 255` | `0x243FC15B` | `0x0487F82` |
-| `pmac p2, p0, p1` | `0x3400405B` | `0x0680080` |
-| `pmac p2, p0, 255` | `0x343FC15B` | `0x0687F82` |
-| `pntt p0, p3, 15, 0, 0` | `0x4000FC5B` | `0x08001F8` |
-| `pintt p0, p3, 15, 0, 0` | `0x5000FC5B` | `0x0A001F8` |
-| `pmodld 0` | `0x6000005B` | `0x0C00000` |
-| `pmodld 255` | `0x603FC05B` | `0x0C07F80` |
-| `psync` | `0x7000005B` | `0x0E00000` |
-| `pfree p4` | `0x8100005B` | `0x1020000` |
-| `dload x10, x11, p0, 0, 0` | `0x00B5002B` | `0x2016A00` |
-| `dload x10, x11, p4, 2, 1` | `0x08B540AB` | `0x2116A81` |
-| `dstore x10, x11, p2, 1` | `0x04B5502B` | `0x2096AA0` |
-
-## 附录 B：当前实现边界
-
-以下内容不由当前编码器单独保证：
-
-1. relocation/runtime 是否把每条 DMA 的实际 line offset/count 装入 `rs1/rs2`。
-2. runtime 是否按 `MOD_TABLE_BASE_LINE=0x1400` 将模表 DMA 搬入 Bank 5。
-3. RTL 是否按 `autotest` 的 batch/lane、P/P^-1 次序消费 twiddle，并按 out-of-place 协议提交各 stage 新 base。
-4. cache maintenance、中断和 fault 的 runtime 实现。
-
-这些事项不由指令编码器证明；当前软件完成度与剩余 RTL/板级签字项以
-[Legacy 测试交付说明](../delivery/HPU_TEST_DELIVERY.md) 为准，它们不是 ABI 的备选解释。
-
-## 附录 C：DLOAD/DSTORE 数据绑定
-
-### C.1 通用规则
-
-- `dload/dstore` 固定编码 `x10/x11`；DLOAD 使用 offset/count，DSTORE 使用
-  offset 和硬件对象表的 `OBJ.len`；软件 span 中的 count 只用于与 `OBJ.len`
-  做一致性和目标窗口边界检查。
-- `dload type=2, flag[0]=1` 把模表对象分配到 small Bank 5；随后由
-  `pmodld MOD_ID` 选择上下文。模表顺序必须与 MOD_ID 一致。
-- 当前 RTL 的 `dstore rel=0/1` 在成功写回后都会释放对象；只读对象最后一次使用后由 `pfree` 释放。
-- 组合算子 body 不发 `psync`，只有最外层完整程序在末尾发出一次。
-- NTT stage 0 前显式加载并乘 `pre_twist`；INTT 结束后显式加载并乘
-  `post_untwist_scale`。每个 stage 都重新加载该 stage 的 twiddle。
-- 新应用镜像的完整变换以自然系数位置为边界；默认软件 profile 在 PNTT stage 0
-  前、最后 PINTT raw stage 后执行 BR。跨系数域、NTT 域的编译器 workspace 可保持
-  `unspecified` 布局标签，不能只根据 allocation 名称推测内部 stage 排列。
-
-| 槽位 | 当前生成器的常见角色 |
-| --- | --- |
-| `p0` | 当前输入 limb 或工作对象 A |
-| `p1` | 第二输入、预计算常量或评估密钥 |
-| `p2` | 累加器和输出对象 |
-| `p3` | 复合算子 twiddle 或临时标量；独立 NTT/INTT 的 twiddle 使用 `p1` |
-| `p4` | 模表逻辑对象，物理分配到 small Bank 5 |
-| `p5..p7` | 当前生成器未固定占用，不能假设其中已有 live 对象 |
-
-### C.2 BConv、ModUp 与 ModDown
-
-#### BConv
-
-`generate_hpu_bconv_contexts_body_asm` 的输入基和目标基均由 MOD_ID 列表显式给出。
-运行时必须按以下出现顺序为每条 DMA 绑定数据：
-
-| 阶段 | MOD_ID | 目标槽位 | dload 数据 | dstore 数据 |
-| --- | --- | --- | --- | --- |
-| 开始 | - | `p4` | 完整 source/target 模表，`type=2,flag[0]=1` | - |
-| Stage 1，每个 source `j` | `source_contexts[j]` | `p0` | source limb `a_j` | - |
-| Stage 1，每个 source `j` | 同上 | `p1` | `qhat_inv_j` | - |
-| Stage 1，每个 source `j` | 同上 | `p0` | - | `x_j=a_j*qhat_inv_j mod source_j` |
-| Stage 2，每个 target `i`、source `j` | `target_contexts[i]` | `p0` | Stage 1 的 `x_j` | - |
-| Stage 2，每个 target `i`、source `j` | 同上 | `p1` | `qhat_j mod target_i` | - |
-| Stage 2，每个 target `i` | 同上 | `p2` | - | `sum_j(x_j*qhat_j) mod target_i` |
-
-`p2` 是 `pmul/pmac` 累加目标，不需要在首个 source 前加载；非首项使用 `pmac`。
-
-#### ModUp
-
-ModUp 把一个 Q digit 扩展到完整 `Q union P`：
-
-1. 对 digit 内每个已有 Q limb，`dload p0` 后立即 `dstore p0,rel=1`，原样保留。
-2. 以该 digit 为 BConv source，以 `Q_without_digit union P` 为 target，按上一表加载
-   source limb、`qhat_inv` 和 target residues。
-3. 原样保留的 limb 与 `p2` 写出的 BConv target limbs 共同组成完整基。
-
-#### ModDown
-
-ModDown 的 source context 是 P，target context 是 Q：
-
-| 阶段 | 目标槽位 | dload 数据 | dstore 数据 |
-| --- | --- | --- | --- |
-| Stage 1 | `p0/p1/p2/p4` | 按 BConv 规则加载 `P -> Q` 数据和常量 | Q 基 correction |
-| Stage 2 开始 | `p4` | 完整 `Q|P` 模表 | - |
-| Stage 2，每个 `q_i` | `p0` | 当前 Q limb | - |
-| Stage 2，每个 `q_i` | `p1` | Stage 1 correction limb | - |
-| Stage 2，每个 `q_i` | `p2` | `P^-1 mod q_i` | - |
-| Stage 2，每个 `q_i` | `p0` | - | `(q-correction)*P^-1 mod q_i` |
-
-### C.3 NTT、INTT 与 host Encode/Decode
-
-NTT/INTT body 假定数据对象和活动模上下文已由外层准备。独立用例使用 `p0` 作为
-数据、`p1` 作为 twiddle；复合算子使用 `p0` 和 `p3`。
-
-| 阶段 | NTT dload | INTT dload | 使用后动作 |
-| --- | --- | --- | --- |
-| 变换前 | `pre_twist=psi^i` | - | 显式 `pmul` 后 `pfree twiddle` |
-| 每个 stage 0..logN-1 | 当前 stage twiddle | 当前 stage twiddle | `pntt` / `pintt` 后 `pfree twiddle` |
-| 变换后 | - | `post[i]=raw_inverse.post_scale[BR(i)]*psi^-i` | 最后逆向软件边界 BR 后显式 `pmul`，再 `pfree twiddle` |
-
-每个 stage 都重新执行一次 twiddle `dload`，不会由硬件从上一 stage 自动更新。
-每份 stage 参数固定包含 128 个 `uint32`、两条 line；硬件在 stage 内按
-K=8 生成 `N/2` 个因子，不新增软件 GEN/PMUL。PINTT stage 0 也必须加载
-全 1 参数对象。数据对象 `p0` 跨 stage 保持同一逻辑
-OBJ_ID，但控制器可按 out-of-place 协议提交新的物理 base。
-上表使用新 builder 的自然系数索引。历史 `test/reference/main.cpp` raw 算子包的
-pre/post 表继续使用 BR 系数位置；软件 profile 的选择不转换这些表或镜像。
-
-CKKS Encode 的 host 顺序是：generator-3 槽位映射、填充共轭半区、复数逆嵌入、
-乘 scale 并舍入为 `int64`。BGV coefficient
-Encode 将 centered signed 值映射到 `mod t`；BatchEncode 把两行 `N/2` 槽写入
-generator-3 根次序，以最小 primitive `2N` 次单位根执行模 `t` 逆负循环 NTT，
-得到明文系数。BFV 使用相同的 BatchEncoder 布局，但保留独立的方案 API。
-
-Decode 执行上述映射的逆过程。三种方案的 Encode/Decode 均由普通 C++ 在 host CPU
-执行，不产生 `.asm/.inst32/.cmd26`，也没有对象槽位、DMA、模表、twiddle 或
-HPU_MEM 绑定。独立 `ntt/intt` UT 和同态算子内部的 NTT 不受此边界影响。
-
-### C.4 PMULT 与 CMULT
-
-`generate_hpu_mm_body_asm` 本身不包含 DMA，只对调用方已经置为 live 的对象执行
-`pmul`；独立 MM wrapper 才负责加载模表和输入。PMULT/CMULT 在其上定义如下顺序。
-
-PMULT 对每个 `q_i` 的 DMA 顺序固定为：
-
-```text
-dload p4 = Q mod table                    # 整个算子只加载一次
-pmodld i
-dload p0 = ct0[i]
-dload p1 = plaintext[i]
-pmul p2,p0,p1
-dstore p2 = out0[i], rel=1
-dload p0 = ct1[i]                         # p1 仍保持 live
-pmul p2,p0,p1
-dstore p2 = out1[i], rel=1
-```
-
-plaintext `p1` 在两次乘法之间不能被 runtime 替换，第二次乘法后才 `pfree p1`。
-
-CMULT 输入必须已经处于 NTT/evaluation domain。对每个 `q_i`，DLoad 顺序为：
-
-| 输出 | 依次加载到 `p0/p1` | 计算与写回 |
-| --- | --- | --- |
-| `t0` | `a0,b0` | `p2=a0*b0`，随后 dstore `t0` |
-| `t1` | `a0,b1`，再加载 `a1,b0` | 先 `pmul p2`，再 `pmac p2`，随后 dstore `t1` |
-| `t2` | `a1,b1` | `p2=a1*b1`，随后 dstore `t2` |
-
-### C.5 KeySwitch、Relinearization 与完整乘法
-
-KeySwitch 接口语义是
-`KeySwitch(base,switching_component,evk)->(base+ks0,ks1)`。对每个 digit 执行：
-
-| 步骤 | dload 绑定 | dstore 结果 |
-| --- | --- | --- |
-| 1. ModUp | 当前 `switching_component` digit、BConv 常量、`p4=Q|P table` | 完整 QP digit |
-| 2. NTT | `p0=QP digit limb,p3=pre/stage twiddle` | NTT 域 QP digit |
-| 3. EVK 乘加 | `p0=digit NTT,p1=evk[d][v][basis]`；非首 digit 另加载 `p2=previous accumulator` | `p2=accumulator[v][basis]` |
-| 4. INTT | `p0=accumulator,p3=stage/post twiddle,p4=Q|P table` | 系数域 QP accumulator |
-| 5. ModDown | 通用路径按 C.2；BFV/SEAL 路径先在 Q∪P 加 `floor(P/2)` 再做 single-P ModDown | Q 基 `ks0/ks1` |
-| 6. 合并 base | `p0=ks0,p1=base,p4=Q table` | `p2=base+ks0` |
-
-Relinearization 把 `t0` 绑定为 base、`t2` 绑定为 switching component、`rlk` 绑定为
-EVK。KeySwitch 输出第一分量后，对每个 `q_i` 再加载 `p0=t1`、`p1=ks1`，以
-`p2=t1+ks1` 写回第二分量。
-
-`generate_hpu_bfv_keyswitch_body_asm` 和
-`generate_hpu_bfv_relinearization_body_asm` 强制 SEAL 的 singleton-Q digit 与
-single-P layout，并保持 BFV coefficient-domain 输入输出。无效的 grouped digit 或
-multi-P layout 在 codegen 阶段直接拒绝，不回退到 host 或通用 KeySwitch。
-
-完整 CiphertextMultiply 的外存阶段顺序是：
-
-```text
-ctA[0],ctA[1] coefficient/Q -> NTT
-ctB[0],ctB[1] coefficient/Q -> NTT
-CMULT -> t0,t1,t2 NTT/Q
-t0,t1,t2 -> INTT -> coefficient/Q
-KeySwitch(base=t0,switching=t2,evk=rlk)
-merge t1+ks1
-dstore ciphertext_out_q[0], ciphertext_out_q[1]
-```
-
-Auto 的 HPU 侧绑定与 KeySwitch 相同；差异是 host 先对两个输入分量执行负循环
-`X->X^3`，随后以旋转后的 `c0` 为 base、旋转后的 `c1` 为 switching component，
-EVK 使用 Galois key。
-
-### C.6 CKKS 方案算子
-
-CKKS Rescale 输入为 `[component,Q,coefficient]`。对每个 component：
-
-| 阶段 | dload 绑定 | dstore 结果 |
-| --- | --- | --- |
-| 舍入预处理 | `p4=Q table`；每个 `q_i` 加载 `p0=input_q[component][i]`、`p1=floor(q_last/2) mod q_i` | `p0=rounded_numerator[i]` |
-| 单源 BConv | source 为 rounded `q_last` limb；加载值为 1 的 `qhat_inv`/target residues | Q' correction |
-| 除以 `q_last` | `p0=rounded Q' limb,p1=correction,p2=q_last^-1 mod q_i` | `expected_qprime[component][i]` |
-
-最终计算为：
-
-```text
-((x + floor(q_last/2)) - BConv_q_last(x + floor(q_last/2)))
-    * q_last^-1 mod q_i
-```
-
-正式 SEAL/HPU CKKS CiphertextMultiply 不再直接调用 C.5 的 coefficient-input demo。
-SEAL bridge 已把两个输入分量转换为 canonical HPU NTT 物理顺序，因此直接执行
-CMULT，删除原来的四组输入 NTT；随后三个 tensor 分量只做一次 INTT，以复用首版
-系数域 KeySwitch/ModDown 和本节 Rescale。Rescale 后仅对 `Q_without_last` 上的两个
-最终分量执行 NTT。完整流只 dload 一次 `p4=Q|P modulus/mu table`，所有嵌套算子
-复用该 small-bank 对象，最终 dstore 后只发出一个 `psync`。scale 和 level 不通过
-DMA 进入 HPU，由软件更新为 `scale_out=scale_a*scale_b/q_last`、
-`level_out=level_in-1`。
-
-CKKS Rotate 对每个活动 `q_i` 预计算 `psi'=psi^(1/k)` 的 HPU PINTT stage 与
-post-untwist 表。两个 canonical HPU NTT 输入分别执行一次 modified-root INTT 后，
-在新软件契约下经过最后 stage 的边界 BR 和显式 post-PMUL，得到自然系数位置的
-`sigma_k(c0),sigma_k(c1)`。对应表为
-`raw_modified_inverse.post_scale[BR(i)] * (psi')^-i`；随后以
-SEAL Galois key 执行 KeySwitch，并将两个 Q 输出恢复为 canonical HPU NTT。若调度
-器把 fused INTT 与 KeySwitch 拆成两个 kernel，边界只需保留
-`domain=coefficient,key_domain=k`，不需要保存 modified-root NTT 状态。
-
-CKKS pointwise 的 HPU_MEM 逻辑布局保持 SEAL 风格的 ciphertext
-`[component][q][coefficient]` 与 plaintext `[q][coefficient]`；runtime 按每条 DMA
-relocation 绑定相应 span。密文 Add/Sub 对两个 component 各执行一次
-`padd`/`psub`；MultiplyPlain 在同一 `q_i` 下复用 plaintext 对象，依次计算
-`c0*pt`、`c1*pt`；AddPlain/SubPlain 只修改 `c0`，standalone 流将原 `c1`
-复制到输出。整个应用只装载一次 `p4` 模表，两个输出都在 terminal `psync` 前写回。
-
-CKKS 模数链在整个应用中使用稳定 MOD_ID。若初始 key context 为
-`Q0|Q1|Q2|Q3|P0`，则 Rescale 后的 Q3 KeySwitch 使用
-`q_mod_ids={0,1,2}`、`p_mod_ids={4}`、三个 singleton key digit；下一层使用
-`q_mod_ids={0,1}`、`p_mod_ids={4}`。P 不随活动 Q 数量重新编号。显式 layout
-版本的 ModUp/ModDown/BConv 按这些 ID 选择 small-bank 表项，同时 HPU_MEM 中的
-evaluation-key limb 仍按逻辑 `[active Q][P]` 排列，由 DMA relocation 连接逻辑
-limb 与全局 MOD_ID。
-
-### C.7 BGV 方案算子
-
-BGV Multiply 的 DMA 次序与公共 CiphertextMultiply 相同，但模表镜像顺序固定为
-`Q|P|t`。`t` 不参与乘法指令；软件在成功后更新
-`factor_out=factor_a*factor_b mod t`。
-
-BGV ModSwitch 对每个 component 依次执行：
-
-| 阶段 | dload 绑定 | dstore 结果 |
-| --- | --- | --- |
-| `q_last -> t` | 单源 BConv：`c_last`、`bconv_qhat_inv`、`bconv_qhat_target_t`、`p4=Q|P|t table` | `c_last_mod_t` |
-| 计算 `u` | `p0=zero,p1=c_last_mod_t,p3=q_last^-1 mod t` | `p0=u_mod_t` |
-| `q_last -> Q'` | 单源 BConv：`c_last` 和面向 Q' 的 target constants | `c_last_mod_qprime` |
-| `t -> Q'` | 单源 BConv：`u_mod_t` 和面向 Q' 的 target constants | `u_mod_qprime` |
-| 最终校正 | `p0=c_i,p1=c_last_mod_q_i,p2=u_mod_q_i,p3=q_last mod q_i`；运算后再加载 `p3=q_last^-1 mod q_i` | `p0=c_i'` |
-
-最终校正执行：
-
-```text
-p2 = p2 * p3
-p1 = p1 + p2
-p0 = p0 - p1
-p0 = p0 * q_last^-1
-```
-
-对应 `c_i'=(c_i-c_last-q_last*u)*q_last^-1 mod q_i`。软件同时更新
-`factor_out=factor_in*q_last^-1 mod t`。
-
-### C.8 BFV 方案算子
-
-SEAL-facing 基础 planner 的 HPU_MEM 布局保持 BFV 原生
-`[component][q][coefficient]`。Ciphertext Add/Subtract 对两个 component 的每个 Q limb
-执行 `padd/psub`；Negate 用 `(c-c)-c` 合成模负数；AddPlain/SubPlain 只对 `c0` 与预制
-`Delta*m` 做加减，并把 `c1` 原样复制到输出。所有步骤必须处于同一 level，整个计划只
-装载一次模表并在最后发出一个 `psync`，不存在 CPU 数值计算回退。
-
-MultiplyPlain 对 `c0/c1` 的每个 Q limb 先加载 canonical pre-twist 与所有正向 stage
-twiddle 完成 NTT，再与同一预制 plaintext limb 执行 `pmul`，最后加载逆向 stage 与
-post-untwist-scale 完成 INTT，直接写回系数域输出。密文中间值始终驻留在 `p0`，不需要
-额外 HPU_MEM workspace；plaintext 和全部 twiddle 都是只读 DMA 输入。
-
-`bfv_encode` 与 `bgv_encode` 都是纯 host 包：完成 coefficient/batch Encode、Decode
-和 round-trip 验证，不再生成 RNS-Q NTT 硬件流。
-
-`bfv_ciphertext_multiply` 的前半段按指令出现顺序绑定四个 Q 输入分量、
-`Q->Bsk` FastBConv 常量、Q/Bsk twiddle、`t mod Q/Bsk`、`Q^-1 mod Bsk`、
-`B->Q/m_sk` 常量、`B^-1 mod m_sk` 和 `-B mod Q`。输出 shape 固定为
-`[3,num_q,N]`。包内 `memory_lifetime.csv` 规定何时可用已死亡输入或常量区域承接
-scratch。三分量结果占用的 span 随后直接作为 KeySwitch 输入；后半段从同一 window
-加载 Q/Pks twiddle、relinearization key 和 ModUp/ModDown 常量，最终原位写回两个
-Q 分量。默认 `N=4096,Q=4,Pks=3,B=6` 的统一 window 为 20833 line，完整 DMA
-顺序和地址只由同一目录中的 `dma_plan.csv` 与 `hardware/line_map.csv` 规定。
-
-SEAL-facing codegen 另提供显式 `BfvCiphertextMultiplyLayout`：直接接收 active Q、固定
-single-P、每层 B、`m_sk` 和 t 的全局 MOD_ID，并强制 singleton-Q KeySwitch digits。
-该融合流复用 comparison-free BEHZ，但后半段明确选择 BFV rounded single-P
-Relinearization；整条流只装载一次 small-bank 模表，降 level 时不会把 P 或辅助基重新编号。
-`BfvOperationPlan::append_multiply` 已消费这一入口，并要求 prepared relinearization key、
-KeySwitch 常量和 BEHZ 常量来自同一 level。对应 relocation 覆盖四路输入、所有常量与
-twiddle、中间 workspace、评估密钥和最终两个 Q 输出，不需要 CPU 参与中间计算。
-
-`BfvOperationPlan::append_mod_switch` 消费 `add_mod_switch_constants` 产生的相邻 level
-资源。它拒绝 bottom level、错误 source/destination `parms_id`、非二分量或非系数域输入；
-relocation 按 rounded、单源 BConv、乘逆元三个阶段绑定 DMA，并将输出绑定到下一层 Q。
-
-`bfv_modswitch` 接收单 kernel 的二分量 Q 密文，先加 `floor(q_last/2)`，再把
-`q_last` 当单元素 P 基复用 ModDown；输出为 `[2,num_q-1,N]`。其数学 golden 与
-`direct_rounded_divide_last` 逐 limb 比较，随后执行 BFV scale-and-round Decrypt
-和 BatchDecode。
-
-### C.9 物理 span 与数据文件
-
-本附录定义每条 DMA 的逻辑数据身份和先后顺序，不硬编码外存地址。生成包中的文件
-共同构成最终绑定契约：
-
-| 文件 | 权威内容 |
-| --- | --- |
-| `dma_plan.csv` | 算法阶段、逻辑对象、域和基 |
-| `artifact_manifest.csv` | `uint64` 数学 golden 的 path、shape 和 checksum |
-| `hardware/hardware_manifest.csv` | 独立 `uint32` 硬件镜像及 checksum |
-| `hardware/line_map.csv` | 每个对象的 byte address、line offset/count 和 padding |
-| `hardware/mod_ctx_map.csv` | Q/P/t 的 MOD_ID 与 Bank 5 记录位置 |
-| `hardware/twiddle_map.csv` | phase/stage twiddle 的物理位置与 line 数 |
-
-runtime 必须按照生成 ASM 中 custom1 的出现顺序消费 relocation/span 记录。不能只凭
-槽位号推断数据，因为同一个 `p0` 会在不同阶段依次表示输入 limb、scratch 和输出。
+参见 [Bank 分配指南](HPU_BANK_ALLOCATION_GUIDE.md)、[整体架构](../architecture/HPU_ARCHITECTURE.md) 和 [应用包格式](../delivery/HPU_APPLICATION_PACKAGE_V1.md)。

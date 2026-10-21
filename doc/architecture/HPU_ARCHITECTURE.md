@@ -238,28 +238,28 @@ CKKS/BFV 从原生片段的端口声明构造 DMA 绑定，兼容汇编用于一
 
 ### 6.4 片上对象与 bank 调度
 
-HPU 有 **8 个逻辑对象槽位**和 **5 个普通 bank**，两者分别管理。普通 bank
-容量为 1024 line，每条 line 为 64 个 uint32，即 256B。N=65536 的单个 limb
-占 1024 line。
+HPU 有 **64 个逻辑对象槽位 p0…p63**，与物理 bank 独立。Bank 0…4 各
+1024 line；普通区间以 128 line 为单元，容量为
+`128 * next_pow2(ceil(actual_len/128))`，起点按容量对齐。短对象可共享 bank，
+N8192 最多静态容纳 40 个，但执行还须为新结果预留候选区间。
 
-当前每个普通 resident object 占一个 bank，多个短对象暂不打包到同一个 bank。
-模上下文表使用独立 small Bank 5，最大 32 line，并保留其自身对象槽位。
+`runtime::BankAllocator` 维护每个逻辑对象的 bank、base、实际长度和保留容量，
+由编译器与逐指令模型共同使用。默认 Bank 5 前 4 line 永久保留模表，
+其余可容纳 14 个两条 line、TYPE=3 的只读 stage 参数。mask 仅约束 DLOAD。
 
-NTT/INTT 每个 stage 执行 out-of-place，调度时除了数据和 twiddle 的 resident
-bank，还计入一个额外输出 bank。固定的 128 个 NTT 运算寄存器由硬件 stage 调度
-使用，当前编译后端管理对象槽位和 bank，未提供 PE 寄存器分配接口。
+普通算术有匹配长度目的时复用原区间；新目的按源读取次数最少的可用 bank 分配，
+以 `dst%5` 起的循环次序打破并列。PMAC 与每个 NTT stage 总是先申请新结果，
+完成后才回收旧区间；NTT 还必须排除输入 bank。失败保持旧映射。
+完整规则见 [Bank 分配指南](../reference/HPU_BANK_ALLOCATION_GUIDE.md)。
 
-调度器一次预计算对象的使用位置列表，按指令推进消费使用事件；PFREE 提示不算
-数据使用，延迟重载的定义算隐式使用。下一次使用查询为常数时间。驻留集合按对象
-ID 排序，槽位、bank 和淘汰检查只扫描至多 8 个驻留对象。
+调度器预先建立下一次使用索引，保护当前操作数，优先淘汰下一次使用最远的对象。
+干净数据直接释放，脏数据保存到 backing；是否需要淘汰由实际候选区间与空闲对象号
+共同决定，不能只比较对象个数或总剩余空间。固定的 128 个 NTT 运算寄存器由硬件
+stage 调度使用，编译器不分配 PE 内部寄存器。
 
-腾出空间时保护当前操作数，优先淘汰下一次使用最远的对象，距离相同选择较小对象 ID。
-可重载的干净数据直接释放，脏数据保存到可写 backing。该索引化保持原有选择策略。
-
-`DSTORE` 按当前 executable ABI 写回并释放源对象，后续使用需要 DLOAD。
-证明内部 workspace 写回与唯一读取可由片上保留替代后，后端可延迟该写回；
-计算节点输出的必需写回继续保留。最终编码使用现有 ISA，DMA 使用冻结的
-`x10/x11` offset/count ABI。
+DSTORE REL=0 保留对象，REL=1 成功完成后释放；spill 需明确释放。
+后端可消除有完整生命周期证明的内部 workspace 写回，必需节点输出仍写回。
+最终代码使用 x10/x11 DMA sideband，并声明 `hpu-objects64-v1.1` ISA。
 
 ### 6.5 NoOpt 基准
 
@@ -399,12 +399,12 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 `pack_stage_twiddles` 从完整物理 oracle 表提取 U/V/R 并重构全表校验；逐指令层和
 算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
 raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
-参数只改变 src2 数据格式，前端 API、PNTT/PINTT 编码、pre/post 和普通 bank
-分配规则保持原契约。精确布局见
-[K=8 编译器迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数默认 TYPE3
+放入 Bank 5，普通 bank 按 128-line 单元分配。K=8 参数内容继承先前迁移，
+最新 ISA 与放置规则见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
 
 完整公式、stage 表顺序及 raw inverse API 适配见
-[编程手册的变换契约](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)，
+[编程手册的变换契约](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，
 数据 ABI 与旧包迁移见
 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 选择回放契约不修改镜像、DMA 或指令，新自然镜像使用 legacy profile 可能比较失败。

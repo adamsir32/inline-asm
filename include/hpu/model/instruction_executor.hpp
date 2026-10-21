@@ -40,6 +40,7 @@ struct InstructionExecutionOptions {
         InstructionNttContract::natural_coefficient_boundaries;
     std::size_t regular_bank_count = 5;
     std::size_t regular_bank_lines = 1024;
+    std::size_t mod_table_lines = 4;
 };
 
 struct InstructionExecutionReport {
@@ -54,6 +55,8 @@ struct InstructionExecutionReport {
     std::size_t instruction_index = 0;
     std::size_t executed_instructions = 0;
     std::size_t peak_regular_banks = 0;
+    std::size_t peak_regular_lines = 0;
+    std::size_t peak_small_lines = 0;
     std::size_t peak_resident_objects = 0;
     std::size_t loaded_words = 0;
     std::size_t stored_words = 0;
@@ -71,7 +74,8 @@ struct InstructionExecutionResult {
 // Decodes instruction.word independently of instruction/normalized_asm metadata.
 // Each custom1 consumes the next concrete DDR span, in encoded program order.
 // Arithmetic consumes the actual DMA payload, including supplied twiddle words.
-// DSTORE releases its source, and transform stages require an extra output bank.
+// DSTORE releases only for REL=1. Physical allocation follows the v1.1 bank
+// contract, including transient NTT/PMAC regions and packed Bank 5 parameters.
 InstructionExecutionResult execute_instructions(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<hpu::runtime::HpuMemSpan>& ordered_dma_spans,

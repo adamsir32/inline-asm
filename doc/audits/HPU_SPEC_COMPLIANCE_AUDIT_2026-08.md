@@ -1,5 +1,6 @@
 # HPU 文档符合性审计（2026-08）
 
+> 历史审计：以下编码、8 对象和 REL 记录已被 [64 对象 v1.1 手册](../reference/HPU_PROGRAMMING_MANUAL.md) 替代，不作为当前 ABI。
 > 状态：历史审计快照。本文保留 2026 年 8 月的审计基线、修复依据和当时的
 > 遗留项；当前接口以 `doc/reference/` 和 `doc/delivery/` 下的文档为准。
 

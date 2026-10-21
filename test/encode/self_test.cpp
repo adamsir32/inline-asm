@@ -60,7 +60,7 @@ int main()
         }
         const std::string smoke =
             "dload x10, x11, p0, 0, 0\n"
-            "dload x10, x11, p4, 2, 1\n"
+            "dload x10, x11, p4, 2, 32\n"
             "pmodld 255\n"
             "padd p2, p0, p1\n"
             "psub p2, p0, p1\n"
@@ -88,7 +88,7 @@ int main()
                 throw std::runtime_error("command kind is not encoded in cmd[25]");
             }
             if (expected_kind == 0U && item.command26 != (item.word >> 7U)) {
-                throw std::runtime_error("custom2 payload precode mismatch");
+                throw std::runtime_error("custom0 payload precode mismatch");
             }
             if (expected_kind == 1U
                 && item.command26 != ((1U << 25U) | (item.word >> 7U))) {
@@ -96,30 +96,39 @@ int main()
             }
         }
 
-        expect_encoded("padd p2, p0, p1", 0x0400405BU);
-        expect_encoded("psub p2, p0, p1", 0x1400405BU);
-        expect_encoded("pmul p2, p0, p1", 0x2400405BU);
-        expect_encoded("pmac p2, p0, p1", 0x3400405BU);
-        expect_precoded("pntt p0, p3, 15, 0, 0", 0x4000FC5BU, 0x08001F8U);
-        expect_precoded("pintt p0, p3, 15, 0, 0", 0x5000FC5BU, 0x0A001F8U);
-        expect_precoded("pntt p2, p3, 1, 0, 0", 0x4480C45BU, 0x0890188U);
+        expect_encoded("padd p2, p0, p1", 0x0080015BU);
+        expect_encoded("psub p2, p0, p1", 0x1080015BU);
+        expect_encoded("pmul p2, p0, p1", 0x2080015BU);
+        expect_encoded("pmac p2, p0, p1", 0x3080015BU);
+        expect_precoded("pntt p0, p3, 15, 0, 0", 0x4003F05BU, 0x08007E0U);
+        expect_precoded("pintt p0, p3, 15, 0, 0", 0x5003F05BU, 0x0A007E0U);
+        expect_precoded("pntt p2, p3, 1, 0, 0", 0x4083105BU, 0x0810620U);
         expect_encoded("pmodld 0", 0x6000005BU);
-        expect_encoded("pmodld 1", 0x6000405BU);
-        expect_encoded("pmodld 255", 0x603FC05BU);
-        expect_encoded("pfree p4", 0x8100005BU);
+        expect_encoded("pmodld 1", 0x6000015BU);
+        expect_encoded("pmodld 255", 0x6000FF5BU);
+        expect_encoded("pfree p4", 0x8004005BU);
         expect_encoded("psync", 0x7000005BU);
-        expect_precoded("padd p2, p0, p1", 0x0400405BU, 0x0080080U);
-        expect_precoded("pmodld 255", 0x603FC05BU, 0x0C07F80U);
+        expect_precoded("padd p2, p0, p1", 0x0080015BU, 0x0010002U);
+        expect_precoded("pmodld 255", 0x6000FF5BU, 0x0C001FEU);
         expect_precoded("dload x10, x11, p0, 0, 0", 0x00B5002BU, 0x2016A00U);
         expect_precoded("dload x1, x2, p0, 0, 0", 0x0020802BU, 0x2004100U);
-        expect_precoded("dload x10, x11, p4, 2, 1", 0x08B540ABU, 0x2116A81U);
-        expect_precoded("dstore x10, x11, p2, 1", 0x04B5502BU, 0x2096AA0U);
-        expect_encoded("dstore x10, x11, p2, 1", 0x04B5502BU);
-        expect_encoded("pmul p2, p0, 255", 0x243FC15BU);
-        expect_encoded("pmac p2, p0, 255", 0x343FC15BU);
+        expect_precoded("dload x10, x11, p4, 2, 32", 0x12B5402BU, 0x2256A80U);
+        expect_precoded("dstore x10, x11, p2, 1", 0x08B5502BU, 0x2116AA0U);
+        expect_encoded("dstore x10, x11, p2, 1", 0x08B5502BU);
+        expect_encoded("pmul p2, p0, 255", 0x2080FFDBU);
+        expect_encoded("pmac p2, p0, 255", 0x3080FFDBU);
+
+        // Frozen vectors from the v1.1 bit-layout tables cover all six object
+        // bits, both halves of the DMA mask, and the largest GPR identifiers.
+        expect_precoded("padd p63, p62, p61", 0x0FFE3D5BU, 0x01FFC7AU);
+        expect_precoded("pntt p63, p62, 15, 3, 1", 0x4FFEFE5BU, 0x09FFDFCU);
+        expect_encoded("pfree p63", 0x803F005BU);
+        expect_precoded("dload x30, x31, p63, 3, 63", 0xFFFF6FABU, 0x3FFFEDFU);
+        expect_precoded("dstore x30, x31, p63, 1", 0xFDFF502BU, 0x3FBFEA0U);
+        expect_encoded("dload x10, x11, p4, 2, 0", 0x10B5402BU);
 
         const auto executable_encoded = hpu::assemble_source(
-            "dload x10, x11, p4, 2, 1\n"
+            "dload x10, x11, p4, 2, 32\n"
             "pmodld 0\n"
             "dload x10, x11, p0, 1, 0\n"
             "dload x10, x11, p1, 1, 0\n"
@@ -130,18 +139,28 @@ int main()
             "pfree p4\n"
             "psync\n");
         hpu::validate_executable_program(executable_encoded);
-        expect_program_rejected(
+        hpu::validate_executable_program(hpu::assemble_source(
             "dload x10, x11, p0, 1, 0\n"
             "dload x10, x11, p0, 1, 0\n"
-            "psync\n");
+            "psync\n"));
         expect_program_rejected(
             "dload x10, x11, p0, 1, 0\n"
             "psync\n"
             "pfree p0\n");
+        hpu::validate_executable_program(hpu::assemble_source(
+            "dload x10, x11, p63, 1, 0\n"
+            "dstore x10, x11, p63, 0\n"
+            "psync\n"
+            "pfree p63\n"
+            "psync\n"));
         expect_program_rejected(
-            "dload x10, x11, p0, 1, 0\n"
-            "dstore x10, x11, p0, 0\n"
-            "pfree p0\n"
+            "dload x10, x11, p63, 1, 0\n"
+            "dstore x10, x11, p63, 1\n"
+            "pfree p63\n"
+            "psync\n");
+        expect_program_rejected(
+            "dload x10, x11, p40, 2, 0\n"
+            "dload x10, x11, p41, 2, 32\n"
             "psync\n");
         const std::string executable =
             hpu::render_executable_source("smoke", executable_encoded, 65536);
@@ -150,6 +169,8 @@ int main()
         const std::string manifest = hpu::render_dma_manifest(executable_encoded);
         if (hpu::collect_dma_relocations(executable_encoded).size() != 4)
             throw std::runtime_error("executable DMA count mismatch");
+        if (executable.find("hpu_obj_len[64]") == std::string::npos)
+            throw std::runtime_error("executable does not track all 64 objects");
         if (executable.find("#define HPU_MEM_LINE_COUNT UINT64_C(65536)")
             == std::string::npos)
             throw std::runtime_error("executable HPU_MEM capacity mismatch");
@@ -159,7 +180,7 @@ int main()
         if (executable.find("register uintptr_t hpu_rs2 __asm__(\"x11\")")
             == std::string::npos)
             throw std::runtime_error("executable x11 binding mismatch");
-        if (executable.find(".word 0x08B540AB") == std::string::npos)
+        if (executable.find(".word 0x12B5402B") == std::string::npos)
             throw std::runtime_error("executable fixed word mismatch");
         if (executable.find("spans[3].line_offset") == std::string::npos)
             throw std::runtime_error("executable DSTORE relocation mismatch");
@@ -175,12 +196,12 @@ int main()
             throw std::runtime_error("executable contains zero-length DMA sideband");
         if (header.find("HPU_PROGRAM_SMOKE_DMA_COUNT = 4") == std::string::npos)
             throw std::runtime_error("executable header mismatch");
-        if (manifest.find("7,3,dstore,2,1,0,x10,x11,0x04B5502B")
+        if (manifest.find("7,3,dstore,2,1,0,x10,x11,0x08B5502B")
             == std::string::npos)
             throw std::runtime_error("DMA manifest mismatch");
 
         const std::vector<std::string> invalid{
-            "padd p8, p0, p1",
+            "padd p64, p0, p1",
             "padd p0, p1, 1",
             "pmul p0, p1, 256",
             "pntt p0, p1, 16, 0, 0",
@@ -189,7 +210,7 @@ int main()
             "pmodld 256",
             "pmodld -1",
             "pmodld p0, 0, 0",
-            "pfree p8",
+            "pfree p64",
             "pfree p0, 0, 0",
             "pshcfg p0, 0, 0",
             "pshuf p0, p1, 0, 0, 0",
@@ -197,10 +218,15 @@ int main()
             "psample p0, p1, 0, 0, 0",
             "psync 0, 0",
             "dload x32, x0, p0, 0, 0",
-            "dload x0, x0, p0, 3, 0",
             "dload x0, x0, p0, 4, 0",
             "dload x0, x0, p0, 0",
             "dload x0, x0, p0, 2, 2",
+            "dload x0, x0, p0, 0, 64",
+            "dload x0, x0, p0, 0, 256",
+            "dload x0, x0, p0, 256, 0",
+            "dload x0, x0, p0, -1, 0",
+            "pntt p0, p1, 0, 256, 0",
+            "pplace p0, 1",
             "dstore x0, x0, p0, 2",
             "dstore x0, x0, p0, 1, 1",
         };

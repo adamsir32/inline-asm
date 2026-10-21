@@ -37,7 +37,7 @@ std::string generate_hpu_ntt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pntt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::twiddle_parameters);
         asm_code << hpu::resource::ntt_stage(data_obj, twiddle_obj, stage, 0);
         asm_code << hpu::resource::discard(twiddle_obj);
     }
@@ -76,7 +76,7 @@ std::string generate_hpu_intt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pintt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::twiddle_parameters);
         asm_code << hpu::resource::intt_stage(data_obj, twiddle_obj, stage, 0);
         asm_code << hpu::resource::discard(twiddle_obj);
     }

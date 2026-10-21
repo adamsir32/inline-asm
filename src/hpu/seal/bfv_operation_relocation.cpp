@@ -38,13 +38,13 @@ std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
         const int operand = std::stoi((*it)[3].str());
         if (instruction.direction == BfvDmaDirection::load) {
             if (!(*it)[4].matched || operand < static_cast<int>(hpu::DataType::seg) ||
-                operand > static_cast<int>(hpu::DataType::mod_ctx)) {
+                operand > static_cast<int>(hpu::DataType::twiddle_parameters)) {
                 throw std::logic_error("generated BFV dload has an invalid operand");
             }
             instruction.load_type = static_cast<hpu::DataType>(operand);
             const int flag = std::stoi((*it)[4].str());
             if (flag < static_cast<int>(hpu::DloadFlag::regular_bank) ||
-                flag > static_cast<int>(hpu::DloadFlag::small_bank)) {
+                flag > 63) {
                 throw std::logic_error("generated BFV dload has an invalid bank flag");
             }
             instruction.load_flag = static_cast<hpu::DloadFlag>(flag);
@@ -133,7 +133,9 @@ public:
 
     void load_words(int slot, const std::string& allocation_id, std::size_t expected_words)
     {
-        append(BfvDmaDirection::load, slot, allocation_id, hpu::DataType::poly,
+        const bool stage = allocation_id.find("/stage") != std::string::npos;
+        append(BfvDmaDirection::load, slot, allocation_id,
+               stage ? hpu::DataType::twiddle_parameters : hpu::DataType::poly,
                hpu::DloadFlag::regular_bank, 0, expected_words);
     }
 

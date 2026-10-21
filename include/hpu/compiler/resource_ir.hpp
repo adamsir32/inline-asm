@@ -28,6 +28,9 @@ struct CompileOptions {
     OptimizationMode optimization = OptimizationMode::optimized;
     std::size_t regular_bank_count = hpu::runtime::kRegularBankCount;
     std::uint64_t regular_bank_lines = 1024;
+    // Must match RTL MOD_TABLE_LINES. The reserved Bank 5 prefix is not
+    // available to other objects even when the loaded table is shorter.
+    std::uint64_t mod_table_lines = 4;
     // Explicit buffer ABI annotations. They never permute payload words.
     // Workspace whose layout changes during execution must stay unspecified.
     std::map<std::string, MemoryLayout> buffer_layouts;
@@ -108,6 +111,8 @@ struct ResourceReport {
     std::size_t dma_count = 0;
     std::size_t peak_regular_banks = 0;
     std::size_t peak_object_slots = 0;
+    std::uint64_t peak_regular_lines = 0;
+    std::uint64_t peak_small_lines = 0;
     std::size_t deferred_scratch_stores = 0;
     std::size_t spills = 0;
     std::size_t reloads = 0;
@@ -133,7 +138,7 @@ VirtualProgram import_resolved_program(
 
 // NoOpt preserves the original instruction words, DMA ranges and image bytes.
 // Optimized keeps immutable resources and every non-workspace allocation,
-// reuses proven scratch lifetimes, and schedules distinct slots and banks.
+// reuses proven scratch lifetimes and predicts aligned physical intervals.
 CompiledResources optimize_resources(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<ResolvedDma>& dma,

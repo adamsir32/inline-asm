@@ -135,7 +135,7 @@ cmake --build build -j2 --target hpu_frontend_deployment_delivery
 
 新应用使用自然系数边界，twist、untwist 和归一化由显式 PMUL 完成。这是功能
 软件契约，不声称复现 RTL 每 stage 地址，host 对拍不改变硬件验证状态。
-完整变换和表索引见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)，
+完整变换和表索引见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，
 镜像 ABI 与迁移要求见 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 
 需要保留失败的指令模型报告进行诊断时，可显式选择：

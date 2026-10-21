@@ -79,7 +79,7 @@ boundaries; per-stage RTL address and timing equivalence is a separate check.
 The inverse stage tables contain `w_bf = alpha / beta`. Application images
 include scale cancellation, normalization and untwist in the explicit natural
 post-PMUL factor. Its exact indexing and the legacy raw convention are specified
-in [the programming manual](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令).
+in [the programming manual](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定).
 
 The model also implements both modified-root automorphism identities from
 `toy_fhe_auto.py`. Both APIs return the canonical HPU NTT physical domain. The
@@ -291,8 +291,8 @@ that remain valid whether the Linux backend becomes a userspace MMIO library or
 a kernel driver:
 
 - the complete q/mu table is dload'd to the small bank once per application;
-- logical object slots are `p0..p7`; the five regular SRAM banks are a separate capacity constraint;
-- DSTORE releases its source slot for both REL values; reuse requires another DLOAD;
+- logical object slots are `p0..p63`; the five regular SRAM banks are a separate capacity constraint;
+- DSTORE REL=0 retains its source; REL=1 releases after successful completion;
 - a polynomial may remain resident and dirty across multiple kernels;
 - an object is not forced through dstore/dload at every kernel boundary;
 - every required final output must be dstore'd to HPU_MEM before completion;

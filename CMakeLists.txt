@@ -61,6 +61,7 @@ target_include_directories(hpu_hardware_model
 target_link_libraries(hpu_hardware_model PUBLIC hpu_encode hpu_runtime_core)
 
 add_library(hpu_runtime_core STATIC
+        src/hpu/runtime/bank_allocator.cpp
         src/hpu/runtime/application.cpp
         src/hpu/runtime/memory_image.cpp
         src/hpu/runtime/software_executor.cpp
@@ -183,6 +184,9 @@ if(BUILD_TESTING)
     add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
     target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core hpu_hardware_model)
     add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)
+    add_executable(hpu_bank_allocator_test test/bank_allocator_test.cpp)
+    target_link_libraries(hpu_bank_allocator_test PRIVATE hpu_runtime_core)
+    add_test(NAME hpu_bank_allocator_test COMMAND hpu_bank_allocator_test)
     add_executable(hpu_instruction_executor_test test/instruction_executor_test.cpp)
     target_link_libraries(hpu_instruction_executor_test PRIVATE hpu_hardware_model hpu_runtime_core)
     add_test(NAME hpu_instruction_executor_test COMMAND hpu_instruction_executor_test)

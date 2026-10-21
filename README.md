@@ -1,10 +1,10 @@
 # HPU Inline Assembly Codegen
 
-本项目用于为全同态加密在自研 HPU（Homomorphic Processing Unit）硬件上，提供 C++ 内联汇编（Inline Assembly）的生成器。项目基于 HPU 的 3-bit 寻址槽位和流水线执行语义进行抽象，支持从底层通用计算直至高层复杂 FHE 算子的自动代码生成，并可将生成后的 ASM 继续转译为 32 位指令编码文本。
+本项目用于为全同态加密在自研 HPU（Homomorphic Processing Unit）硬件上，提供 C++ 内联汇编（Inline Assembly）的生成器。项目基于 HPU 的 6-bit 逻辑对象、确定性 bank 分配和流水线执行语义进行抽象，支持从底层通用计算直至高层复杂 FHE 算子的自动代码生成，并可将生成后的 ASM 继续转译为 32 位指令编码文本。
 
 应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，快速运行见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)，完整程序、接口约束和自定义用例构建见 [HPU 应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
 
-当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端和指令编码不变，旧完整 stage 表镜像需重新生成。硬件格式及集成要求见 [twiddle 编译器迁移说明](doc/reference/TWIDDLE_COMPILER_MIGRATION.md)。
+当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.1 编码，stage 参数默认放入 Bank 5。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
 
 ## 1. 项目结构
 
@@ -58,7 +58,7 @@
 ### 5) 指令编码模块 (`encode`)
 将生成出的 HPU 汇编进一步转译为 32 位机器码文本：
 - **`encode/include/*.hpp`**：定义指令数据结构、解析、编码及组装接口。
-- **`encode/src/*.cpp`**：实现 ASM / C++ 内联汇编解析、格式归一化以及 `custom2` / `custom1` 指令编码。
+- **`encode/src/*.cpp`**：实现 ASM / C++ 内联汇编解析、格式归一化以及 `custom0` / `custom1` 指令编码。
 - **`hpu_encode`**：由 `encode/CMakeLists.txt` 生成的静态库，供后续测试或上层流程复用。
 
 ### 6) 编码测试辅助模块 (`test/encode`)
@@ -351,7 +351,7 @@ BGV 固定 MOD_ID 顺序为 `Q|P|t`；BFV 固定为 `Q|Pks|B|m_sk|t`。`plaintex
 每个包仍按自身真实镜像大小配置 window。BFV reference 还检查
 `log2(B) > 33 + bitlen(t) + bitlen(Q) + ceil(log2(num_q^2))`。small Bank 5 为 32 line，固定范围
 `0x1400..0x141F`，物理可放 512 个 context；`MOD_ID` 编码仍为 8 bit，但当前
-应用软件 ABI 要求 `MOD_ID[7:6]=0`，只使用 0..63。它与 8 个并发对象槽位是两个独立资源。
+应用软件 ABI 要求 `MOD_ID[7:6]=0`，只使用 0..63。它与 64 个并发逻辑对象槽位是两个独立资源。
 
 `hpu_delivery` 会根据该配置生成输入、评估密钥、阶段 golden、最终输出、明文校验
 和 artifact checksum。它同时生成独立的 `uint32` HPU_MEM 镜像、q/Barrett
@@ -401,7 +401,7 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
   `inline-asm` 仍负责汇编生成，`encode` 模块则负责解析、归一化和 32 位编码。两者保留独立边界，但通过同一 CMake 工程统一构建，从而降低汇编语义更新后生成器与编码器失配的风险。
 
 - **11 条指令与对象生命周期：**
-  当前体系结构指令固定为 `padd/psub/pmul/pmac/pntt/pintt/pmodld/pfree/psync/dload/dstore`。旧的 `pshcfg/pshuf/pseed/psample` 已从枚举和编码表移除。临时输入、twiddle 和 small-bank 模表对象会在最后一次使用后生成 `pfree`；当前 RTL 对 `dstore rel=0/1` 都在 DMA 成功后释放对象，不再重复 `pfree`。
+  当前体系结构指令固定为 `padd/psub/pmul/pmac/pntt/pintt/pmodld/pfree/psync/dload/dstore`。旧的 `pshcfg/pshuf/pseed/psample` 已从枚举和编码表移除。临时输入、twiddle 和 small-bank 模表对象会在最后一次使用后生成 `pfree`；`dstore rel=0` 保留对象，`rel=1` 在 DMA 成功后释放，后者不再重复 `pfree`。
 
 - **双输入形式兼容：**
   编码器既可处理纯 ASM body，也可处理带有 `__asm__ volatile(...)` 包装的 C++ 内联汇编文本。对于 `void hpu_xxx(void) {`、`: "memory"`、`);` 等生成边界，解析器会做定向忽略；但非法汇编指令本身仍会被保留为错误。
@@ -414,11 +414,11 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
 调用方需要保证：
 
 - `N` 为 2 的幂且 `128 <= N <= 65536`；下界来自 NTT 的 128-register batch，上界来自普通 bank 的 1024 line
-- ISA 提供 8 个逻辑对象号 `p0..p7`；当前复合算子最多同时使用 `p0..p4`，具体角色见 `doc/reference/HPU_PROGRAMMING_MANUAL.md` 附录 C
+- ISA 提供 64 个逻辑对象号 `p0..p63`；按 128-line 对齐区间共享五个普通 bank，stage 参数默认使用 Bank 5，详见 [Bank 分配指南](doc/reference/HPU_BANK_ALLOCATION_GUIDE.md)
 - 复杂硬件算子（CKKS Rescale、BGV/BFV ModSwitch、BFV BEHZ、PMULT/CMULT/MODUP/MODDOWN）使用 `dload/dstore` 流式搬运，不在本地长期保留多基对象；CKKS/BGV/BFV Encode/Decode 是纯 host API
-- `dload type=2, flag[0]=1` 将模表逻辑对象分配到 small Bank 5；DMA 与后续指令的一致性由硬件维护，可直接使用 `pmodld MOD_ID` 激活表项
-- 每个可编码算子同时生成 `.inst32` 和 `.cmd26`；`cmd26[25]` 区分计算类 custom2 和 DMA 类 custom1，两类指令都直接携带 `inst[31:7]`；custom1 payload 按 `reserved/OBJ_ID/RS2/RS1/TYPE_OR_REL/DIR/reserved/flag` 排列，寄存器值提供 offset/count
-- `psync` 只在完整程序的最后发出，用于通知 CPU 整个 HPU 程序已经完成；不得将其插入算子内部作为 DMA 等待或阶段屏障
+- `dload type=2, bank_mask=0x20` 将模表逻辑对象分配到 small Bank 5；DMA 与后续指令的一致性由硬件维护，可直接使用 `pmodld MOD_ID` 激活表项
+- 每个可编码算子同时生成 `.inst32` 和 `.cmd26`；`cmd26[25]` 区分计算类 custom0 和 DMA 类 custom1，两类指令都直接携带 `inst[31:7]`；custom1 payload 按新六位对象号、拆分的 bank mask、RS2/RS1、TYPE_OR_REL 和 DIR 位段原样传输，寄存器值提供 offset/count
+- 本项目生成器统一在完整程序末尾发一次 `psync`，内部算子由硬件维护依赖；ISA 允许中途等待，`psync` 不释放对象
 - 所有 custom1 指令固定编码 `x10/x11`。可执行 runtime 在每条 DMA 前装入 span 的 HPU_MEM line offset/count；DLOAD 使用两者，DSTORE 的实际长度来自硬件对象表的 `OBJ.len`，软件会校验 span count 与之相等；`auto` 也进入统一编码链路。
 - `cmult`、`keyswitch`、`relinearization`、公共/CKKS/BGV `ciphertext_multiply`、BGV `modswitch` 和两个 BFV hardware kernel 均已进入统一 `.asm -> .inst32/.cmd26` 生成链路。BFV 额外要求 `Q|Pks|B|m_sk|t` 总 context 不超过 64，并满足 B 位宽门禁。
 - `ciphertext_multiply/test_data` 已由软件 reference 自动生成；二进制格式、shape 和校验值见其中的 `params.json` 与 `artifact_manifest.csv`
@@ -436,3 +436,10 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
 逐字定位，不是安全性或噪声预算测试向量。Nexus-AM 的 host 模式只验证 testcase、
 oracle、relocation 和内存边界自洽；目标算术是否通过必须以 RISC-V 路径在目标
 RTL/板级执行后的逐字比对、FAULT/IRQ 状态和外部 monitor 记录为准。
+
+### 64 对象 ISA 迁移
+
+当前目标为 [HPU ISA v1.1](doc/reference/HPU_PROGRAMMING_MANUAL.md)。顶层 Evaluator
+API 不变；旧 `.inst32/.cmd26` 与新硬件不兼容，须重新生成交付包。新包通过
+`memory/abi.json` 标识 ISA、64 个对象与默认 4-line 模表配置。
+[RTL 集成交接](doc/delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md) 说明 CPU/SoC 尚需同步的部分。
