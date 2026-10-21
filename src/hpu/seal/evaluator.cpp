@@ -31,7 +31,7 @@ namespace detail {
 enum class FrontendKind {
     input, scale_view, add, sub, multiply, square, negate,
     add_plain, sub_plain, multiply_plain, relinearize, rescale,
-    mod_switch, rotate_vector, conjugate, apply_galois, rotate_rows, rotate_columns
+    mod_switch, rotate_vector, conjugate, rotate_rows, rotate_columns
 };
 
 struct FrontendValue {
@@ -44,7 +44,6 @@ struct FrontendValue {
     std::vector<std::size_t> inputs;
     std::size_t plain = 0;
     int rotation_steps = 0;
-    std::uint32_t galois_element = 0;
     std::shared_ptr<const ::seal::Ciphertext> imported;
     std::shared_ptr<const ::seal::RelinKeys> relin_keys;
     std::shared_ptr<const ::seal::GaloisKeys> galois_keys;
@@ -69,7 +68,6 @@ struct CompiledFrontend {
     hpu::runtime::HpuMemImage image{1};
     hpu::delivery::ApplicationPackageRequest request;
     std::vector<::seal::Ciphertext> oracles;
-    std::vector<::seal::Ciphertext> software_results;
     std::size_t node_count = 0;
     std::string resource_report;
     bool verified = false;
@@ -207,7 +205,6 @@ std::vector<::seal::Ciphertext> execute_oracle(const State& state)
             case Kind::mod_switch: evaluator.mod_switch_to_next(a, output); break;
             case Kind::rotate_vector: evaluator.rotate_vector(a, value.rotation_steps, *value.galois_keys, output); break;
             case Kind::conjugate: evaluator.complex_conjugate(a, *value.galois_keys, output); break;
-            case Kind::apply_galois: evaluator.apply_galois(a, value.galois_element, *value.galois_keys, output); break;
             case Kind::rotate_rows: evaluator.rotate_rows(a, value.rotation_steps, *value.galois_keys, output); break;
             case Kind::rotate_columns: evaluator.rotate_columns(a, *value.galois_keys, output); break;
             case Kind::input: break;
@@ -232,7 +229,6 @@ std::string level_tag(const ::seal::SEALContext& context, const ::seal::parms_id
 
 std::uint32_t galois_element(const State& state, const Value& value)
 {
-    if (value.kind == Kind::apply_galois) return value.galois_element;
     const auto degree = state.context.key_context_data()->parms().poly_modulus_degree();
     return value.kind == Kind::conjugate || value.kind == Kind::rotate_columns
         ? hpu::scheme::ckks::conjugation_galois_element(degree)
@@ -486,27 +482,6 @@ void Evaluator::rotate_rows(const Ciphertext& a, int steps, const ::seal::Galois
 void Evaluator::rotate_columns(const Ciphertext& a, const ::seal::GaloisKeys& k, Ciphertext& out)
 { rotation(static_cast<int>(Kind::rotate_columns), a, 0, k, out); }
 
-void Evaluator::apply_galois(const Ciphertext& a, std::uint32_t element,
-                             const ::seal::GaloisKeys& keys, Ciphertext& dest)
-{
-    if (scheme(*state_) != ::seal::scheme_type::bfv)
-        throw std::invalid_argument("frontend apply_galois currently requires BFV");
-    const auto degree = state_->context.key_context_data()->parms().poly_modulus_degree();
-    if (element >= 2 * degree || !(element & 1U))
-        throw std::invalid_argument("frontend BFV Galois element is invalid");
-    const auto ai = require(a);
-    Value value = state_->values[ai];
-    require_components(value, 2);
-    if (!keys.has_key(element))
-        throw std::invalid_argument("frontend requested Galois key is missing");
-    value.kind = Kind::apply_galois;
-    value.inputs = {ai};
-    value.galois_element = element;
-    value.galois_keys = intern_key(keys, state_->galois_keys, state_->context);
-    value.imported.reset();
-    dest = Ciphertext(state_, commit(*state_, std::move(value)));
-}
-
 void Evaluator::set_scale(Ciphertext& a, double scale)
 {
     const auto ai = require(a);
@@ -525,7 +500,7 @@ bool requires_twiddles(const State& state)
         switch (value.kind) {
         case Kind::relinearize: case Kind::rescale:
         case Kind::rotate_vector: case Kind::conjugate:
-        case Kind::apply_galois: case Kind::rotate_rows: case Kind::rotate_columns:
+        case Kind::rotate_rows: case Kind::rotate_columns:
             return true;
         case Kind::multiply: case Kind::square: case Kind::multiply_plain:
             if (scheme(state) == ::seal::scheme_type::bfv) return true;
@@ -792,7 +767,7 @@ void compile_bfv(const State& state, const std::string& stem,
                 execute.push_back([a, constants, output](auto& e) { e.mod_switch(a, constants, output); });
                 break;
             }
-            case Kind::apply_galois: case Kind::rotate_rows: case Kind::rotate_columns: {
+            case Kind::rotate_rows: case Kind::rotate_columns: {
                 const auto element = galois_element(state, value);
                 const auto rotation_id = tag + "/element_" + std::to_string(element);
                 const std::string key_id = "frontend/keys/galois_" + key_name(value.galois_keys.get(), state.galois_keys) + '/' + rotation_id;
@@ -805,12 +780,7 @@ void compile_bfv(const State& state, const std::string& stem,
                 });
                 const auto workspace = builder.reserve_ciphertext(value.id + "/workspace", level, 2,
                     hpu::runtime::PolynomialDomain::coefficient, element, hpu::runtime::AllocationKind::workspace);
-                if (value.kind == Kind::apply_galois) {
-                    output = plan.append_apply_galois(step, a, element, key, constants, fused, workspace, value.id);
-                    execute.push_back([a, element, key, constants, fused, workspace, output, &tables](auto& e) {
-                        e.apply_galois(a, element, key, constants, fused, tables, workspace, output);
-                    });
-                } else if (value.kind == Kind::rotate_rows) {
+                if (value.kind == Kind::rotate_rows) {
                     const auto steps = value.rotation_steps;
                     output = plan.append_rotate_rows(step, a, steps, key, constants, fused, workspace, value.id);
                     execute.push_back([a, steps, key, constants, fused, workspace, output, &tables](auto& e) {
@@ -834,35 +804,6 @@ void compile_bfv(const State& state, const std::string& stem,
     builder.trim_capacity_to_used_lines();
     BfvSoftwareExecutor executor(state.context, builder.image());
     for (const auto& task : execute) task(executor);
-    data.software_results.resize(state.values.size());
-    for (std::size_t i = 0; i < state.values.size(); ++i) {
-        const auto& object = prepared.at(i);
-        const auto& metadata = state.values.at(i);
-        auto& result = data.software_results.at(i);
-        result.resize(state.context, object.parms_id, object.components.size());
-        result.is_ntt_form() = false;
-        result.scale() = metadata.scale;
-        result.correction_factor() = metadata.correction_factor;
-        const auto level = state.context.get_context_data(object.parms_id);
-        if (!level) throw std::logic_error("BFV software result has an unknown parms_id");
-        const auto& moduli = level->parms().coeff_modulus();
-        const auto degree = level->parms().poly_modulus_degree();
-        for (std::size_t component = 0; component < object.components.size(); ++component) {
-            const auto exported = executor.export_component(object, component);
-            if (exported.degree != degree || exported.moduli.size() != moduli.size()
-                || exported.words.size() != degree * moduli.size()) {
-                throw std::logic_error("BFV software result has an invalid tensor shape");
-            }
-            for (std::size_t limb = 0; limb < moduli.size(); ++limb) {
-                if (exported.moduli.at(limb) != moduli.at(limb).value())
-                    throw std::logic_error("BFV software result modulus order differs from SEAL");
-                std::copy_n(exported.words.data() + limb * degree, degree,
-                            result.data(component) + limb * degree);
-            }
-        }
-        if (!same_ciphertext(result, data.oracles.at(i)))
-            throw std::runtime_error("BFV software result differs from the independent SEAL oracle");
-    }
     const auto lowered = lower_bfv_operation_plan(plan, state.context);
     const auto relocation = build_bfv_relocation_schedule(lowered, builder.image(), state.context);
     if (!relocation.complete()) throw std::runtime_error("frontend BFV relocation is incomplete");
@@ -1003,13 +944,6 @@ const ::seal::Ciphertext& CompiledApplication::oracle_result(const Ciphertext& v
     if (value.owner_ != data_->owner || value.index_ >= data_->oracles.size())
         throw std::invalid_argument("frontend value does not belong to this compiled snapshot");
     return data_->oracles.at(value.index_);
-}
-const ::seal::Ciphertext& CompiledApplication::software_result(const Ciphertext& value) const
-{
-    if (value.owner_ != data_->owner || value.index_ >= data_->software_results.size())
-        throw std::invalid_argument(
-            "frontend value has no BFV software result in this compiled snapshot");
-    return data_->software_results.at(value.index_);
 }
 std::size_t CompiledApplication::node_count() const noexcept { return data_->node_count; }
 bool CompiledApplication::verified() const noexcept { return data_->verified; }

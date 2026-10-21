@@ -84,8 +84,7 @@ void check_compilations(front::ApplicationBuilder& application,
             require(digit != std::string::npos, "prepared evaluation key lacks digit identity");
             keys.insert(allocation.id.substr(0, digit));
         }
-        const auto expected = baseline.package().scheme == hpu::delivery::SchemeKind::bfv ? 7U : 6U;
-        require(keys.size() == expected, "frontend duplicated or omitted per-level key resources");
+        require(keys.size() == 6, "frontend duplicated or omitted per-level key resources");
     }
     if (emit_directory) baseline.write(*emit_directory);
 }
@@ -171,12 +170,9 @@ void exercise_integer(const seal::SEALContext& context, const std::string& stem)
     seal::RelinKeys relin;
     seal::GaloisKeys galois;
     generator.create_relin_keys(relin);
-    std::vector<std::uint32_t> galois_elements{
+    generator.create_galois_keys(std::vector<std::uint32_t>{
         hpu::scheme::ckks::rotation_galois_element(128, 1),
-        hpu::scheme::ckks::conjugation_galois_element(128)};
-    constexpr std::uint32_t pir_expand_element = 129;
-    if (bfv) galois_elements.push_back(pir_expand_element);
-    generator.create_galois_keys(galois_elements, galois);
+        hpu::scheme::ckks::conjugation_galois_element(128)}, galois);
     seal::BatchEncoder encoder(context);
     seal::Plaintext encoded;
     std::vector<std::uint64_t> slots(128, 2);
@@ -193,8 +189,6 @@ void exercise_integer(const seal::SEALContext& context, const std::string& stem)
     const auto copied_galois = galois;
     evaluator.rotate_rows(x, 1, copied_galois, duplicate_row);
     evaluator.rotate_columns(x, galois, column);
-    front::Ciphertext generic_galois;
-    if (bfv) evaluator.apply_galois(x, pir_expand_element, galois, generic_galois);
     evaluator.add(row, column, mixed);
     evaluator.sub(mixed, duplicate_row, difference);
     if (bfv) evaluator.negate_inplace(difference);

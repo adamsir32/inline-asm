@@ -1,10 +1,8 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <vector>
 
 namespace seal {
@@ -21,9 +19,6 @@ struct BfvContextSpec {
     // B/m_sk base, so Q/P are restricted to at most 31 bits.
     std::vector<int> coeff_modulus_bits;
     int plain_modulus_bits = 17;
-    // Optional deterministic SEAL randomness for reproducible application
-    // packages. Production callers should normally leave this unset.
-    std::optional<std::array<std::uint64_t, 8>> random_seed;
 };
 
 struct BfvContextBundle {

@@ -17,7 +17,7 @@ Cuckoo Hash、传输协议和标签处理，以及 SealPIR 的网络序列化，
   <https://poseidon-hpu.readthedocs.io/en/latest/Benchmark/Application/PSI/>
 - Poseidon 历史提交 `e3bc579` 的 HEDAG 产物记录了未公开提交的原始路径
   `Trident/pir_bfv/pir_server.cpp` 和 `Trident/apsi/...`，以及
-  `apply_galois`、`multiply_plain`、`add`、`square/multiply`、`relinearize`、
+  Galois automorphism、`multiply_plain`、`add`、`square/multiply`、`relinearize`、
   `drop_modulus` 等调用。
 - PIR 的可恢复实现与小测试来自 SealPIR：
   <https://github.com/microsoft/SealPIR>
@@ -48,7 +48,8 @@ Cuckoo Hash、传输协议和标签处理，以及 SealPIR 的网络序列化，
 | 实际数据库明文数 | 59 |
 | 一维补齐后的查询长度 | 60 |
 
-查询展开逐层执行 SealPIR 的通用 `ApplyGalois`、加法、乘 `X^k` 和加法；随后对 60 个
+查询展开把 SealPIR 的 Galois 元素在应用内换算为行旋转步数，逐层执行既有
+`rotate_rows`、加法、乘 `X^k` 和加法；随后对 60 个
 展开密文执行数据库 `MultiplyPlain` 与归约 `Add`。解密后按 SealPIR 的 20-bit 字节拆分
 规则恢复完整 288 字节记录，而不只检查一个数值。
 

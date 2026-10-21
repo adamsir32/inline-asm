@@ -40,8 +40,6 @@ int main()
         spec.poly_modulus_degree = 4096;
         spec.coeff_modulus_bits = {30, 30, 30, 30, 30};
         spec.plain_modulus_bits = 17;
-        spec.random_seed = std::array<std::uint64_t, 8>{
-            0x5345414c504952ULL, 1, 2, 3, 4, 5, 6, 7};
 
         const auto bundle = hpu::seal_adapter::create_bfv_context(spec);
         const hpu::seal_adapter::BfvLevelChain chain(*bundle.context);

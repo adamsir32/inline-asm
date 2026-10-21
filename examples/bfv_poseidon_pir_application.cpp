@@ -103,6 +103,22 @@ std::size_t integer_log2_ceil(std::size_t value)
     return result;
 }
 
+int rotate_rows_steps_for_galois_element(std::size_t degree,
+                                         std::uint32_t galois_element)
+{
+    require(degree && !(degree & (degree - 1)),
+            "BFV row rotation requires a power-of-two degree");
+    const auto mask = static_cast<std::uint32_t>(2 * degree - 1);
+    std::uint32_t candidate = 1;
+    for (std::size_t steps = 1; steps < degree / 2; ++steps) {
+        candidate = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(candidate) * 3) & mask);
+        if (candidate == galois_element) return static_cast<int>(steps);
+    }
+    throw std::invalid_argument(
+        "SealPIR Galois element is not representable by the existing BFV rotate_rows API");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -214,8 +230,10 @@ int main(int argc, char** argv)
         std::vector<hpu::seal_adapter::Ciphertext> expanded{
             app.import_ciphertext("input/compressed_query", encrypted_query)};
 
-        // Faithful translation of SealPIR/Poseidon PIRServer::expand_query:
-        // ApplyGalois, two additions, and two negacyclic X-power shifts.
+        // Faithful translation of SealPIR/Poseidon PIRServer::expand_query.
+        // Its Galois elements belong to BFV's row-rotation subgroup, so the
+        // application maps them to steps and uses the original public
+        // rotate_rows API instead of requiring an arbitrary-automorphism API.
         for (std::size_t level = 0; level < logm; ++level) {
             const auto old_size = expanded.size();
             std::vector<hpu::seal_adapter::Ciphertext> next(old_size * 2);
@@ -231,7 +249,10 @@ int main(int argc, char** argv)
                     continue;
                 }
                 hpu::seal_adapter::Ciphertext rotated;
-                evaluator.apply_galois(expanded[a], element, galois_keys, rotated);
+                evaluator.rotate_rows(
+                    expanded[a],
+                    rotate_rows_steps_for_galois_element(kDegree, element),
+                    galois_keys, rotated);
                 evaluator.add(expanded[a], rotated, next[a]);
                 auto left_shifted = multiply_monomial(expanded[a], raw);
                 auto right_shifted = multiply_monomial(rotated, shifted);
@@ -251,6 +272,10 @@ int main(int argc, char** argv)
         app.mark_output("pir_reply", reply);
         const auto compiled = app.compile(
             delivery_artifact_stem("bfv_poseidon_pir_application", options.delivery), options.compiler);
+        require(compiled.verified(),
+                "PIR HPU software execution did not match the SEAL oracle coefficients");
+        require(compiled.instruction_verified(),
+                "PIR encoded instruction model verification failed");
 
         ::seal::Plaintext decrypted;
         ::seal::Decryptor(context, keygen.secret_key()).decrypt(compiled.oracle_result(reply), decrypted);

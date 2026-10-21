@@ -2,7 +2,6 @@
 
 #include <seal/seal.h>
 
-#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -55,12 +54,6 @@ BfvContextBundle create_bfv_context(const BfvContextSpec& spec)
         spec.poly_modulus_degree, spec.coeff_modulus_bits));
     parameters.set_plain_modulus(::seal::PlainModulus::Batching(
         spec.poly_modulus_degree, spec.plain_modulus_bits));
-    if (spec.random_seed) {
-        ::seal::prng_seed_type seed{};
-        std::copy(spec.random_seed->begin(), spec.random_seed->end(), seed.begin());
-        parameters.set_random_generator(
-            std::make_shared<::seal::Blake2xbPRNGFactory>(seed));
-    }
 
     auto context = std::make_shared<::seal::SEALContext>(
         std::move(parameters), true, ::seal::sec_level_type::none);

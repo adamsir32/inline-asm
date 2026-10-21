@@ -94,8 +94,10 @@ MultiplyPlain、Add/AddPlain、普通或 PS 求值以及全部 required ModSwitc
 三分量 Add、Codegen、Relocation 或软件执行器能力。
 
 `ApplicationBuilder::compile` 对图中**每个节点**运行独立 SEAL oracle 和 HPU
-BFV software executor，并逐 RNS 系数比较。客户端恢复只读取
-`compiled.software_result`，不会拿 `oracle_result` 冒充 HPU 输出。
+BFV software executor，并逐 RNS 系数比较。原始公共 API 不暴露软件执行器内存；
+客户端只有在 `compiled.verified()` 和 `compiled.instruction_verified()` 都为真后，才把
+`compiled.oracle_result()` 作为与 HPU 软件结果逐系数一致的代理密文继续解密。
+这不等同于真实硬件输出，报告中仍明确标为软件与指令模型验证。
 
 ## 5. 构建、测试和交付
 

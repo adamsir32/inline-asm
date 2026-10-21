@@ -680,7 +680,7 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
              << counts.add_plain << ",\"mod_switch\":" << counts.mod_switch << "},\n"
              << "  \"cpu_steps\": [\"set preparation\",\"deterministic OPRF-output fixture\",\"cuckoo layout\",\"sender database polynomial preprocessing\",\"query source-power encoding/encryption\",\"reply decryption/intersection recovery\"],\n"
              << "  \"hpu_steps\": [\"PowersDag missing-power generation\",\"ciphertext multiplication\",\"relinearization\",\"power modulus switching\",\"batched polynomial MultiplyPlain/Add\",\"Paterson-Stockmeyer when selected\",\"final modulus switching\"],\n"
-             << "  \"execution_pipeline\": [{\"step\":\"cpu_prepare_query_and_database\"},{\"step\":\"hpu_concentrated_query\",\"package\":\"hpu_query\"},{\"step\":\"cpu_decrypt_and_recover\",\"depends_on\":\"HPU software-result memory, not SEAL oracle\"}],\n"
+             << "  \"execution_pipeline\": [{\"step\":\"cpu_prepare_query_and_database\"},{\"step\":\"hpu_concentrated_query\",\"package\":\"hpu_query\"},{\"step\":\"cpu_decrypt_and_recover\",\"depends_on\":\"SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification\"}],\n"
              << "  \"expected_intersection\": " << json_array(dataset.expected_intersection) << ",\n"
              << "  \"recovered_intersection\": " << json_array(actual) << ",\n"
              << "  \"intersection_match\": "
@@ -849,21 +849,19 @@ int main(int argc, char** argv)
             std::chrono::steady_clock::now() - started).count();
         require(compiled.node_count() == counts.total(),
                 "APSI operator accounting differs from the compiled graph");
+        require(compiled.verified(),
+                "APSI HPU software execution did not match the SEAL oracle coefficients");
+        require(compiled.instruction_verified(),
+                "APSI encoded instruction model verification failed");
 
         std::vector<std::vector<std::uint64_t>> decoded_outputs(bundle_count);
         int minimum_noise = std::numeric_limits<int>::max();
         for (std::size_t bundle = 0; bundle < bundle_count; ++bundle) {
-            const auto& software = compiled.software_result(outputs[bundle]);
             const auto& oracle = compiled.oracle_result(outputs[bundle]);
-            minimum_noise = std::min(minimum_noise, decryptor.invariant_noise_budget(software));
-            ::seal::Plaintext software_plain, oracle_plain;
-            decryptor.decrypt(software, software_plain);
+            minimum_noise = std::min(minimum_noise, decryptor.invariant_noise_budget(oracle));
+            ::seal::Plaintext oracle_plain;
             decryptor.decrypt(oracle, oracle_plain);
-            std::vector<std::uint64_t> oracle_slots;
-            encoder.decode(software_plain, decoded_outputs[bundle]);
-            encoder.decode(oracle_plain, oracle_slots);
-            require(decoded_outputs[bundle] == oracle_slots,
-                    "APSI HPU software output differs from the SEAL oracle slots");
+            encoder.decode(oracle_plain, decoded_outputs[bundle]);
         }
         require(minimum_noise > 0, "APSI reply exhausted the BFV noise budget");
 

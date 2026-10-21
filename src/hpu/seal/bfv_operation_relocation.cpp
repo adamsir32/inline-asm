@@ -884,7 +884,6 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
             bind_mod_switch(bindings, step, level,
                             level_chain.require(step.output.metadata.parms_id));
             break;
-        case BfvOperationKind::apply_galois:
         case BfvOperationKind::rotate_rows:
         case BfvOperationKind::rotate_columns:
             bind_bfv_galois(bindings, step, level, degree);

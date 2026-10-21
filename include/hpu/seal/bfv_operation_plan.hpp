@@ -21,7 +21,6 @@ enum class BfvOperationKind {
     multiply_plain,
     negate,
     mod_switch,
-    apply_galois,
     rotate_rows,
     rotate_columns
 };
@@ -102,15 +101,6 @@ public:
     PreparedBfvRnsObject append_rotate_rows(
         std::string step_id, const PreparedBfvRnsObject& ciphertext, int steps,
         const PreparedEvaluationKey& galois_key,
-        const PreparedKeySwitchConstants& keyswitch_constants,
-        const std::vector<PreparedFusedAutomorphismTwiddles>& fused_twiddles,
-        const PreparedBfvRnsObject& coefficient_workspace, std::string output_id);
-    // Applies an arbitrary odd automorphism X -> X^g. SealPIR query
-    // expansion needs this more general primitive; batching rotations are
-    // convenience wrappers around the same HPU operation.
-    PreparedBfvRnsObject append_apply_galois(
-        std::string step_id, const PreparedBfvRnsObject& ciphertext,
-        std::uint32_t galois_element, const PreparedEvaluationKey& galois_key,
         const PreparedKeySwitchConstants& keyswitch_constants,
         const std::vector<PreparedFusedAutomorphismTwiddles>& fused_twiddles,
         const PreparedBfvRnsObject& coefficient_workspace, std::string output_id);

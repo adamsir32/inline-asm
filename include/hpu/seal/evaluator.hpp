@@ -80,10 +80,6 @@ public:
     const hpu::delivery::ApplicationPackageRequest& package() const;
     hpu::delivery::ApplicationPackageReport write(const std::filesystem::path& directory) const;
     const ::seal::Ciphertext& oracle_result(const Ciphertext& value) const;
-    // Returns the native SEAL ciphertext reconstructed from the BFV software
-    // executor's final memory, rather than from the independent SEAL oracle.
-    // This is intended for chaining separately compiled HPU stages.
-    const ::seal::Ciphertext& software_result(const Ciphertext& value) const;
     std::size_t node_count() const noexcept;
     // SEAL metadata and every functional SoftwareExecutor output word passed.
     // Encoded instruction diagnostics have a separate status below.
@@ -131,9 +127,6 @@ public:
     void relinearize(const Ciphertext&, const ::seal::RelinKeys&, Ciphertext& destination);
     void rescale_to_next(const Ciphertext&, Ciphertext& destination);
     void mod_switch_to_next(const Ciphertext&, Ciphertext& destination);
-    // BFV coefficient-domain automorphism used by SealPIR query expansion.
-    void apply_galois(const Ciphertext&, std::uint32_t galois_element,
-                      const ::seal::GaloisKeys&, Ciphertext& destination);
     void rotate_vector(const Ciphertext&, int steps, const ::seal::GaloisKeys&, Ciphertext& destination);
     void complex_conjugate(const Ciphertext&, const ::seal::GaloisKeys&, Ciphertext& destination);
     void rotate_rows(const Ciphertext&, int steps, const ::seal::GaloisKeys&, Ciphertext& destination);
@@ -151,7 +144,6 @@ public:
     void relinearize_inplace(Ciphertext& a, const ::seal::RelinKeys& k) { relinearize(a, k, a); }
     void rescale_to_next_inplace(Ciphertext& a) { rescale_to_next(a, a); }
     void mod_switch_to_next_inplace(Ciphertext& a) { mod_switch_to_next(a, a); }
-    void apply_galois_inplace(Ciphertext& a, std::uint32_t e, const ::seal::GaloisKeys& k) { apply_galois(a, e, k, a); }
     void rotate_vector_inplace(Ciphertext& a, int s, const ::seal::GaloisKeys& k) { rotate_vector(a, s, k, a); }
     void complex_conjugate_inplace(Ciphertext& a, const ::seal::GaloisKeys& k) { complex_conjugate(a, k, a); }
     void rotate_rows_inplace(Ciphertext& a, int s, const ::seal::GaloisKeys& k) { rotate_rows(a, s, k, a); }

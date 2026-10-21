@@ -50,13 +50,6 @@ public:
                         const std::vector<PreparedCanonicalTwiddles>& tables,
                         const PreparedBfvRnsObject& output);
     void negate(const PreparedBfvRnsObject& ciphertext, const PreparedBfvRnsObject& output);
-    void apply_galois(const PreparedBfvRnsObject& input, std::uint32_t galois_element,
-                      const PreparedEvaluationKey& galois_key,
-                      const PreparedKeySwitchConstants& keyswitch_constants,
-                      const std::vector<PreparedFusedAutomorphismTwiddles>& fused_tables,
-                      const std::vector<PreparedCanonicalTwiddles>& canonical_tables,
-                      const PreparedBfvRnsObject& coefficient_workspace,
-                      const PreparedBfvRnsObject& output);
     void rotate_rows(const PreparedBfvRnsObject& input, int steps,
                      const PreparedEvaluationKey& galois_key,
                      const PreparedKeySwitchConstants& keyswitch_constants,

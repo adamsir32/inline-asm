@@ -398,22 +398,25 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
   BFV 固定使用 `Q|Pks|B|m_sk|t`。输入先执行不带 `m_tilde/SmMRq` 的 `Q -> Bsk` FastBConv，再在 Q/Bsk 下做 tensor product、FastFloor 和 branchless-SK；校正为 `out=y+alpha*(-B) mod Q`。三分量 Q 结果写回统一 HPU_MEM 后立即由同一指令流执行 Q/Pks Relinearization，中间没有 `psync`、host copy 或 window 切换，完整流只有末尾一个 `psync`。默认统一镜像为 30913 line，低于配置的 65536-line 上限。BFV ModSwitch 仍是独立算子，复用 `round(c/q_last)`。
 
 - **SealPIR 二维递归应用：**
-  `hpu_bfv_sealpir_2d_example` 保留原有二维分片实现；
-  `hpu_bfv_sealpir_2d_concentrated_example` 新增每个递归阶段一张大图的两包实现。二者均提供 128 条的 4×4 快速回归和
-  65536 条的 86×85 完整配置。两个查询维度的展开、点积及模数切换都生成 HPU 指令；
-  CPU 只负责客户端、BatchEncoder 和递归分解/重组。第二轮读取第一轮 HPU 软件执行器
-  内存重建的实际密文，不使用 SEAL oracle 代替。参数差异、命令和 ST 产物见
-  [二维 SealPIR HPU 应用](doc/examples/SEALPIR_2D_HPU_APPLICATION.md)。
+  `hpu_bfv_sealpir_2d_concentrated_example` 对每个递归阶段各生成一张大图，共两个应用包。
+  应用提供 128 条的 4×4 快速回归和 65536 条的 86×85 完整配置。两个查询维度的展开、
+  点积及模数切换都生成 HPU 指令；CPU 只负责客户端、BatchEncoder 和递归分解/重组。
+  阶段边界只在功能软件执行和编码指令模型均验证通过后使用逐系数一致的 SEAL oracle
+  代理密文；真实 HPU/RTL 尚未验证。参数差异、命令和 ST 产物见
+  [二维 SealPIR HPU 应用](doc/examples/SEALPIR_2D_HPU_APPLICATION.md)，公共底层恢复证明见
+  [PIR/PSI 原始 HPU 差异审计](doc/examples/PIR_PSI_ORIGINAL_HPU_DIFF_AUDIT.md)。
 
 - **APSI 无标签 PSI 集中式应用：**
   `hpu_bfv_apsi_concentrated_example` 保留旧简化 PSI，另行实现 APSI 风格的 CPU
   OPRF-output fixture、Cuckoo 布局、sender 多位置分桶、batch polynomial、真正的
   source-power 查询、HPU `PowersDag`、普通/Paterson–Stockmeyer 求值、重线性化和
-  ModSwitch。所有 bundle 合并为一个 HPU 应用包，客户端仅从 HPU 软件执行结果恢复
-  交集。范围、参数差异、验证命令与安全边界见
+  ModSwitch。所有 bundle 合并为一个 HPU 应用包；客户端只在软件执行与指令模型验证
+  均通过后从逐系数一致的 oracle 代理结果恢复交集。范围、参数差异、验证命令与安全边界见
   [APSI 无标签 PSI 集中式 HPU 应用](doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md)，
-  底层零改动证明见
-  [Git diff 审核报告](doc/examples/APSI_CONCENTRATED_HPU_DIFF_AUDIT.md)。
+  APSI 局部重构记录见
+  [Git diff 审核报告](doc/examples/APSI_CONCENTRATED_HPU_DIFF_AUDIT.md)，以最初应用开发前
+  基线为准的最终证明见
+  [PIR/PSI 原始 HPU 差异审计](doc/examples/PIR_PSI_ORIGINAL_HPU_DIFF_AUDIT.md)。
 
 - **生成与编码分层解耦：**
   `inline-asm` 仍负责汇编生成，`encode` 模块则负责解析、归一化和 32 位编码。两者保留独立边界，但通过同一 CMake 工程统一构建，从而降低汇编语义更新后生成器与编码器失配的风险。

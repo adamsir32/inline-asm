@@ -1,24 +1,20 @@
 #include "evaluator_application.hpp"
-#include "sealpir_2d_application.hpp"
-
-#include "hpu/seal/bfv_context.hpp"
 
 #include <seal/seal.h>
 #include <seal/util/numth.h>
 
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -36,14 +32,11 @@ struct Profile {
     std::string name;
     std::size_t element_count;
     std::size_t default_target;
-    std::size_t dot_shard_outputs;
 };
 
 struct Options {
     Profile profile;
     std::size_t target = 0;
-    bool concentrated = false;
-    std::size_t assessment_output_count = 0;
     evaluator_example::Options evaluator;
 };
 
@@ -71,13 +64,11 @@ std::size_t parse_size(const std::string& text, const char* option)
     return static_cast<std::size_t>(value);
 }
 
-Options parse_options(int argc, char** argv, bool concentrated_default)
+Options parse_options(int argc, char** argv)
 {
-    Profile profile{"small", 128, 0, 4};
+    Profile profile{"small", 128, 0};
     bool target_set = false;
     std::size_t target = 0;
-    std::size_t requested_shard_outputs = 0;
-    std::size_t assessment_output_count = 0;
     bool force_resource_optimization = false;
     std::vector<char*> remaining{argv[0]};
     for (int i = 1; i < argc; ++i) {
@@ -85,42 +76,27 @@ Options parse_options(int argc, char** argv, bool concentrated_default)
         if (argument == "--profile") {
             if (++i >= argc) throw std::invalid_argument("--profile requires small or full");
             const std::string value(argv[i]);
-            if (value == "small") profile = {"small", 128, 0, 4};
-            else if (value == "full") profile = {"full", 65536, 65535, 1};
+            if (value == "small") profile = {"small", 128, 0};
+            else if (value == "full") profile = {"full", 65536, 65535};
             else throw std::invalid_argument("--profile must be small or full");
         } else if (argument == "--record-index") {
             if (++i >= argc) throw std::invalid_argument("--record-index requires a value");
             target = parse_size(argv[i], "--record-index");
             target_set = true;
-        } else if (argument == "--dot-shard-outputs") {
-            if (++i >= argc) throw std::invalid_argument("--dot-shard-outputs requires a value");
-            requested_shard_outputs = parse_size(argv[i], "--dot-shard-outputs");
-            if (!requested_shard_outputs)
-                throw std::invalid_argument("--dot-shard-outputs must be positive");
-        } else if (argument == "--assessment-output-count") {
-            if (++i >= argc)
-                throw std::invalid_argument("--assessment-output-count requires a value");
-            assessment_output_count = parse_size(argv[i], "--assessment-output-count");
-            if (!assessment_output_count)
-                throw std::invalid_argument("--assessment-output-count must be positive");
         } else if (argument == "--optimize-resources") {
             force_resource_optimization = true;
         } else {
             remaining.push_back(argv[i]);
         }
     }
-    if (requested_shard_outputs) profile.dot_shard_outputs = requested_shard_outputs;
-    else if (concentrated_default)
-        profile.dot_shard_outputs = std::numeric_limits<std::size_t>::max();
     if (!target_set) target = profile.default_target;
     if (target >= profile.element_count)
         throw std::invalid_argument("--record-index is outside the selected profile");
     auto evaluator = evaluator_example::options(
         static_cast<int>(remaining.size()), remaining.data());
-    if (concentrated_default && !force_resource_optimization)
+    if (!force_resource_optimization)
         evaluator.compiler.optimize_resources = false;
-    return {profile, target, concentrated_default, assessment_output_count,
-            std::move(evaluator)};
+    return {profile, target, std::move(evaluator)};
 }
 
 std::size_t integer_log2_ceil(std::size_t value)
@@ -128,6 +104,36 @@ std::size_t integer_log2_ceil(std::size_t value)
     std::size_t result = 0;
     for (std::size_t power = 1; power < value; power <<= 1) ++result;
     return result;
+}
+
+int rotate_rows_steps_for_galois_element(std::size_t degree,
+                                         std::uint32_t galois_element)
+{
+    require(degree && !(degree & (degree - 1)),
+            "BFV row rotation requires a power-of-two degree");
+    const auto mask = static_cast<std::uint32_t>(2 * degree - 1);
+    std::uint32_t candidate = 1;
+    for (std::size_t steps = 1; steps < degree / 2; ++steps) {
+        candidate = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(candidate) * 3) & mask);
+        if (candidate == galois_element) return static_cast<int>(steps);
+    }
+    throw std::invalid_argument(
+        "SealPIR Galois element is not representable by the existing BFV rotate_rows API");
+}
+
+const ::seal::Ciphertext& verified_oracle_result(
+    const hpu::seal_adapter::CompiledApplication& compiled,
+    const hpu::seal_adapter::Ciphertext& value)
+{
+    require(compiled.verified(),
+            "HPU software execution did not match the SEAL oracle coefficients");
+    require(compiled.instruction_verified(),
+            "HPU encoded instruction model verification failed");
+    // The original public API exposes only the oracle ciphertext. It is safe
+    // as a stage-boundary proxy here because compile() has already compared
+    // every software-executor output coefficient against this oracle.
+    return compiled.oracle_result(value);
 }
 
 std::vector<std::size_t> dimensions(std::size_t plaintext_count)
@@ -336,7 +342,10 @@ std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
                 continue;
             }
             hpu::seal_adapter::Ciphertext rotated;
-            evaluator.apply_galois(expanded[index], element, galois_keys, rotated);
+            evaluator.rotate_rows(
+                expanded[index],
+                rotate_rows_steps_for_galois_element(kDegree, element),
+                galois_keys, rotated);
             evaluator.add(expanded[index], rotated, next[index]);
             auto left = multiply_power_of_x(expanded[index], raw);
             auto right = multiply_power_of_x(rotated, shifted);
@@ -376,70 +385,6 @@ std::vector<hpu::seal_adapter::Ciphertext> record_dot_product_range(
     return outputs;
 }
 
-std::vector<::seal::Ciphertext> expand_query_hpu(
-    const Options& options, const ::seal::SEALContext& context,
-    const ::seal::Ciphertext& encrypted, std::size_t count,
-    const ::seal::GaloisKeys& galois_keys, const std::string& stage,
-    std::vector<StageStats>& stats)
-{
-    hpu::seal_adapter::ApplicationBuilder app(context);
-    auto evaluator = app.evaluator();
-    auto expanded = record_expand_query(app, evaluator, encrypted, count, galois_keys);
-    for (std::size_t i = 0; i < expanded.size(); ++i)
-        app.mark_output("expanded_" + std::to_string(i), expanded[i]);
-    const auto stem = "bfv_sealpir_2d_" + options.profile.name + '_' + stage;
-    const auto compiled = app.compile(stem, options.evaluator.compiler);
-    const auto directory = stage + "_expand";
-    maybe_write(options, directory, compiled);
-    stats.push_back(package_stats(stage + " query expansion", directory, compiled));
-    std::vector<::seal::Ciphertext> actual;
-    actual.reserve(expanded.size());
-    for (const auto& value : expanded)
-        actual.push_back(compiled.software_result(value));
-    return actual;
-}
-
-std::vector<::seal::Ciphertext> dot_product_hpu(
-    const Options& options, const ::seal::SEALContext& context,
-    const std::vector<::seal::Ciphertext>& expanded,
-    const std::vector<::seal::Plaintext>& database, std::size_t output_count,
-    bool mod_switch, const std::string& stage, std::vector<StageStats>& stats)
-{
-    require(database.size() == expanded.size() * output_count,
-            stage + " matrix shape is inconsistent");
-    std::vector<::seal::Ciphertext> actual(output_count);
-    std::size_t shard_number = 0;
-    for (std::size_t begin = 0; begin < output_count;
-         begin += options.profile.dot_shard_outputs, ++shard_number) {
-        const auto end = std::min(output_count, begin + options.profile.dot_shard_outputs);
-        hpu::seal_adapter::ApplicationBuilder app(context);
-        auto evaluator = app.evaluator();
-        std::vector<hpu::seal_adapter::Ciphertext> query;
-        query.reserve(expanded.size());
-        for (std::size_t j = 0; j < expanded.size(); ++j)
-            query.push_back(app.import_ciphertext(
-                "input/query_" + std::to_string(j), expanded[j]));
-        auto outputs = record_dot_product_range(
-            app, evaluator, query, database, output_count, begin, end, mod_switch);
-        for (std::size_t local = 0; local < outputs.size(); ++local) {
-            const auto k = begin + local;
-            auto& sum = outputs[local];
-            app.mark_output("reply_" + std::to_string(k), sum);
-        }
-        std::ostringstream suffix;
-        suffix << stage << "_dot_shard_" << std::setw(3) << std::setfill('0') << shard_number;
-        const auto directory = suffix.str();
-        const auto compiled = app.compile(
-            "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
-            options.evaluator.compiler);
-        maybe_write(options, directory, compiled);
-        stats.push_back(package_stats(stage + " dot-product shard", directory, compiled));
-        for (std::size_t local = 0; local < outputs.size(); ++local)
-            actual[begin + local] = compiled.software_result(outputs[local]);
-    }
-    return actual;
-}
-
 std::vector<::seal::Ciphertext> concentrated_stage_hpu(
     const Options& options, const ::seal::SEALContext& context,
     const ::seal::Ciphertext& encrypted_query, std::size_t query_count,
@@ -449,31 +394,24 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
 {
     require(database.size() == query_count * output_count,
             stage + " concentrated matrix shape is inconsistent");
-    std::vector<::seal::Ciphertext> actual(output_count);
-    std::size_t shard_number = 0;
-    for (std::size_t begin = 0; begin < output_count;
-         begin += options.profile.dot_shard_outputs, ++shard_number) {
-        const auto end = std::min(output_count, begin + options.profile.dot_shard_outputs);
-        hpu::seal_adapter::ApplicationBuilder app(context);
-        auto evaluator = app.evaluator();
-        const auto expanded = record_expand_query(
-            app, evaluator, encrypted_query, query_count, galois_keys);
-        auto outputs = record_dot_product_range(
-            app, evaluator, expanded, database, output_count, begin, end, mod_switch);
-        for (std::size_t local = 0; local < outputs.size(); ++local)
-            app.mark_output("reply_" + std::to_string(begin + local), outputs[local]);
-        std::ostringstream suffix;
-        suffix << stage << "_concentrated_" << std::setw(3) << std::setfill('0')
-               << shard_number;
-        const auto directory = suffix.str();
-        const auto compiled = app.compile(
-            "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
-            options.evaluator.compiler);
-        maybe_write(options, directory, compiled);
-        stats.push_back(package_stats(stage + " concentrated shard", directory, compiled));
-        for (std::size_t local = 0; local < outputs.size(); ++local)
-            actual[begin + local] = compiled.software_result(outputs[local]);
-    }
+    hpu::seal_adapter::ApplicationBuilder app(context);
+    auto evaluator = app.evaluator();
+    const auto expanded = record_expand_query(
+        app, evaluator, encrypted_query, query_count, galois_keys);
+    auto outputs = record_dot_product_range(
+        app, evaluator, expanded, database, output_count, 0, output_count, mod_switch);
+    for (std::size_t index = 0; index < outputs.size(); ++index)
+        app.mark_output("reply_" + std::to_string(index), outputs[index]);
+    const auto directory = stage + "_concentrated_000";
+    const auto compiled = app.compile(
+        "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
+        options.evaluator.compiler);
+    maybe_write(options, directory, compiled);
+    stats.push_back(package_stats(stage + " concentrated", directory, compiled));
+    std::vector<::seal::Ciphertext> actual;
+    actual.reserve(outputs.size());
+    for (const auto& output : outputs)
+        actual.push_back(verified_oracle_result(compiled, output));
     return actual;
 }
 
@@ -636,20 +574,20 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"first_stage_decomposed_plaintexts\": " << decomposition_count << ",\n"
              << "  \"first_stage_min_noise_budget_bits\": " << first_noise << ",\n"
              << "  \"final_stage_min_noise_budget_bits\": " << final_noise << ",\n"
-             << "  \"cross_stage_source\": \"BFV software executor memory (not SEAL oracle)\",\n"
+             << "  \"cross_stage_source\": \"SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification\",\n"
              << "  \"package_strategy\": \""
-             << (options.concentrated ? "concentrated recursive stages" : "split expansion and dot products")
+             << "concentrated recursive stages"
              << "\",\n"
-             << "  \"cpu_interstage_step\": \"decompose stage0 software-result ciphertexts into plaintext chunks\",\n"
+             << "  \"cpu_interstage_step\": \"decompose the stage0 verified-oracle proxy into plaintext chunks\",\n"
              << "  \"resource_optimization\": "
              << (options.evaluator.compiler.optimize_resources ? "true" : "false") << ",\n"
              << "  \"semantic_record_match\": " << (expected == actual ? "true" : "false") << ",\n"
              << "  \"real_hardware_verified\": false,\n"
              << "  \"execution_pipeline\": [\n"
              << "    {\"step\": \"hpu_stage0\", \"produces\": \"first-dimensional ciphertext replies\"},\n"
-             << "    {\"step\": \"cpu_decompose\", \"depends_on\": \"hpu_stage0 software-result memory\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
+             << "    {\"step\": \"cpu_decompose\", \"depends_on\": \"stage0 oracle proxy after exact HPU software verification\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
              << "    {\"step\": \"hpu_stage1\", \"depends_on\": \"cpu_decompose output plus second compressed query\", \"produces\": \"recursive PIR reply\"},\n"
-             << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"hpu_stage1 software-result memory\", \"produces\": \"recovered 1024-byte record\"}\n"
+             << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"stage1 oracle proxy after exact HPU software verification\", \"produces\": \"recovered 1024-byte record\"}\n"
              << "  ],\n"
              << "  \"packages\": [\n";
     for (std::size_t i = 0; i < stats.size(); ++i) {
@@ -666,9 +604,7 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
     manifest << "  ]\n}\n";
     std::ofstream commands(root / "README.txt");
     commands << "Generated by:\n"
-             << "  " << (options.concentrated
-                    ? "hpu_bfv_sealpir_2d_concentrated_example"
-                    : "hpu_bfv_sealpir_2d_example")
+             << "  hpu_bfv_sealpir_2d_concentrated_example"
              << " --profile " << options.profile.name
              << " --record-index " << options.target << " --emit-dir " << root.string() << "\n\n"
              << "The executable is the unified pipeline runner: it executes stage0,\n"
@@ -683,27 +619,41 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
 
 namespace sealpir_2d {
 
-int run(int argc, char** argv, bool concentrated_default)
+int run(int argc, char** argv)
 {
     try {
-        const auto options = parse_options(argc, argv, concentrated_default);
+        const auto options = parse_options(argc, argv);
         if (options.evaluator.delivery.poly_modulus_degree
             && *options.evaluator.delivery.poly_modulus_degree != kDegree)
             throw std::invalid_argument("SealPIR 2D fixes --degree to N=4096");
 
-        hpu::seal_adapter::BfvContextSpec spec;
-        spec.poly_modulus_degree = kDegree;
         // SealPIR's BFVDefault(4096) primes are 36/36/37 bits. A single
         // 31-bit recursive Q exhausts its budget for the 86-term full dot
         // product, so use three data Qs plus P and switch once to a two-Q
-        // recursive level. Modulus switching and both recursion rounds remain.
-        spec.coeff_modulus_bits = {31, 31, 31, 31};
-        spec.plain_modulus_bits = 21;
-        spec.random_seed = std::array<std::uint64_t, 8>{
+        // recursive level. Build this deterministic application context with
+        // SEAL's own public API; no HPU context extension is needed.
+        ::seal::EncryptionParameters parameters(::seal::scheme_type::bfv);
+        parameters.set_poly_modulus_degree(kDegree);
+        parameters.set_coeff_modulus(
+            ::seal::CoeffModulus::Create(kDegree, {31, 31, 31, 31}));
+        parameters.set_plain_modulus(::seal::PlainModulus::Batching(kDegree, 21));
+        ::seal::prng_seed_type seed{};
+        const std::array<std::uint64_t, 8> seed_words{
             kDatabaseSeed, 1, 2, 3, 4, 5, 6, 7};
-        const auto bundle = hpu::seal_adapter::create_bfv_context(spec);
-        const auto& context = *bundle.context;
-        require(static_cast<std::uint32_t>(std::floor(std::log2(bundle.plain_modulus)))
+        std::copy(seed_words.begin(), seed_words.end(), seed.begin());
+        parameters.set_random_generator(
+            std::make_shared<::seal::Blake2xbPRNGFactory>(seed));
+        const auto context_pointer = std::make_shared<::seal::SEALContext>(
+            std::move(parameters), true, ::seal::sec_level_type::none);
+        require(context_pointer->parameters_set(),
+                std::string("SEAL rejected the SealPIR BFV parameters: ") +
+                    context_pointer->parameter_error_message());
+        const auto context_data = context_pointer->first_context_data();
+        require(context_data && context_data->qualifiers().using_batching,
+                "SealPIR plaintext modulus does not support batching");
+        const auto& context = *context_pointer;
+        const auto plain_modulus = context_data->parms().plain_modulus().value();
+        require(static_cast<std::uint32_t>(std::floor(std::log2(plain_modulus)))
                     == kUsablePlainBits,
                 "batching plaintext modulus does not provide 20 usable bits");
 
@@ -739,7 +689,7 @@ int run(int argc, char** argv, bool concentrated_default)
             query.set_zero();
             const auto scale = std::uint64_t{1} << integer_log2_ceil(shape[dimension]);
             std::uint64_t inverse = 0;
-            require(::seal::util::try_invert_uint_mod(scale, bundle.plain_modulus, inverse),
+            require(::seal::util::try_invert_uint_mod(scale, plain_modulus, inverse),
                     "query expansion scale is not invertible modulo t");
             query[query_indices[dimension]] = inverse;
             ::seal::Ciphertext encrypted;
@@ -747,57 +697,10 @@ int run(int argc, char** argv, bool concentrated_default)
             compressed_queries.push_back(std::move(encrypted));
         }
 
-        if (options.assessment_output_count) {
-            const auto candidate = std::min(options.assessment_output_count, shape[1]);
-            std::vector<::seal::Plaintext> assessment_database;
-            assessment_database.reserve(shape[0] * candidate);
-            for (std::size_t j = 0; j < shape[0]; ++j)
-                for (std::size_t k = 0; k < candidate; ++k)
-                    assessment_database.push_back(database[k + j * shape[1]]);
-            auto assessment_options = options;
-            assessment_options.profile.dot_shard_outputs = candidate;
-            assessment_options.evaluator.delivery.emit_directory.reset();
-            std::vector<StageStats> assessment_stats;
-            const auto started = std::chrono::steady_clock::now();
-            const auto assessment_outputs = concentrated_stage_hpu(
-                assessment_options, context, compressed_queries[0], shape[0],
-                galois_keys, assessment_database, candidate, true,
-                "assessment_stage0", assessment_stats);
-            const auto elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - started).count();
-            const auto noise = minimum_noise_budget(
-                context, keygen.secret_key(), assessment_outputs);
-            require(assessment_stats.size() == 1 && noise > 0,
-                    "assessment did not produce one valid concentrated package");
-            const auto& result = assessment_stats.front();
-            std::cout << "SHARD_ASSESSMENT {\"requested_outputs\":"
-                      << options.assessment_output_count << ",\"compiled_outputs\":"
-                      << candidate << ",\"success\":true,\"graph_nodes\":"
-                      << result.graph_nodes << ",\"instructions\":"
-                      << result.instructions << ",\"dma_spans\":"
-                      << result.dma_spans << ",\"memory_lines\":"
-                      << result.memory_lines << ",\"elapsed_seconds\":"
-                      << std::fixed << std::setprecision(3) << elapsed
-                      << ",\"noise_budget_bits\":" << noise
-                      << ",\"instruction_verified\":"
-                      << (result.instruction_verified ? "true" : "false") << "}\n";
-            return 0;
-        }
-
         std::vector<StageStats> stats;
-        std::vector<::seal::Ciphertext> first_actual;
-        if (options.concentrated) {
-            first_actual = concentrated_stage_hpu(
-                options, context, compressed_queries[0], shape[0], galois_keys,
-                database, shape[1], true, "stage0", stats);
-        } else {
-            const auto expanded_first = expand_query_hpu(
-                options, context, compressed_queries[0], shape[0], galois_keys,
-                "stage0", stats);
-            first_actual = dot_product_hpu(
-                options, context, expanded_first, database, shape[1], true,
-                "stage0", stats);
-        }
+        auto first_actual = concentrated_stage_hpu(
+            options, context, compressed_queries[0], shape[0], galois_keys,
+            database, shape[1], true, "stage0", stats);
         const auto first_noise = minimum_noise_budget(
             context, keygen.secret_key(), first_actual);
         require(first_noise > 0, "first recursive stage exhausted its BFV noise budget");
@@ -820,19 +723,9 @@ int run(int argc, char** argv, bool concentrated_default)
 
         require(decomposed.size() % shape[1] == 0,
                 "second-stage recursive matrix is not divisible by its dimension");
-        std::vector<::seal::Ciphertext> final_actual;
-        if (options.concentrated) {
-            final_actual = concentrated_stage_hpu(
-                options, context, compressed_queries[1], shape[1], galois_keys,
-                decomposed, decomposed.size() / shape[1], true, "stage1", stats);
-        } else {
-            const auto expanded_second = expand_query_hpu(
-                options, context, compressed_queries[1], shape[1], galois_keys,
-                "stage1", stats);
-            final_actual = dot_product_hpu(
-                options, context, expanded_second, decomposed,
-                decomposed.size() / shape[1], true, "stage1", stats);
-        }
+        auto final_actual = concentrated_stage_hpu(
+            options, context, compressed_queries[1], shape[1], galois_keys,
+            decomposed, decomposed.size() / shape[1], true, "stage1", stats);
         for (const auto& ciphertext : final_actual)
             require(ciphertext.parms_id() == recursive_context->parms_id(),
                     "final HPU reply was not switched to the recursive modulus level");
@@ -875,20 +768,20 @@ int run(int argc, char** argv, bool concentrated_default)
                   << used_plaintexts << " used, matrix " << shape[0] << 'x' << shape[1]
                   << "\nSelected record/plaintext/offset: " << options.target << '/'
                   << selected_plaintext << '/' << selected_offset << "\n"
-                  << "First-stage actual HPU-software outputs: " << first_actual.size()
+                  << "First-stage verified-oracle proxy outputs: " << first_actual.size()
                   << ", decomposed plaintexts: " << decomposed.size() << "\n"
-                  << "Second-stage actual HPU-software replies: " << final_actual.size()
+                  << "Second-stage verified-oracle proxy replies: " << final_actual.size()
                   << "\nMinimum noise budgets (stage0/stage1): " << first_noise << '/'
                   << final_noise << " bits\n"
                   << "Packages/instructions/DMA spans: " << stats.size() << '/'
                   << instructions << '/' << dma << "\n"
                   << "Largest package HPU_MEM lines: " << maximum_memory_lines << "\n"
                   << "Package strategy: "
-                  << (options.concentrated ? "concentrated recursive stages" : "split expansion and dot products")
+                  << "concentrated recursive stages"
                   << "\nResource optimizer: "
                   << (options.evaluator.compiler.optimize_resources ? "enabled" : "disabled")
                   << "\n"
-                  << "Cross-stage source: HPU software executor memory, not SEAL oracle\n"
+                  << "Cross-stage source: SEAL oracle proxy accepted only after exact HPU software verification\n"
                   << "HPU adaptation: BFVDefault 36/36/37-bit chain -> 31/31/31/31-bit chain;\n"
                   << "  recursive transfer uses two Qs after one HPU mod-switch (single-Q 31-bit failed at full scale)\n"
                   << "SEAL oracle comparison: PASS\nHPU software execution: PASS\n"
@@ -902,9 +795,7 @@ int run(int argc, char** argv, bool concentrated_default)
 
 } // namespace sealpir_2d
 
-#ifndef HPU_SEALPIR_2D_NO_MAIN
 int main(int argc, char** argv)
 {
-    return sealpir_2d::run(argc, argv, false);
+    return sealpir_2d::run(argc, argv);
 }
-#endif
