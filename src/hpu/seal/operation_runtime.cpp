@@ -200,27 +200,12 @@ CkksRuntimeArtifacts render_ckks_runtime_artifacts(
     }
     result.header.insert(header_position, declaration);
 
-    result.source = hpu::render_executable_source(
-        stem, program.instructions, hpu_mem_line_count);
-    std::ostringstream resolved;
-    resolved << "\nstatic const hpu_dma_span_t hpu_program_" << identifier
-             << "_resolved_spans[] = {\n";
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     for (const auto& dma : program.dma) {
-        resolved << "    { UINT32_C(" << dma.binding.span.line_offset
-                 << "), UINT32_C(" << dma.binding.span.line_count
-                 << ") },\n";
+        fixed_spans.push_back({dma.binding.span.line_offset, dma.binding.span.line_count});
     }
-    resolved << "};\n\nint hpu_run_" << identifier << "(void) {\n"
-             << "    return hpu_program_" << identifier << "(\n"
-             << "        hpu_program_" << identifier
-             << "_resolved_spans,\n"
-             << "        HPU_PROGRAM_";
-    for (char character : identifier) {
-        resolved << static_cast<char>(std::toupper(
-            static_cast<unsigned char>(character)));
-    }
-    resolved << "_DMA_COUNT);\n}\n";
-    result.source += resolved.str();
+    result.source = hpu::render_fixed_executable_source(
+        stem, program.instructions, hpu_mem_line_count, fixed_spans);
     result.resolved_dma_manifest = render_resolved_manifest(program);
     return result;
 }

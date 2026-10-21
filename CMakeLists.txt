@@ -29,6 +29,10 @@ option(HPU_ENABLE_SEAL_INTEGRATION
 option(HPU_ENABLE_DEPLOYMENT_APPLICATION_TESTS
         "Register N=65536 application package tests (longer host execution)"
         OFF)
+set(HPU_RISCV_C_COMPILER "" CACHE FILEPATH
+        "Optional RISC-V GCC for target DMA code generation verification")
+set(HPU_RISCV_OBJDUMP "" CACHE FILEPATH
+        "Optional RISC-V objdump for target DMA code generation verification")
 option(HPU_ENABLE_SEAL_BFV_ORACLE
         "Deprecated alias for HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE"
         OFF)
@@ -158,6 +162,24 @@ target_link_libraries(inline_asm_codegen
 
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
+    add_executable(hpu_fixed_executable_test test/fixed_executable_test.cpp)
+    target_link_libraries(hpu_fixed_executable_test PRIVATE hpu_encode hpu_filesystem_compat)
+    add_test(NAME hpu_fixed_executable_test COMMAND hpu_fixed_executable_test)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        set(target_dma_test_args --generator $<TARGET_FILE:hpu_fixed_executable_test>)
+        if(HPU_RISCV_C_COMPILER)
+            list(APPEND target_dma_test_args --cc ${HPU_RISCV_C_COMPILER})
+        endif()
+        if(HPU_RISCV_OBJDUMP)
+            list(APPEND target_dma_test_args --objdump ${HPU_RISCV_OBJDUMP})
+        endif()
+        add_test(NAME hpu_target_dma_codegen_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/target_dma_codegen_test.py
+                    ${target_dma_test_args})
+        set_tests_properties(hpu_target_dma_codegen_test PROPERTIES
+            SKIP_RETURN_CODE 77 LABELS target-codegen)
+    endif()
     add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
     target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core hpu_hardware_model)
     add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)

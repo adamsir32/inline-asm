@@ -317,10 +317,23 @@ ID 排序，槽位、bank 和淘汰检查只扫描至多 8 个驻留对象。
 程序组织为编码指令与有序 DMA span，生成目标侧 C/h。最终资源编译后，公共交付
 编译器按最终布局重新渲染这些产物。
 
-- `hpu_program_<stem>(spans, count)` 接收按 DMA 次序排列的 span。
-- `hpu_run_<stem>()` 使用包内已经解析好的固定 span 表。
-- C wrapper 检查 span，并在 RISC-V 上发出 `.word` 自定义指令；DMA 前使用
-  `x10` 传 line offset、`x11` 传 line count，两者均以 HPU line 为单位。
+- `hpu_program_<stem>(spans, count)` 接收按 DMA 次序排列的动态 span。该入口保持
+  原实现，运行时检查 span，并在每条 DMA 前分别设置 `x10` 和 `x11`。
+- `hpu_run_<stem>()` 使用生成时已经解析好的固定 span。生成器先检查范围、bank
+  容量和对象长度，再将整个 HPU 流放入一个连续的 `asm volatile` 块。每条 DMA
+  前重新设置 `x10`；`x11` 只在首次 DMA 和长度变化时设置。
+- `x10` 传 line offset，`x11` 传 line count，两者均以 HPU line 为单位。
+  固定入口显式声明 `x10`、`x11` 和 `memory` clobber，连续汇编块中没有可覆盖
+  `x11` 的 C 代码。HPU 指令字和执行次序保持不变。
+
+这项优化发生在资源调度完成后的目标 C 生成阶段，使用最终的 DMA 次序及 span。
+固定 span 表和应用包 V1 协议保持兼容；校验器也接受此前由固定入口调用动态入口
+的 V1 源码。
+
+host 逐指令模型直接使用 DMA span，不执行 CPU wrapper，因此不能验证目标代码
+实际写入 `x10/x11` 的值。`hpu_target_dma_codegen_test` 将生成 C 编译为 RV32/RV64
+目标代码，检查 CPU 执行时的 DMA 参数、HPU 指令顺序及 `x11` 设置次数。
+工具链配置和执行命令见 [IT 交接清单](../delivery/IT_HANDOFF_CHECKLIST.md#31-目标-cpu-包装代码检查)。
 
 目标平台需要由 Nexus-AM/IT 完成工具链编译、HPU_MEM 配置、初始镜像加载、启动
 与结果读回。当前项目提供这一对接所需的程序和数据，设备驱动及平台运行环境由

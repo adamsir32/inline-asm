@@ -374,24 +374,12 @@ BgvModSwitchRuntimeArtifacts render_bgv_modswitch_runtime_artifacts(
         throw std::logic_error("BGV ModSwitch executable header has unexpected structure");
     }
     result.header.insert(position, "int hpu_run_" + identifier + "(void);\n\n");
-    result.source = hpu::render_executable_source(
-        stem, application.instructions, application.image.capacity_lines());
-    std::ostringstream source;
-    source << "\nstatic const hpu_dma_span_t hpu_program_" << identifier
-           << "_resolved_spans[] = {\n";
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     for (const auto& binding : application.dma) {
-        source << "    { UINT32_C(" << binding.span.line_offset << "), UINT32_C("
-               << binding.span.line_count << ") },\n";
+        fixed_spans.push_back({binding.span.line_offset, binding.span.line_count});
     }
-    source << "};\n\nint hpu_run_" << identifier << "(void) {\n"
-           << "    return hpu_program_" << identifier << "(\n"
-           << "        hpu_program_" << identifier << "_resolved_spans,\n"
-           << "        HPU_PROGRAM_";
-    for (char character : identifier) {
-        source << static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-    }
-    source << "_DMA_COUNT);\n}\n";
-    result.source += source.str();
+    result.source = hpu::render_fixed_executable_source(
+        stem, application.instructions, application.image.capacity_lines(), fixed_spans);
 
     std::ostringstream manifest;
     manifest << "instruction_index,dma_index,allocation_id,line_offset,line_count,word_hex\n";

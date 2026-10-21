@@ -112,7 +112,10 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   `scheme=ckks|bfv|bgv`、case 名称及各清单路径。
 - `program/`：`.asm` 是指令流，`.inst32` 每行 32 位指令，`.cmd26` 每行 26 位
   command。C 文件提供 `hpu_program_<stem>(spans, count)` 和固定 DMA span 的
-  `hpu_run_<stem>()`，供 Nexus AM 侧编译调用。
+  `hpu_run_<stem>()`，供 Nexus AM 侧编译调用。动态入口保持原实现，每条 DMA
+  分别设置 `x10/x11`；固定入口在生成前检查 span 范围、bank 容量及对象长度，
+  使用一个连续汇编块，每条 DMA 前设置 `x10`，仅首次及长度变化时设置 `x11`。
+  汇编块声明 `x10`、`x11` 和 `memory` clobber，HPU 指令次序及 DMA ABI 不变。
 - DMA 清单统一为 14 列：`instruction_index,dma_index,operation_index,operation_id,`
   `operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,`
   `line_offset,line_count,word_hex,normalized_asm`。三种方案均保留具体节点的 operation index/ID
@@ -143,6 +146,10 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
 入口，再按 golden 清单读回对应 span，比较有效 word 和补齐区域。
 `.inst32`/`.cmd26` 本身不携带完整 CPU DMA sideband，也不是 ELF/BIN；可执行运行
 需要使用 C wrapper 中的 span 设置，或等效实现 resolved DMA 清单。
+固定入口的代码生成优化不改变包 V1：校验器同时接受新固定汇编入口和此前调用
+动态入口的固定 wrapper。host 指令模型直接消费 DMA span，未执行 CPU wrapper；
+目标代码中的寄存器设置由独立的
+[目标 CPU 包装代码检查](IT_HANDOFF_CHECKLIST.md#31-目标-cpu-包装代码检查) 验证。
 
 ### 新应用镜像的 NTT 表与软件边界
 

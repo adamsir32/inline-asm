@@ -617,6 +617,45 @@ void test_request_rejects_program_header_mismatch()
         "request accepted a C header with a false DMA count");
 }
 
+void test_fixed_entry_compatibility_and_sideband_integrity()
+{
+    ScratchDirectory scratch;
+    Fixture fixture;
+    auto& program = fixture.request.program;
+    const auto dynamic_source = program.source;
+    const std::string marker = "#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
+    program.header.insert(program.header.find(marker), "int hpu_run_minimal_app(void);\n\n");
+    std::vector<hpu::ExecutableDmaSpan> spans;
+    for (const auto& span : program.ordered_dma_spans)
+        spans.push_back({span.line_offset, span.line_count});
+    program.source = hpu::render_fixed_executable_source(
+        program.stem, program.instructions, fixture.image.capacity_lines(), spans);
+    const auto package = hpu::delivery::write_application_package(scratch.path() / "fixed", fixture.request);
+    hpu::delivery::validate_application_package_on_disk(package.root);
+
+    auto corrupt = program.source;
+    const auto position = corrupt.find("li x11, 1");
+    require(position != std::string::npos, "fixed fixture has no x11 setup");
+    corrupt.replace(position, std::string("li x11, 1").size(), "li x11, 2");
+    write_file(package.root / "program/minimal_app.c", corrupt);
+    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"program", "source"}, "validator accepted re-signed incorrect fixed DMA operands");
+
+    // Frozen example of the fixed-table wrapper emitted by earlier V1 tools.
+    program.source = dynamic_source +
+        "\nstatic const hpu_dma_span_t hpu_program_minimal_app_resolved_spans[] = {\n"
+        "    { UINT32_C(0), UINT32_C(1) },\n"
+        "    { UINT32_C(1), UINT32_C(1) },\n"
+        "};\n\nint hpu_run_minimal_app(void) {\n"
+        "    return hpu_program_minimal_app(\n"
+        "        hpu_program_minimal_app_resolved_spans,\n"
+        "        HPU_PROGRAM_MINIMAL_APP_DMA_COUNT);\n}\n";
+    const auto legacy = hpu::delivery::write_application_package(scratch.path() / "legacy", fixture.request);
+    hpu::delivery::validate_application_package_on_disk(legacy.root);
+}
+
 void test_validator_rejects_resigned_program_header_mismatch()
 {
     ScratchDirectory scratch;
@@ -1375,6 +1414,10 @@ int main()
     run_test(
         "reject mismatched C program header at request boundary",
         test_request_rejects_program_header_mismatch,
+        failures);
+    run_test(
+        "fixed entry compatibility and DMA sideband integrity",
+        test_fixed_entry_compatibility_and_sideband_integrity,
         failures);
     run_test(
         "reject re-signed mismatched C program header",

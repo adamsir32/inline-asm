@@ -105,6 +105,44 @@ oracle/report.json.overall_status    = pass
 `provenance/files.csv` 的 FNV-1a64 用于包内逐文件损坏检查；交付归档的 SHA-256 用于
 确认传输前后拿到的是同一个归档。
 
+### 3.1 目标 CPU 包装代码检查
+
+host 指令模型直接使用 resolved DMA span，不执行 C wrapper。要检查 CPU 编译后
+每条 DMA 实际使用的 `x10/x11`，配置支持 RV32 和 RV64 的 RISC-V GCC：
+
+```bash
+cmake -S . -B build-delivery \
+  -DHPU_ENABLE_SEAL_INTEGRATION=ON \
+  -DHPU_RISCV_C_COMPILER=/path/to/riscv64-unknown-elf-gcc \
+  -DHPU_RISCV_OBJDUMP=/path/to/riscv64-unknown-elf-objdump
+cmake --build build-delivery --target hpu_fixed_executable_test
+ctest --test-dir build-delivery \
+  -R '^hpu_(fixed_executable|target_dma_codegen)_test$' --output-on-failure
+```
+
+`hpu_fixed_executable_test` 检查固定入口生成契约及非法 span/形状拒绝行为。
+`hpu_target_dma_codegen_test` 对测试夹具执行 RV32/RV64、`-O0/-O2` 编译，并运行
+CPU 包装代码，核对 HPU 指令次序、每条 DMA 的 offset/count、`x11` 设置次数及
+寄存器保护。固定入口要求每条 DMA 设置 `x10`，`x11` 只在首次和长度变化时设置。
+objdump 为可选项，用于保存反汇编；未找到编译器时，目标测试返回 77，CTest
+显示 `Skipped`，此时没有目标代码验证结果。
+
+对实际交付包可直接执行脚本，重复 `--package` 检查多个目录：
+
+```bash
+python3 test/target_dma_codegen_test.py \
+  --cc /path/to/riscv64-unknown-elf-gcc \
+  --objdump /path/to/riscv64-unknown-elf-objdump \
+  --package outputs/ckks_evaluator_application \
+  --package outputs/bfv_evaluator_application \
+  --package outputs/bgv_evaluator_application \
+  --output-dir build-delivery/target-dma-check
+```
+
+此检查将自定义指令作为检查点记录，HPU 数学结果仍由指令模型和设备读回验证。
+保存生成的 ELF、反汇编和检查日志，作为所用目标工具链的代码生成证据。
+它不设置包内 RTL/硬件验证状态，也不替代下面的设备验收。
+
 ## 4. IT 消费顺序
 
 1. 先解析 `package.json`，使用其中的路径定位文件，不拼接固定子目录。

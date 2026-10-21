@@ -60,18 +60,14 @@ std::string csv_field(const std::string& value)
 void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledResources& resources)
 {
     const auto identifier = hpu::c_identifier(program.stem);
-    auto upper = identifier;
-    for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     program.header = hpu::render_executable_header(program.stem, resources.dma.size());
     const std::string marker = "#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
     const auto position = program.header.find(marker);
     if (position == std::string::npos) throw std::logic_error("unexpected runtime header layout");
     program.header.insert(position, "int hpu_run_" + identifier + "(void);\n\n");
     program.instructions = resources.instructions;
-    program.source = hpu::render_executable_source(program.stem, program.instructions,
-                                                  resources.image.capacity_lines());
-    std::ostringstream spans, manifest, assembly;
-    spans << "\nstatic const hpu_dma_span_t hpu_program_" << identifier << "_resolved_spans[] = {\n";
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
+    std::ostringstream manifest, assembly;
     manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
     std::map<std::string, std::size_t> operation_indices;
     program.ordered_dma_spans.clear();
@@ -83,7 +79,7 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
         const bool load = inst.mnemonic == hpu::Mnemonic::kDload;
         const auto operation_dma_index = operation_indices[dma.operation_id]++;
         program.resource_dma[i].operation_dma_index = operation_dma_index;
-        spans << "    { UINT32_C(" << dma.span.line_offset << "), UINT32_C(" << dma.span.line_count << ") },\n";
+        fixed_spans.push_back({dma.span.line_offset, dma.span.line_count});
         manifest << dma.instruction_index << ',' << i << ',';
         if (dma.operation_index) manifest << *dma.operation_index;
         manifest << ',' << csv_field(dma.operation_id) << ',' << operation_dma_index << ','
@@ -93,11 +89,8 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
                  << hpu::format_word_hex(encoded.word) << ',' << csv_field(encoded.normalized_asm) << '\n';
         program.ordered_dma_spans.push_back(dma.span);
     }
-    spans << "};\n\nint hpu_run_" << identifier << "(void) {\n"
-          << "    return hpu_program_" << identifier << "(\n"
-          << "        hpu_program_" << identifier << "_resolved_spans,\n"
-          << "        HPU_PROGRAM_" << upper << "_DMA_COUNT);\n}\n";
-    program.source += spans.str();
+    program.source = hpu::render_fixed_executable_source(
+        program.stem, program.instructions, resources.image.capacity_lines(), fixed_spans);
     program.resolved_dma_manifest = manifest.str();
     for (const auto& instruction : program.instructions) assembly << instruction.normalized_asm << '\n';
     program.assembly = assembly.str();

@@ -1449,7 +1449,10 @@ void validate_program_source(
             static_cast<unsigned char>(character)));
     }
     expected << "_DMA_COUNT);\n}\n";
-    if (source != expected.str()) {
+    if (source == expected.str()) return; // Historical V1 fixed-table wrapper.
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
+    for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
+    if (source != hpu::render_fixed_executable_source(stem, instructions, capacity_lines, fixed_spans)) {
         throw std::runtime_error(
             "application package program source differs from encoded instructions or DMA spans");
     }
