@@ -46,9 +46,9 @@ std::string generate_basis_transform_body_asm(int N, const std::vector<int>& con
                                               const std::string& label, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr auto POBJ_POLY = hpu::resource::value;
-    constexpr auto POBJ_TWIDDLE = hpu::resource::transform_table;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_POLY = hpu::resource::make_operand("value", 0);
+    const auto POBJ_TWIDDLE = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* " << label << (inverse ? ": INTT */\n" : ": NTT */\n");
     if (manage_modulus_table) {
@@ -74,10 +74,10 @@ std::string generate_tensor_body_asm(const std::vector<int>& contexts, const std
                                      bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr auto POBJ_A = hpu::resource::value;
-    constexpr auto POBJ_B = hpu::resource::auxiliary;
-    constexpr auto POBJ_OUT = hpu::resource::accumulator;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_A = hpu::resource::make_operand("value", 0);
+    const auto POBJ_B = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_OUT = hpu::resource::make_operand("accumulator", 2);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* " << label << ": (a0,a1)*(b0,b1) -> (t0,t1,t2) */\n";
     if (manage_modulus_table) {
@@ -118,9 +118,9 @@ std::string generate_scalar_multiply_body_asm(const std::vector<int>& contexts, 
                                               const std::string& label, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr auto POBJ_VALUE = hpu::resource::value;
-    constexpr auto POBJ_SCALAR = hpu::resource::auxiliary;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_VALUE = hpu::resource::make_operand("value", 0);
+    const auto POBJ_SCALAR = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* " << label << " */\n";
     if (manage_modulus_table) {
@@ -147,10 +147,10 @@ std::string generate_fast_floor_body_asm(const std::vector<int>& q_contexts,
                                          bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr auto POBJ_VALUE = hpu::resource::value;
-    constexpr auto POBJ_CONVERTED = hpu::resource::auxiliary;
-    constexpr auto POBJ_Q_INV = hpu::resource::accumulator;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_VALUE = hpu::resource::make_operand("value", 0);
+    const auto POBJ_CONVERTED = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_Q_INV = hpu::resource::make_operand("accumulator", 2);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* FastFloor component " << component
@@ -184,10 +184,10 @@ std::string generate_branchless_sk_body_asm(const std::vector<int>& q_contexts,
                                             int num_components, bool manage_modulus_table)
 {
     std::ostringstream asm_code;
-    constexpr auto POBJ_ALPHA = hpu::resource::value;
-    constexpr auto POBJ_FACTOR = hpu::resource::auxiliary;
-    constexpr auto POBJ_DEST = hpu::resource::accumulator;
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_ALPHA = hpu::resource::make_operand("value", 0);
+    const auto POBJ_FACTOR = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_DEST = hpu::resource::make_operand("accumulator", 2);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* branchless SK component " << component << " */\n";
@@ -324,7 +324,7 @@ std::string generate_multiply_tensor_body_asm(int N, const BfvCiphertextMultiply
         asm_code << "        // Invalid SEAL BFV ciphertext multiply layout\n";
         return asm_code.str();
     }
-    constexpr auto modulus_table_object = hpu::resource::modulus_table;
+    const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
@@ -352,7 +352,7 @@ std::string generate_ciphertext_multiply_body_asm(int N, const BfvCiphertextMult
         asm_code << "        // Invalid SEAL BFV ciphertext multiply layout\n";
         return asm_code.str();
     }
-    constexpr auto modulus_table_object = hpu::resource::modulus_table;
+    const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);

@@ -9,10 +9,11 @@
 namespace hpu::scheme::bfv {
 namespace {
 
-constexpr auto kLeftObject = hpu::resource::value;
-constexpr auto kRightObject = hpu::resource::auxiliary;
-constexpr auto kOutputObject = hpu::resource::accumulator;
-constexpr auto kModulusTableObject = hpu::resource::modulus_table;
+const auto kTwiddleObject = hpu::resource::make_operand("transform_table", 3);
+const auto kLeftObject = hpu::resource::make_operand("value", 0);
+const auto kRightObject = hpu::resource::make_operand("auxiliary", 1);
+const auto kOutputObject = hpu::resource::make_operand("accumulator", 2);
+const auto kModulusTableObject = hpu::resource::make_operand("modulus_table", 4);
 
 bool valid_config(int num_q)
 {
@@ -135,11 +136,11 @@ std::string generate_multiply_plain_body_asm(int N, int num_q, bool append_psync
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
             asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, hpu::resource::transform_table, false);
+            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, kTwiddleObject, false);
             asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
             asm_code << hpu::resource::multiply(kLeftObject, kLeftObject, kRightObject);
             asm_code << hpu::resource::discard(kRightObject);
-            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, hpu::resource::transform_table, false);
+            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, kTwiddleObject, false);
             asm_code << hpu::resource::publish(kLeftObject, 1);
         }
     }

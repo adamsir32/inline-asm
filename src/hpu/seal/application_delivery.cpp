@@ -1,6 +1,7 @@
 #include "hpu/seal/application_delivery.hpp"
 #include "hpu/seal/bgv_software_executor.hpp"
 #include "hpu/seal/ntt_bridge.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 #include "assembler.hpp"
 #include "executable.hpp"
 
@@ -87,11 +88,14 @@ ApplicationPackageRequest base_request(
         if (i) out << ',';
         out << key->parms().coeff_modulus()[i].value();
     }
-    out << "],\"ntt_table_abi\":{\"version\":1,"
+    out << "],\"ntt_table_abi\":{\"version\":2,"
            "\"coefficient_order\":\"natural\","
            "\"pre_twist_order\":\"natural\","
            "\"post_factor_order\":\"natural\","
            "\"stage_twiddle_order\":\"reference_loader_batch_lane\","
+           "\"stage_twiddle_format\":" << quoted(hpu::model::kStageTwiddleParameterFormat)
+        << ",\"twiddle_chains\":" << hpu::model::kTwiddleChains
+        << ",\"stage_parameter_lines\":" << hpu::model::kStageTwiddleParameterLines << ',' <<
            "\"canonical_ntt_layout\":\"reference_forward_layout\","
            "\"normalization\":\"explicit_post_pmul\","
            "\"twist_fused\":false},\"levels\":[";

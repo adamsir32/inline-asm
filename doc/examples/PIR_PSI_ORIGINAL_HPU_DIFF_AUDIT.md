@@ -1,5 +1,8 @@
 # PIR/PSI 应用恢复原始 HPU 公共代码审计报告
 
+> 历史报告：记录 `51b8ee1` 清理时的状态。后续上游同步按用户要求删除了早期
+> Poseidon PIR/PSI 简化示例；当前状态以 `PIR_PSI_UPSTREAM_SYNC_AUDIT.md` 为准。
+
 ## 结论
 
 **是。与 `ca0e3dc5118ea4b4c5a996eb6907518f8b4ccde9` 相比，当前树的所有公共
@@ -15,8 +18,8 @@
 
 用户在清理期间明确要求删除二维 SealPIR 的 95 包历史版本。因此本次最终树与最初任务中
 “保留 95 包版”的条目存在一项有意偏离：删除其独立入口、CMake 目标、分片评估脚本和
-旧生成目录，只保留二维集中式 2 包版。没有删除一维 Poseidon PIR、简化 Poseidon PSI、
-APSI 集中版或其他 CKKS/BFV/BGV 示例和测试。
+旧生成目录，只保留二维集中式 2 包版。当时仍保留的早期 Poseidon PIR/PSI 简化示例，
+已在后续上游同步中按用户要求删除；APSI 集中版和原作者 CKKS/BFV/BGV 示例不受影响。
 
 ## 恢复的历史公共改动
 
@@ -116,7 +119,7 @@ git diff --name-status \
 ## 实际验证与资源数据
 
 测试环境为 Ubuntu Release 构建，启用 SEAL integration 和 BUILD_TESTING。最终形态的全量
-CTest 为 **84/84 PASS**，0 failed，墙钟 140.43 秒。它覆盖一维 Poseidon PIR、简化 PSI、
+CTest 为 **84/84 PASS**，0 failed，墙钟 140.43 秒。它在当时覆盖早期 Poseidon PIR/PSI、
 二维集中式 small 三个位置（0、64、127）、二维 small 两包交付、APSI small 的 empty、
 single、multi、boundary、APSI small 交付，以及全部既有通用回归。所有交付测试都运行
 `hpu_validate_package`。

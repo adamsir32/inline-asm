@@ -34,11 +34,11 @@ std::string generate_hpu_bconv_contexts_body_asm(
     }
 
     // Algorithm roles are virtual; the shared compiler schedules object slots.
-    const auto POBJ_TMP_A = hpu::resource::value;
-    const auto POBJ_TMP_B = hpu::resource::auxiliary;
-    const auto POBJ_ACC = hpu::resource::accumulator;
+    const auto POBJ_TMP_A = hpu::resource::make_operand("value", 0);
+    const auto POBJ_TMP_B = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_ACC = hpu::resource::make_operand("accumulator", 2);
     // 模表对象通过 small-bank hint 分配到 Bank 5，pmodld 再按 MOD_ID 选择表项。
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     // ==========================================
     // 阶段一：预处理 (Pre-multiply)

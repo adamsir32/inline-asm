@@ -27,8 +27,8 @@ std::string generate_basis_transform_body_asm(
     bool inverse,
     const char* label)
 {
-    constexpr auto poly_object = hpu::resource::value;
-    constexpr auto twiddle_object = hpu::resource::transform_table;
+    const auto poly_object = hpu::resource::make_operand("value", 0);
+    const auto twiddle_object = hpu::resource::make_operand("transform_table", 3);
 
     std::ostringstream asm_code;
     asm_code << "        /* --- " << label << " --- */\n";
@@ -69,7 +69,7 @@ std::string generate_ciphertext_multiply_body_asm(
         return asm_code.str();
     }
 
-    constexpr auto modulus_table_object = hpu::resource::modulus_table;
+    const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     const int num_q = static_cast<int>(layout.q_mod_ids.size());
 
     asm_code

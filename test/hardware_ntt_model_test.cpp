@@ -1,6 +1,7 @@
 #include "hpu/model/hardware_ntt.hpp"
 #include "scheme/bfv/galois.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -188,6 +189,129 @@ void test_fused_automorphism(std::size_t degree, std::uint64_t galois_element)
         "NTT-fused automorphism disagrees with coefficient reference");
 }
 
+template <typename Function>
+void require_invalid(Function&& function, const char* message)
+{
+    try { function(); }
+    catch (const std::invalid_argument&) { return; }
+    throw std::runtime_error(message);
+}
+
+std::uint32_t parameter_test_root(std::size_t degree, std::uint32_t modulus)
+{
+    for (std::uint32_t base = 2; base < 128; ++base) {
+        const auto psi = hpu::model::pow_mod(base,
+            (static_cast<std::uint64_t>(modulus) - 1) / (2 * degree), modulus);
+        if (hpu::model::pow_mod(psi, degree, modulus) == modulus - 1) return psi;
+    }
+    throw std::runtime_error("test modulus has no selected primitive root");
+}
+
+void test_stage_parameters(std::size_t degree, std::uint32_t modulus, std::uint32_t root_power)
+{
+    const auto psi = parameter_test_root(degree, modulus);
+    const auto omega = hpu::model::pow_mod(psi, 2 * root_power, modulus);
+    hpu::model::HardwareNttModel model(degree, modulus, omega);
+    const auto forward = model.forward_twiddles();
+    const auto inverse = model.inverse_twiddles();
+    std::vector<std::uint32_t> data(degree);
+    for (std::size_t i = 0; i < degree; ++i)
+        data[i] = static_cast<std::uint32_t>((std::uint64_t(i) * i + 17 * i + 1) % modulus);
+    for (bool is_inverse : {false, true}) {
+        const auto& stages = is_inverse ? inverse.stages : forward;
+        for (std::size_t stage = 0; stage < stages.size(); ++stage) {
+            const auto packed = hpu::model::pack_stage_twiddles(stages[stage], modulus, degree);
+            require(packed.size() == 128 && hpu::model::kStageTwiddleParameterLines == 2
+                        && hpu::model::kTwiddleChains == 8,
+                    "stage parameters do not use the fixed two-line K=8 ABI");
+            require(std::equal(packed.begin(), packed.begin() + 64, stages[stage].begin()),
+                    "stage parameter line zero is not the first physical batch");
+            const auto expanded = hpu::model::expand_stage_twiddles(packed, modulus, degree);
+            require(expanded == stages[stage], "K=8 parameters differ from the complete physical oracle");
+            require(hpu::model::execute_ntt_stage(data, expanded, modulus, stage, is_inverse)
+                        == hpu::model::execute_ntt_stage(data, stages[stage], modulus, stage, is_inverse),
+                    "K=8 parameter expansion changed a stage's BF result");
+            const auto batches = degree / 128;
+            for (std::size_t slot = 1; slot < std::min<std::size_t>(8, batches); ++slot)
+                require(packed[64 + slot - 1] == stages[stage][64 * slot], "V is not stored at fixed slot-1 offset");
+            for (std::size_t slot = std::min<std::size_t>(8, batches); slot < 8; ++slot)
+                require(packed[64 + slot - 1] == 1, "unused V was not filled with one");
+            std::size_t ratio_count = 0;
+            for (auto b = batches; b > 8; b >>= 1U) ++ratio_count;
+            for (std::size_t word = 71 + ratio_count; word < 128; ++word)
+                require(packed[word] == 1, "unused R/padding was not filled with one");
+        }
+    }
+}
+
+void test_stage_parameter_validation()
+{
+    constexpr std::size_t degree = 4096;
+    const auto omega = hpu::model::pow_mod(psi_for(degree), 2, kModulus);
+    hpu::model::HardwareNttModel model(degree, kModulus, omega);
+    const auto full = model.forward_twiddles().back();
+    const auto packed = hpu::model::pack_stage_twiddles(full, kModulus, degree);
+    const auto change = [](std::uint32_t value) { return value == kModulus - 1 ? 1U : value + 1; };
+    auto irregular = full;
+    irregular[9 * 64 + 17] = change(irregular[9 * 64 + 17]);
+    require_invalid([&] { hpu::model::pack_stage_twiddles(irregular, kModulus, degree); },
+                    "packing skipped mandatory full reconstruction validation");
+    auto invalid = full;
+    invalid[0] = 2;
+    require_invalid([&] { hpu::model::pack_stage_twiddles(invalid, kModulus, degree); }, "packing accepted T[0]!=1");
+    invalid = full; invalid[17] = 0;
+    require_invalid([&] { hpu::model::pack_stage_twiddles(invalid, kModulus, degree); }, "packing accepted a zero root");
+    invalid[17] = kModulus;
+    require_invalid([&] { hpu::model::pack_stage_twiddles(invalid, kModulus, degree); }, "packing accepted a noncanonical root");
+    invalid.pop_back();
+    require_invalid([&] { hpu::model::pack_stage_twiddles(invalid, kModulus, degree); }, "packing accepted wrong table size");
+    require_invalid([&] { hpu::model::pack_stage_twiddles(full, kModulus, 192); }, "packing accepted unsupported degree");
+    require_invalid([&] { hpu::model::expand_stage_twiddles(packed, 1, degree); }, "expansion accepted invalid modulus");
+    auto bad_parameters = packed;
+    bad_parameters.pop_back();
+    require_invalid([&] { hpu::model::expand_stage_twiddles(bad_parameters, kModulus, degree); }, "expansion accepted non-two-line parameters");
+    bad_parameters = packed; bad_parameters[127] = 2;
+    require_invalid([&] { hpu::model::expand_stage_twiddles(bad_parameters, kModulus, degree); }, "expansion ignored non-one padding");
+    bad_parameters = packed; bad_parameters[1] = 0;
+    require_invalid([&] { hpu::model::expand_stage_twiddles(bad_parameters, kModulus, degree); }, "expansion accepted a zero parameter");
+    bad_parameters[1] = kModulus;
+    require_invalid([&] { hpu::model::expand_stage_twiddles(bad_parameters, kModulus, degree); }, "expansion accepted a noncanonical parameter");
+    auto small = hpu::model::pack_stage_twiddles(std::vector<std::uint32_t>(64, 1), kModulus, 128);
+    small[64] = 2;
+    require_invalid([&] { hpu::model::expand_stage_twiddles(small, kModulus, 128); }, "small N accepted an unused V parameter");
+    std::vector<std::uint32_t> data(degree, 1);
+    const auto expected = hpu::model::execute_ntt_stage(data, full, kModulus, 11);
+    for (const auto word : {std::size_t{1}, std::size_t{64}, std::size_t{71}}) {
+        auto changed = packed; changed[word] = change(changed[word]);
+        const auto expanded = hpu::model::expand_stage_twiddles(changed, kModulus, degree);
+        require(expanded != full
+                    && hpu::model::execute_ntt_stage(data, expanded, kModulus, 11) != expected,
+                "stage execution ignored a supplied U/V/R parameter");
+    }
+}
+
+void test_hardware_migration_checkpoint()
+{
+    // Hardware team's N=4096/q=50061313 IT fixture, migration section 7.1.
+    // V[2] exposes omega for this loader, fixing the selected primitive root.
+    constexpr std::uint32_t modulus = 50061313U;
+    hpu::model::HardwareNttModel model(4096, modulus, 3474171U);
+    const auto stages = model.forward_twiddles();
+    const auto first = hpu::model::pack_stage_twiddles(stages.front(), modulus, 4096);
+    require(first == std::vector<std::uint32_t>(128, 1), "IT stage zero is not the all-one parameter block");
+    const auto last = hpu::model::pack_stage_twiddles(stages.back(), modulus, 4096);
+    const std::vector<std::uint32_t> expected_u{
+        1, 2564634, 41945451, 26788067, 15836256, 8007847, 43637878, 16593746};
+    const std::vector<std::uint32_t> expected_meta{
+        44649554, 3474171, 962682, 31511628, 25687718, 1581086, 23227686,
+        35622094, 35622094};
+    require(std::equal(expected_u.begin(), expected_u.end(), last.begin())
+                && last[63] == 37489420
+                && std::equal(expected_meta.begin(), expected_meta.end(), last.begin() + 64)
+                && std::all_of(last.begin() + 73, last.end(), [](auto x) { return x == 1; }),
+            "IT stage eleven differs from hardware migration checkpoints");
+}
+
 } // namespace
 
 int main()
@@ -205,6 +329,14 @@ int main()
         test_fused_automorphism(65536, 3);
         test_fused_automorphism(
             65536, hpu::scheme::bfv::column_rotation_galois_element(65536));
+        // B<8, B=8, and B>8, including every stride-8 carry and unsigned q.
+        test_stage_parameters(128, kModulus, 1);
+        test_stage_parameters(256, 998244353U, 3);
+        test_stage_parameters(1024, 4293918721U, 1);
+        test_stage_parameters(4096, kModulus, 3);
+        test_stage_parameters(65536, 4293918721U, 5);
+        test_stage_parameter_validation();
+        test_hardware_migration_checkpoint();
         std::cout << "HPU NTT model tests passed, including N=65536 and fused automorphism\n";
         return 0;
     } catch (const std::exception& error) {

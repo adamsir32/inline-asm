@@ -441,7 +441,7 @@ NTT 发出 `log2(N)` 条指令，stage 从 0 递增到 `log2(N)-1`。
 | 操作数 | 范围 | 当前用法 |
 | --- | --- | --- |
 | `pdata` | `p0`..`p7` | 数据对象 |
-| `ptwiddle` | `p0`..`p7` | 当前 stage 的 twiddle 对象 |
+| `ptwiddle` | `p0`..`p7` | 当前 stage 的两条 line、K=8 参数对象 |
 | `stage` | 0..15 | 编入 `STAGE4` |
 | `mode` | 0..3 | 当前生成器写 0 |
 | `flag` | 0..1 | 当前生成器写 0 |
@@ -452,7 +452,8 @@ NTT 发出 `log2(N)` 条指令，stage 从 0 递增到 `log2(N)-1`。
 pntt p0, p3, 15, 0, 0    # 0x4000FC5B
 ```
 
-软件通常在每个 stage 前加载 twiddle，并在该 stage 后释放：
+软件在每个 stage 前加载两条 line 的 twiddle 参数，并在该 stage 后释放。
+参数仍使用普通对象 DLOAD；MODE2、opcode 和对象 ID 编码不变：
 
 ```asm
 dload x12, x13, p3, 1, 0
@@ -481,9 +482,23 @@ raw stage 模型沿用 `autotest/hw_ntt_intt_complete.py` 的 loader/BF/P 规则
 batch 装入 128 个寄存器，由 64 个 BF lane 顺序消费 64 个 twiddle，BF 后
 对 7-bit 寄存器索引执行一次 P 网络，再写回本 batch。`m=2^stage < 128`
 时 loader 连续装入 128 words；`m >= 128` 时从蝶形的上下两半各取 64 words
-交错装入。stage twiddle 文件严格按“batch 顺序、batch 内 lane 顺序”写出，
-共 `N/2` 个 little-endian `uint32`，即 `N/128` 条 256B line。默认
-`N=4096` 时为 2048 words、32 line。
+交错装入。离线数学 oracle 的完整表按“batch 顺序、batch 内 lane 顺序”排列，
+包含 `N/2` 个因子；生产镜像将其压缩为固定 **128 个 little-endian u32、
+2 条 256B line**。PNTT 内部按 K=8 交错链递推重构这些因子，不再从 src2
+读取完整表。所有支持的 N 都使用相同的两条 line 布局。
+
+| 参数位置 | 内容 |
+| --- | --- |
+| line 0 word 0..63 | batch 0 的 lane 模板 U |
+| line 1 word 0..6 | slot 1..7 的初始化倍率 V，V[0]=1 隐含 |
+| line 1 word 7+t | stride-8 进位倍率 R[t]，有效数量为 `max(0,log2(N/128)-3)` |
+| 其余 word | 填 1；B<8 时未使用的 V 也填 1 |
+
+参数中不放 q、N、stage、K 或 header；模上下文仍由 PMODLD 提供。
+N 从数据对象推导，数据长度为 `N/64` line，src2 参数长度固定为 2 line。
+生产 packer 必须重构所有物理 BF 因子并与原完整表逐项一致，否则拒绝生成。
+参数量减少不改变普通对象的物理 bank 分配规则。精确 ABI 和迁移样例见
+[硬件组迁移说明](TWIDDLE_COMPILER_MIGRATION.md)。
 
 完成所有 stage 后，NTT 域数据保持 P 网络产生的物理排列：
 `memory[p] = logical_ntt[forward_layout[p]]`。因此 NTT 域明文、密钥和中间
@@ -921,12 +936,12 @@ evaluation key、`P` 修正常量和工作区；逐条 custom1 DMA 与镜像 spa
 可渲染 RV runtime 入口和 resolved DMA manifest。顶层与降一级的镜像内容经
 HPU 物理 NTT 数学模型对照 modified-SEAL。单次 KeySwitch 由线性 planner 的
 Multiply+Relinearize 和旋转步骤复用；仍无逐指令软件执行或实体 HPU 执行证据。
-当前镜像把各 active Q 与 P 的双向 twiddle 全部预存；`N=65536,Q=3,P=1`
-总计需 136193 个 256B line（其中 twiddle 73728 line）。容量估算 API 在
+当前镜像保存各 active Q 与 P 的双向 K=8 stage 参数和完整 pre/post；
+`N=65536,Q=3,P=1` 总计需 70913 个 256B line（其中 twiddle 类分配
+8448 line，包含 pre/post）。容量估算 API 在
 构建前精确检查 `capacity_lines`。若平台允许更大的 HPU_MEM window，可直接
 按估计值配置；旧 65536-line 软件 profile 不是该应用的硬件上限。实体
-DMA/window 仍需单独验证。`N=65536,Q=3,P=1` 的真实软件镜像已按精确
-136193-line 容量生成，包含 475 条 resolved DMA 绑定。
+DMA/window 仍需单独验证。该配置包含 475 条 resolved DMA 绑定。
 
 #### SEAL-facing BGV NTT Multiply+Relinearize
 
@@ -938,7 +953,7 @@ HPU NTT 密文。先在各 active Q 下执行逐点 tensor product，得到三�
 `correction_factor_a*correction_factor_b mod t` 元数据更新，不计算 tensor
 或 KeySwitch 系数。顶层和降一级的 tensor 与 modified-SEAL 逐 limb 一致，
 后半段复用已验证的单次 KeySwitch DMA 后缀。`N=65536,Q=3,P=1` 的镜像
-需 148481 个 256B line，含 508 条 resolved DMA 绑定。线性 planner 可将
+需 83201 个 256B line，含 508 条 resolved DMA 绑定。线性 planner 可将
 乘法、ModSwitch 及后继算子拼入单次程序；仍无逐指令软件解释或实体 HPU 执行证据。
 
 #### SEAL-facing BGV NTT Add/Sub/Negate
@@ -960,7 +975,7 @@ BGV 行旋转与列交换使用同一自同构 + Galois KeySwitch 单次包：�
 写入 KeySwitch 输入；`c1` 作为切换分量，零基分量与旋转后的 `c0`
 构成最终输出。Galois key 按元素 `k` 选取，`correction_factor` 不变。
 正/负行步长及列交换已在顶层/降一级与 modified-SEAL 逐 limb 差分；
-`N=65536,Q=3,P=1` 镜像容量估算为 169985 line。该路径已接入通用
+`N=65536,Q=3,P=1` 镜像容量估算为 80225 line。该路径已接入通用
 `BgvOperationPlan` 和整图功能模型；逐指令软件执行与实体 HPU 验证仍待完成。
 
 `BgvOperationPlan` 支持分支计算图中的 `AddPlain/SubPlain/MultiplyPlain`、密文 `Add/Sub`、
@@ -1026,7 +1041,7 @@ out = y + alpha * (-B) mod Q       // branchless-SK
 `dstore` 到统一 HPU_MEM 中，随后的 Q/Pks Relinearization 直接从相同 span `dload`，
 把三分量密文变回二分量；中间不发出 `psync`，也不需要 host copy 或 window 切换。
 完整 `bfv_ciphertext_multiply` 只在 Relinearization 完成后发出一个终止 `psync`。
-默认统一镜像为 30913 line；软件 profile 通过 `hpu_mem_max_lines=65536` 设置验收
+默认统一镜像为 20833 line；软件 profile 通过 `hpu_mem_max_lines=65536` 设置验收
 上限，`HPU_MEM_SIZE_LINES` 仍写入当前镜像的真实 line 数。
 
 BFV ModSwitch 对单 kernel 输出的两个
@@ -1262,7 +1277,9 @@ NTT/INTT body 假定数据对象和活动模上下文已由外层准备。独立
 | 变换后 | - | `post[i]=raw_inverse.post_scale[BR(i)]*psi^-i` | 最后逆向软件边界 BR 后显式 `pmul`，再 `pfree twiddle` |
 
 每个 stage 都重新执行一次 twiddle `dload`，不会由硬件从上一 stage 自动更新。
-每份 stage 表固定包含 `N/2` 个 `uint32`。数据对象 `p0` 跨 stage 保持同一逻辑
+每份 stage 参数固定包含 128 个 `uint32`、两条 line；硬件在 stage 内按
+K=8 生成 `N/2` 个因子，不新增软件 GEN/PMUL。PINTT stage 0 也必须加载
+全 1 参数对象。数据对象 `p0` 跨 stage 保持同一逻辑
 OBJ_ID，但控制器可按 out-of-place 协议提交新的物理 base。
 上表使用新 builder 的自然系数索引。历史 `test/reference/main.cpp` raw 算子包的
 pre/post 表继续使用 BR 系数位置；软件 profile 的选择不转换这些表或镜像。
@@ -1445,7 +1462,7 @@ post-untwist-scale 完成 INTT，直接写回系数域输出。密文中间值�
 `[3,num_q,N]`。包内 `memory_lifetime.csv` 规定何时可用已死亡输入或常量区域承接
 scratch。三分量结果占用的 span 随后直接作为 KeySwitch 输入；后半段从同一 window
 加载 Q/Pks twiddle、relinearization key 和 ModUp/ModDown 常量，最终原位写回两个
-Q 分量。默认 `N=4096,Q=4,Pks=3,B=6` 的统一 window 为 30913 line，完整 DMA
+Q 分量。默认 `N=4096,Q=4,Pks=3,B=6` 的统一 window 为 20833 line，完整 DMA
 顺序和地址只由同一目录中的 `dma_plan.csv` 与 `hardware/line_map.csv` 规定。
 
 SEAL-facing codegen 另提供显式 `BfvCiphertextMultiplyLayout`：直接接收 active Q、固定

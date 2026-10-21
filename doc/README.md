@@ -15,6 +15,7 @@
 | 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
 | 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
+| 对接 K=8 在线 twiddle 参数格式 | [硬件组编译器迁移说明](reference/TWIDDLE_COMPILER_MIGRATION.md) |
 
 ## 目录说明
 
@@ -35,6 +36,7 @@
 - [HPU_SEAL_API_REFERENCE.md](reference/HPU_SEAL_API_REFERENCE.md)：面向应用程序员的手册，包含完整程序、自定义构建目标、顶层 API、三方案规则、golden 与诊断排查。
 - [HPU_LOW_LEVEL_API_REFERENCE.md](reference/HPU_LOW_LEVEL_API_REFERENCE.md)：供维护适配层、显式 Plan、镜像构建器、软件执行器和算子生成接口时查询。
 - [HPU_PROGRAMMING_MANUAL.md](reference/HPU_PROGRAMMING_MANUAL.md)：HPU 指令、编码、对象生命周期、DMA 和方案算子底层约定。
+- [TWIDDLE_COMPILER_MIGRATION.md](reference/TWIDDLE_COMPILER_MIGRATION.md)：硬件组提供的 K=8 在线 twiddle ABI、512 B 参数布局、DMA 迁移与目标验收要求；文中硬件仓库路径和附属报告需到相应硬件工作区查看。
 
 ### `architecture/`
 

@@ -39,10 +39,10 @@ std::string generate_hpu_moddown_contexts_body_asm(
         }
     }
 
-    constexpr auto POBJ_MOD_CTX = hpu::resource::modulus_table;
-    constexpr auto POBJ_Q = hpu::resource::value;
-    constexpr auto POBJ_CORR = hpu::resource::auxiliary;
-    constexpr auto POBJ_P_INV = hpu::resource::accumulator;
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
+    const auto POBJ_Q = hpu::resource::make_operand("value", 0);
+    const auto POBJ_CORR = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_P_INV = hpu::resource::make_operand("accumulator", 2);
 
     asm_code << "        /* MODDOWN stage-1: BConv P -> Q (fixed P -> active Q) */\n";
     asm_code << generate_hpu_bconv_contexts_body_asm(

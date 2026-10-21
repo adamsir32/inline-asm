@@ -156,7 +156,7 @@ PowersDag、幂次生成和四种集合语义回归，但不用于证明 PS 分�
 指令、1812 个 DMA span 和 768 条 HPU_MEM line；噪声预算仍为 5 bit，包数仍为 1。
 这里不把包数不变或局部资源变化表述为端到端性能结论。
 
-实际回归包括旧简化 PSI、二维集中式 SealPIR、四种 APSI 小规模场景、APSI 包
+实际回归包括二维集中式 SealPIR、四种 APSI 小规模场景、APSI 包
 生成/校验，以及恢复到基准版本的 BFV context/evaluator 测试，均通过。`small`、
 `medium` 两个 `hpu_query` 均通过 `hpu_validate_package`。这些结果只覆盖 SEAL
 oracle、HPU 软件执行器和 host 编码指令模型，`real_hardware_verified` 保持
@@ -164,3 +164,23 @@ oracle、HPU 软件执行器和 host 编码指令模型，`real_hardware_verifie
 
 底层目录相对 `8b3cbbf` 的逐文件 Git blob 证明和复现命令见
 [APSI PSI HPU 底层零改动审核报告](APSI_CONCENTRATED_HPU_DIFF_AUDIT.md)。
+
+## 7. 同步原作者上游后的复测
+
+在原作者上游 `feature/operator-resource-management` 的 `7306d1c` 上重新构建和验证后，
+APSI 的包数、计算图节点数、指令数、DMA span、算子数量、噪声预算和最终集合交集均未
+改变。上游在线 twiddle 生成使交付清单中的 HPU_MEM 行数下降：
+
+| profile | 包 | nodes | instructions | DMA spans | HPU_MEM（同步前 → 同步后） | noise | 结果 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| small multi | 1 | 244 | 452,775 | 179,317 | 303,110 → 283,766 | 7 bit | PASS |
+| medium 8192/512 | 1 | 292 | 301,321 | 118,953 | 179,976 → 171,336 | 5 bit | PASS |
+
+本次服务器实测中，small 的图编译及软件验证为 11.749 秒，完整交付进程为 15.920 秒、
+峰值 RSS 2,655,472 KiB；medium 分别为 5.639 秒、8.379 秒和 1,723,756 KiB。计时受
+共享服务器负载影响，只作为本次运行记录，不能据此推断性能退化或硬件吞吐变化。
+
+small 的 empty、single、multi、boundary 四种应用回归、medium 的 32 元素交集恢复、
+SEAL oracle、HPU 软件执行、host 编码指令回放和两个应用包的 `hpu_validate_package`
+均通过。仍未执行真实 HPU/RTL。完整同步依据、旧新资源对比和复现命令见
+[PIR/PSI 上游同步与验证审计](PIR_PSI_UPSTREAM_SYNC_AUDIT.md)。

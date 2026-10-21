@@ -112,7 +112,8 @@ std::vector<NttBatch> make_stage_batches(
 
 std::uint64_t inverse_mod_small(std::uint64_t value, std::uint64_t modulus)
 {
-    // This helper is used only for odd Galois elements modulo 2N <= 131072.
+    // Used for odd Galois elements modulo 2N and u32 twiddle ratios. Euclidean
+    // coefficients remain within the u32 modulus, safely inside int64.
     std::int64_t old_r = static_cast<std::int64_t>(value);
     std::int64_t r = static_cast<std::int64_t>(modulus);
     std::int64_t old_s = 1;
@@ -127,7 +128,7 @@ std::uint64_t inverse_mod_small(std::uint64_t value, std::uint64_t modulus)
         s = next_s;
     }
     if (old_r != 1) {
-        throw std::invalid_argument("Galois element is not invertible modulo 2N");
+        throw std::invalid_argument("value is not invertible modulo modulus");
     }
     old_s %= static_cast<std::int64_t>(modulus);
     if (old_s < 0) {
@@ -145,6 +146,18 @@ void validate_negacyclic_root(
         || pow_mod(psi, 2 * degree, modulus) != 1U) {
         throw std::invalid_argument("psi is not a primitive 2N-th root");
     }
+}
+
+std::size_t stage_parameter_ratio_count(std::size_t degree, std::uint32_t modulus)
+{
+    if (degree < kArrayWidth || degree > kMaxDegree || (degree & (degree - 1)) != 0
+        || modulus < 3) {
+        throw std::invalid_argument("invalid stage twiddle parameter degree/modulus");
+    }
+    std::size_t count = 0;
+    for (std::size_t batches = degree / kArrayWidth; batches > kTwiddleChains;
+         batches >>= 1U) ++count;
+    return count;
 }
 
 } // namespace
@@ -176,6 +189,78 @@ std::uint32_t inverse_mod_prime(std::uint32_t value, std::uint32_t modulus)
         throw std::invalid_argument("non-zero value and prime modulus required");
     }
     return pow_mod(value, static_cast<std::uint64_t>(modulus) - 2U, modulus);
+}
+
+std::vector<std::uint32_t> expand_stage_twiddles(
+    const std::vector<std::uint32_t>& parameters,
+    std::uint32_t modulus,
+    std::size_t degree)
+{
+    const auto ratio_count = stage_parameter_ratio_count(degree, modulus);
+    if (parameters.size() != kStageTwiddleParameterWords
+        || std::any_of(parameters.begin(), parameters.end(),
+            [&](std::uint32_t value) { return value == 0 || value >= modulus; })) {
+        throw std::invalid_argument("stage twiddle parameters require 128 canonical nonzero u32 words");
+    }
+    const auto batches = degree / kArrayWidth;
+    for (std::size_t slot = std::min(kTwiddleChains, batches); slot < kTwiddleChains; ++slot) {
+        if (parameters[kButterflyCount + slot - 1] != 1)
+            throw std::invalid_argument("unused stage twiddle V parameters must be one");
+    }
+    constexpr auto ratio_start = kButterflyCount + kTwiddleChains - 1;
+    for (std::size_t word = ratio_start + ratio_count; word < parameters.size(); ++word) {
+        if (parameters[word] != 1)
+            throw std::invalid_argument("unused stage twiddle R/padding parameters must be one");
+    }
+    std::array<std::array<std::uint32_t, kButterflyCount>, kTwiddleChains> chains {};
+    for (std::size_t slot = 0; slot < kTwiddleChains; ++slot) {
+        const auto initial = slot == 0 ? 1U : parameters[kButterflyCount + slot - 1];
+        for (std::size_t lane = 0; lane < kButterflyCount; ++lane)
+            chains[slot][lane] = mul_mod(parameters[lane], initial, modulus);
+    }
+    std::vector<std::uint32_t> result;
+    result.reserve(degree / 2);
+    for (std::size_t batch = 0; batch < batches; ++batch) {
+        auto& chain = chains[batch % kTwiddleChains];
+        result.insert(result.end(), chain.begin(), chain.end());
+        if (batch + kTwiddleChains < batches) {
+            std::size_t next = batch / kTwiddleChains + 1;
+            std::size_t ratio = 0;
+            while ((next & 1U) == 0) { ++ratio; next >>= 1U; }
+            for (auto& value : chain)
+                value = mul_mod(value, parameters[ratio_start + ratio], modulus);
+        }
+    }
+    return result;
+}
+
+std::vector<std::uint32_t> pack_stage_twiddles(
+    const std::vector<std::uint32_t>& full_table,
+    std::uint32_t modulus,
+    std::size_t degree)
+{
+    const auto ratio_count = stage_parameter_ratio_count(degree, modulus);
+    if (full_table.size() != degree / 2 || full_table.front() != 1
+        || std::any_of(full_table.begin(), full_table.end(),
+            [&](std::uint32_t value) { return value == 0 || value >= modulus; })) {
+        throw std::invalid_argument("stage twiddle table requires N/2 canonical nonzero roots and T[0]=1");
+    }
+    std::vector<std::uint32_t> parameters(kStageTwiddleParameterWords, 1);
+    std::copy_n(full_table.begin(), kButterflyCount, parameters.begin());
+    const auto batches = degree / kArrayWidth;
+    for (std::size_t slot = 1; slot < std::min(kTwiddleChains, batches); ++slot)
+        parameters[kButterflyCount + slot - 1] = full_table[kButterflyCount * slot];
+    constexpr auto ratio_start = kButterflyCount + kTwiddleChains - 1;
+    for (std::size_t ratio = 0; ratio < ratio_count; ++ratio) {
+        const auto before = kTwiddleChains * ((std::size_t{1} << ratio) - 1);
+        const auto after = kTwiddleChains * (std::size_t{1} << ratio);
+        const auto inverse = static_cast<std::uint32_t>(inverse_mod_small(
+            full_table[kButterflyCount * before], modulus));
+        parameters[ratio_start + ratio] = mul_mod(full_table[kButterflyCount * after], inverse, modulus);
+    }
+    if (expand_stage_twiddles(parameters, modulus, degree) != full_table)
+        throw std::invalid_argument("stage twiddle table does not match the K=8 physical recurrence");
+    return parameters;
 }
 
 void InverseNttTables::set_natural_post_scale(std::vector<std::uint32_t> factors)

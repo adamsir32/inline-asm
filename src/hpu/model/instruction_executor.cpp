@@ -291,8 +291,9 @@ InstructionExecutionResult execute_instructions(
                     throw UnsupportedContract("transform mode/flag is not modeled");
                 const auto& data = require_object(instruction.pdst);
                 const auto& twiddle = require_object(instruction.psrc1);
-                if (data.small_bank || twiddle.small_bank || data.words.size() != 2 * twiddle.words.size())
-                    throw std::invalid_argument("transform data/twiddle lengths or banks differ");
+                if (data.small_bank || twiddle.small_bank
+                    || twiddle.words.size() != kStageTwiddleParameterWords)
+                    throw std::invalid_argument("transform requires a regular-bank two-line K=8 twiddle parameter object");
                 const auto degree = data.words.size();
                 if (degree < 128 || degree > 65536 || (degree & (degree - 1)) != 0)
                     throw std::invalid_argument("transform degree must be a power of two in [128, 65536]");
@@ -305,8 +306,9 @@ InstructionExecutionResult execute_instructions(
                         input[i] = data.words[bit_reverse(i, input.size())];
                     ++report.forward_boundary_conversions;
                 }
+                const auto stage_twiddles = expand_stage_twiddles(twiddle.words, *modulus, degree);
                 auto output = execute_ntt_stage(
-                    input, twiddle.words, *modulus,
+                    input, stage_twiddles, *modulus,
                     static_cast<std::size_t>(instruction.idx0), inverse);
                 if (inverse && options.ntt_contract
                     == InstructionNttContract::natural_coefficient_boundaries

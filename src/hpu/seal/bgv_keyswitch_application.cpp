@@ -87,12 +87,14 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
               hpu::runtime::AllocationKind::twiddle);
     const auto forward = model.forward_twiddles();
     for (std::size_t stage = 0; stage < forward.size(); ++stage) {
-        image.add(stage_id(prefix + "/ntt", stage), forward[stage],
+        image.add(stage_id(prefix + "/ntt", stage),
+                  hpu::model::pack_stage_twiddles(forward[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const auto inverse = model.inverse_twiddles();
     for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
-        image.add(stage_id(prefix + "/intt", stage), inverse.stages[stage],
+        image.add(stage_id(prefix + "/intt", stage),
+                  hpu::model::pack_stage_twiddles(inverse.stages[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const std::uint32_t inverse_psi = hpu::model::inverse_mod_prime(psi, modulus);
@@ -115,7 +117,10 @@ void add_galois_twiddles(hpu::runtime::HpuMemImage& image,
     for (std::size_t basis = 0; basis < tables.size(); ++basis) {
         const auto prefix = mod_id("constants/twiddle/galois", basis) + "/intt";
         for (std::size_t stage = 0; stage < tables[basis].stages.size(); ++stage) {
-            image.add(stage_id(prefix, stage), tables[basis].stages[stage],
+            image.add(stage_id(prefix, stage),
+                      hpu::model::pack_stage_twiddles(
+                          tables[basis].stages[stage], tables[basis].modulus,
+                          tables[basis].post_untwist_scale.size()),
                       hpu::runtime::AllocationKind::twiddle);
         }
         const auto& raw_post = tables[basis].post_untwist_scale;
@@ -226,7 +231,7 @@ std::uint64_t estimate_bgv_keyswitch_image_lines(
     }
     const std::uint64_t q = active_q_count;
     const std::uint64_t polynomial_lines = degree / hpu::runtime::kHpuMemLineWords;
-    const std::uint64_t stage_lines = degree / (2 * hpu::runtime::kHpuMemLineWords);
+    const std::uint64_t stage_lines = hpu::model::kStageTwiddleParameterLines;
     const std::uint64_t stages = ntt_stage_count(degree);
     const std::uint64_t twiddle_lines_per_modulus =
         2 * polynomial_lines + 2 * stages * stage_lines;
@@ -257,7 +262,7 @@ std::uint64_t estimate_bgv_rotation_image_lines(
     const std::uint64_t base = estimate_bgv_keyswitch_image_lines(
         degree, active_q_count, key_modulus_count);
     const std::uint64_t polynomial_lines = degree / hpu::runtime::kHpuMemLineWords;
-    const std::uint64_t stage_lines = degree / (2 * hpu::runtime::kHpuMemLineWords);
+    const std::uint64_t stage_lines = hpu::model::kStageTwiddleParameterLines;
     return base + active_q_count *
         (3 * polynomial_lines + ntt_stage_count(degree) * stage_lines);
 }
@@ -427,14 +432,14 @@ static BgvKeySwitchApplication build_bgv_keyswitch_application_impl(
     };
     const auto inverse_twiddles = [&](std::size_t id) {
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/intt", stage), degree / 2);
+            recipe.load(3, stage_id(twiddle(id) + "/intt", stage), hpu::model::kStageTwiddleParameterWords);
         }
         recipe.load(3, twiddle(id) + "/intt/post_untwist_scale", degree);
     };
     const auto forward_twiddles = [&](std::size_t id) {
         recipe.load(3, twiddle(id) + "/ntt/pre_twist", degree);
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/ntt", stage), degree / 2);
+            recipe.load(3, stage_id(twiddle(id) + "/ntt", stage), hpu::model::kStageTwiddleParameterWords);
         }
     };
 
@@ -660,23 +665,26 @@ static BgvKeySwitchApplication build_bgv_galois_application(
     hpu::resource::Recording recording;
     std::ostringstream body;
     body << "        /* BGV Galois automorphism in HPU, then Galois KeySwitch */\n";
-    body << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
+    const auto native_modulus_table = hpu::resource::make_operand("modulus_table", 4);
+    const auto native_transform_table = hpu::resource::make_operand("transform_table", 3);
+    const auto native_value = hpu::resource::make_operand("value", 0);
+    body << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx,
                        hpu::DloadFlag::small_bank);
     for (std::size_t component = 0; component < 2; ++component) {
         for (std::size_t basis = 0; basis < q_count; ++basis) {
             body << hpu::resource::select_modulus(static_cast<int>(basis));
-            body << hpu::resource::read(hpu::resource::value, hpu::DataType::poly);
+            body << hpu::resource::read(native_value, hpu::DataType::poly);
             body << generate_hpu_intt_body_asm(
-                static_cast<int>(degree), hpu::resource::value, hpu::resource::transform_table, false);
+                static_cast<int>(degree), native_value, native_transform_table, false);
             body << generate_hpu_ntt_body_asm(
-                static_cast<int>(degree), hpu::resource::value, hpu::resource::transform_table, false);
-            body << hpu::resource::publish(hpu::resource::value, 1);
+                static_cast<int>(degree), native_value, native_transform_table, false);
+            body << hpu::resource::publish(native_value, 1);
         }
     }
     body << hpu::scheme::bgv::generate_keyswitch_ntt_body_asm(
         static_cast<int>(degree), layout,
         static_cast<int>(key_modulus_count), false, false);
-    body << hpu::resource::discard(hpu::resource::modulus_table) << hpu::resource::finish_program();
+    body << hpu::resource::discard(native_modulus_table) << hpu::resource::finish_program();
     auto instructions = hpu::assemble_source(body.str());
     hpu::validate_executable_program(instructions);
     const auto encoded_dma = hpu::collect_dma_relocations(instructions);
@@ -692,12 +700,12 @@ static BgvKeySwitchApplication build_bgv_galois_application(
             recipe.load(0,
                 mod_id("input/original/c" + std::to_string(component), basis), degree);
             for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(fused_prefix, stage), degree / 2);
+                recipe.load(3, stage_id(fused_prefix, stage), hpu::model::kStageTwiddleParameterWords);
             }
             recipe.load(3, fused_prefix + "/post_untwist_scale", degree);
             recipe.load(3, canonical_prefix + "/pre_twist", degree);
             for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(canonical_prefix, stage), degree / 2);
+                recipe.load(3, stage_id(canonical_prefix, stage), hpu::model::kStageTwiddleParameterWords);
             }
             recipe.store(0,
                 mod_id(component == 0 ? "input/c0" : "input/c2", basis), degree);
@@ -778,24 +786,12 @@ BgvKeySwitchRuntimeArtifacts render_bgv_keyswitch_runtime_artifacts(
         throw std::logic_error("BGV KeySwitch executable header has unexpected structure");
     }
     result.header.insert(position, "int hpu_run_" + identifier + "(void);\n\n");
-    result.source = hpu::render_executable_source(
-        stem, application.instructions, application.image.capacity_lines());
-    std::ostringstream source;
-    source << "\nstatic const hpu_dma_span_t hpu_program_" << identifier
-           << "_resolved_spans[] = {\n";
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     for (const auto& binding : application.dma) {
-        source << "    { UINT32_C(" << binding.span.line_offset << "), UINT32_C("
-               << binding.span.line_count << ") },\n";
+        fixed_spans.push_back({binding.span.line_offset, binding.span.line_count});
     }
-    source << "};\n\nint hpu_run_" << identifier << "(void) {\n"
-           << "    return hpu_program_" << identifier << "(\n"
-           << "        hpu_program_" << identifier << "_resolved_spans,\n"
-           << "        HPU_PROGRAM_";
-    for (char character : identifier) {
-        source << static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-    }
-    source << "_DMA_COUNT);\n}\n";
-    result.source += source.str();
+    result.source = hpu::render_fixed_executable_source(
+        stem, application.instructions, application.image.capacity_lines(), fixed_spans);
 
     std::ostringstream manifest;
     manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,"

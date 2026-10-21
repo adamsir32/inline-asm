@@ -195,7 +195,7 @@ int main(int argc, char** argv)
                     65536, 3, 4);
             auto package = hpu::seal_adapter::build_bgv_multiply_relinearize_application(
                 context, left, right, keys, required);
-            require(required == 148481 && package.image.used_lines() == required &&
+            require(required == 83201 && package.image.used_lines() == required &&
                         !package.dma.empty(),
                     "N=65536 BGV combined image exceeds estimated window");
             std::cout << "N=65536 BGV Multiply+Relinearize image passed: "

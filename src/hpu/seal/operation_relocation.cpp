@@ -1,9 +1,12 @@
 #include "hpu/seal/operation_relocation.hpp"
 
 #include "hpu/seal/ckks_level.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
 #include <regex>
+#include "assembler.hpp"
+#include "executable.hpp"
 #include <stdexcept>
 #include <utility>
 
@@ -67,6 +70,37 @@ std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
     if (dma_token_count != result.size()) {
         throw std::logic_error(
             "generated DMA instruction does not use the frozen x10/x11 ABI");
+    }
+    return result;
+}
+
+
+std::vector<DmaInstruction> declared_dma_instructions(
+    const hpu::resource::OperatorProgram* program, const std::string& compatibility_body)
+{
+    if (!program) return parse_dma_instructions(compatibility_body);
+    std::vector<DmaInstruction> result;
+    for (const auto& port : program->ports) {
+        const auto& node = program->operations.at(port.operation_index);
+        DmaInstruction dma;
+        dma.direction = port.load ? CkksDmaDirection::load : CkksDmaDirection::store;
+        const auto id = port.load ? node.outputs.at(0) : node.inputs.at(0);
+        dma.object_slot = program->values.at(id).variable.compatibility_slot;
+        dma.load_type = static_cast<hpu::DataType>(node.instruction.type);
+        dma.load_flag = static_cast<hpu::DloadFlag>(node.instruction.dma_flag);
+        dma.store_release = node.instruction.type;
+        result.push_back(dma);
+    }
+    const auto encoded = hpu::collect_dma_relocations(hpu::assemble_source(compatibility_body));
+    if (encoded.size() != result.size()) throw std::invalid_argument("native DMA ports disagree with compatibility body");
+    for (std::size_t i = 0; i < encoded.size(); ++i) {
+        const auto& actual = encoded[i];
+        const auto& expected = result[i];
+        if (actual.object_id != expected.object_slot ||
+            actual.direction != (expected.direction == CkksDmaDirection::load ? hpu::Mnemonic::kDload : hpu::Mnemonic::kDstore) ||
+            actual.type_or_release != (expected.direction == CkksDmaDirection::load ? static_cast<int>(expected.load_type) : expected.store_release) ||
+            (expected.direction == CkksDmaDirection::load && actual.flag != static_cast<int>(expected.load_flag)))
+            throw std::invalid_argument("native DMA declaration differs from compatibility instruction");
     }
     return result;
 }
@@ -404,7 +438,7 @@ void bind_transform_limb(
             3, canonical_twiddle_id(
                 modulus_id, inverse,
                 "stage" + std::to_string(stage)),
-            degree / 2);
+            hpu::model::kStageTwiddleParameterWords);
     }
     if (inverse) {
         bindings.load_words(
@@ -427,7 +461,7 @@ void bind_fused_inverse_limb(
     for (std::size_t stage = 0; stage < stages; ++stage) {
         bindings.load_words(
             3, twiddle_prefix + "/stage" + std::to_string(stage),
-            degree / 2);
+            hpu::model::kStageTwiddleParameterWords);
     }
     bindings.load_words(
         3, twiddle_prefix + "/post_untwist_scale", degree);
@@ -836,13 +870,13 @@ CkksRelocationSchedule build_ckks_relocation_schedule(
     const std::size_t degree = key_data->parms().poly_modulus_degree();
     const CkksLevelChain level_chain(context);
 
-    const auto program_instructions = parse_dma_instructions(program.body_asm);
+    const auto program_instructions = declared_dma_instructions(program.operator_program.get(), program.body_asm);
     std::vector<std::vector<DmaInstruction>> operation_instructions;
     operation_instructions.reserve(program.operations.size());
     std::size_t operation_dma_count = 0;
     for (const auto& operation : program.operations) {
         operation_instructions.push_back(
-            parse_dma_instructions(operation.body_asm));
+            declared_dma_instructions(operation.operator_program.get(), operation.body_asm));
         operation_dma_count += operation_instructions.back().size();
     }
     if (program_instructions.size() < operation_dma_count

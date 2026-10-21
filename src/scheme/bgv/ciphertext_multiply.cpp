@@ -42,15 +42,16 @@ std::string generate_ciphertext_multiply_ntt_body_asm(
     }
     std::ostringstream asm_code;
     asm_code << "        /* BGV MULTIPLY NTT: tensor -> BGV special-P KeySwitch */\n";
+    const auto native_modulus = hpu::resource::make_operand("modulus_table", 4);
     if (manage_modulus_table) {
-        asm_code << hpu::resource::read(hpu::resource::modulus_table, hpu::DataType::mod_ctx,
+        asm_code << hpu::resource::read(native_modulus, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
     }
     asm_code << ::generate_hpu_cmult_body_asm(
         static_cast<int>(layout.q_mod_ids.size()), false, false);
     asm_code << generate_keyswitch_ntt_body_asm(
         N, layout, plaintext_mod_id, false, false);
-    if (manage_modulus_table) asm_code << hpu::resource::discard(hpu::resource::modulus_table);
+    if (manage_modulus_table) asm_code << hpu::resource::discard(native_modulus);
     if (append_psync) asm_code << hpu::resource::finish_program();
     return asm_code.str();
 }

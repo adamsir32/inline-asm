@@ -42,9 +42,9 @@ std::string generate_hpu_keyswitch_body_asm_impl(
         full_contexts.end(), p_contexts.begin(), p_contexts.end());
     const int dnum = static_cast<int>(layout.key_digits.size());
 
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
-    const auto TWIDDLE = hpu::resource::transform_table;
-    const auto POBJ_TMP_A = hpu::resource::value;
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
+    const auto TWIDDLE = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_TMP_A = hpu::resource::make_operand("value", 0);
 
     asm_code << "        /* "
              << (bfv_label ? "BFV " : (rounded_single_p ? "ROUNDED SINGLE-P " : ""))
@@ -80,9 +80,9 @@ std::string generate_hpu_keyswitch_body_asm_impl(
 
         // 3. Multiplication with Evk
         asm_code << "        /* --- Step 3: Multiply with Evaluation Key --- */\n";
-        const auto POBJ_CT = hpu::resource::value;
-        const auto POBJ_EVK = hpu::resource::auxiliary;
-        const auto POBJ_OUT = hpu::resource::accumulator;
+        const auto POBJ_CT = hpu::resource::make_operand("value", 0);
+        const auto POBJ_EVK = hpu::resource::make_operand("auxiliary", 1);
+        const auto POBJ_OUT = hpu::resource::make_operand("accumulator", 2);
 
         for (int v = 0; v < 2; ++v) {
             asm_code << "        /* evk" << v << " mult for all bases */\n";
@@ -110,9 +110,9 @@ std::string generate_hpu_keyswitch_body_asm_impl(
 
     // 4. INTT
     asm_code << "        /* --- Step 4: INTT on Q and P bases --- */\n";
-    const auto POBJ_MOD_CTX2 = hpu::resource::modulus_table;
-    const auto TWIDDLE2 = hpu::resource::transform_table;
-    const auto POBJ_TMP_A2 = hpu::resource::value;
+    const auto POBJ_MOD_CTX2 = hpu::resource::make_operand("modulus_table", 4);
+    const auto TWIDDLE2 = hpu::resource::make_operand("transform_table", 3);
+    const auto POBJ_TMP_A2 = hpu::resource::make_operand("value", 0);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX2, hpu::DataType::mod_ctx,
                                hpu::DloadFlag::small_bank);
@@ -146,10 +146,10 @@ std::string generate_hpu_keyswitch_body_asm_impl(
         }
     }
     asm_code << "        /* --- Step 6: Add base component to out0 --- */\n";
-    const auto POBJ_MOD_CTX_S6 = hpu::resource::modulus_table;
-    const auto POBJ_OUT0 = hpu::resource::value;
-    const auto POBJ_BASE = hpu::resource::auxiliary;
-    const auto POBJ_FINAL_OUT0 = hpu::resource::accumulator;
+    const auto POBJ_MOD_CTX_S6 = hpu::resource::make_operand("modulus_table", 4);
+    const auto POBJ_OUT0 = hpu::resource::make_operand("value", 0);
+    const auto POBJ_BASE = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_FINAL_OUT0 = hpu::resource::make_operand("accumulator", 2);
 
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX_S6, hpu::DataType::mod_ctx,

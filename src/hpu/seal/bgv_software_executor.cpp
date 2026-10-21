@@ -1,6 +1,7 @@
 #include "hpu/seal/bgv_software_executor.hpp"
 
 #include "hpu/model/hardware_ntt.hpp"
+#include "hpu/seal/detail/stage_twiddle_memory.hpp"
 #include "scheme/bfv/galois.hpp"
 
 #include <algorithm>
@@ -147,7 +148,8 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::inverse_ntt(
     for (std::size_t stage = 0; stage < model.log_degree(); ++stage) {
         const auto& item = allocation(
             twiddle_prefix + "/intt/stage" + std::to_string(stage));
-        tables.stages.push_back(memory_.read(item.span, degree_ / 2));
+        tables.stages.push_back(detail::read_stage_twiddles(
+            memory_, item.span, modulus, degree_));
     }
     tables.set_natural_post_scale(read(
         twiddle_prefix + "/intt/post_untwist_scale"));
@@ -173,7 +175,8 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::forward_ntt(
     for (std::size_t stage = 0; stage < model.log_degree(); ++stage) {
         const auto& item = allocation(
             twiddle_prefix + "/ntt/stage" + std::to_string(stage));
-        stages.push_back(memory_.read(item.span, degree_ / 2));
+        stages.push_back(detail::read_stage_twiddles(
+            memory_, item.span, modulus, degree_));
     }
     const auto pre_twist = read(twiddle_prefix + "/ntt/pre_twist");
     Limb prepared = coefficients;

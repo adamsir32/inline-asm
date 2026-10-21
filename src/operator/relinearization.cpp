@@ -15,10 +15,10 @@ std::string generate_add_second_component_body_asm(
 {
     std::ostringstream asm_code;
 
-    const auto POBJ_T1 = hpu::resource::value;
-    const auto POBJ_KS1 = hpu::resource::auxiliary;
-    const auto POBJ_OUT1 = hpu::resource::accumulator;
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
+    const auto POBJ_T1 = hpu::resource::make_operand("value", 0);
+    const auto POBJ_KS1 = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_OUT1 = hpu::resource::make_operand("accumulator", 2);
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     asm_code << "        /* --- Relinearization final merge: out1 = t1 + ks1 --- */\n";
     if (manage_modulus_table) {

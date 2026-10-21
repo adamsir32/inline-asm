@@ -37,8 +37,8 @@ math(EXPR FHE_T_CONTEXT "${FHE_NUM_Q} + ${FHE_NUM_P}")
 math(EXPR FHE_BFV_MSK_CONTEXT
     "${FHE_NUM_Q} + ${FHE_NUM_P} + ${FHE_BFV_NUM_B}")
 math(EXPR FHE_BFV_T_CONTEXT "${FHE_BFV_MSK_CONTEXT} + 1")
-math(EXPR FHE_STAGE_WORDS "${FHE_N} / 2")
-math(EXPR FHE_STAGE_LINES "(${FHE_STAGE_WORDS} + 63) / 64")
+set(FHE_STAGE_WORDS 128)
+set(FHE_STAGE_LINES 2)
 
 set(FHE_STAGE_COUNT 0)
 set(FHE_STAGE_LENGTH 1)
@@ -340,6 +340,20 @@ foreach(CASE_NAME IN LISTS PACKAGED_CASES)
             message(FATAL_ERROR
                 "${CASE_NAME}: ABI does not mark required twiddle images as included")
         endif()
+        if(NOT CASE_ABI MATCHES "\"stage_twiddle_format\": \"hpu-twiddle-k8-v1\""
+                OR NOT CASE_ABI MATCHES "\"twiddle_chains\": 8")
+            message(FATAL_ERROR
+                "${CASE_NAME}: ABI does not identify the K=8 stage parameter format")
+        endif()
+        foreach(TWIDDLE_FILE IN LISTS CASE_TWIDDLE_FILES)
+            if(TWIDDLE_FILE MATCHES "/stage_[0-9]+\\.u32\\.bin$")
+                file(SIZE "${TWIDDLE_FILE}" STAGE_PARAMETER_BYTES)
+                if(NOT STAGE_PARAMETER_BYTES EQUAL 512)
+                    message(FATAL_ERROR
+                        "${CASE_NAME}: stage payload must contain exactly 512 bytes: ${TWIDDLE_FILE}")
+                endif()
+            endif()
+        endforeach()
     else()
         if(CASE_TWIDDLE_FILES OR EXISTS "${HARDWARE_ROOT}/twiddle_map.csv")
             message(FATAL_ERROR
@@ -442,11 +456,11 @@ if(NOT HARDWARE_ABI MATCHES "\"reserved_bits\": 48")
 endif()
 if(NOT HARDWARE_ABI MATCHES
         "\"stage_payload_words\": ${FHE_STAGE_WORDS}")
-    message(FATAL_ERROR "Hardware ABI does not provide N/2 physical twiddles per stage")
+    message(FATAL_ERROR "Hardware ABI does not provide 128 K=8 parameter words per stage")
 endif()
 if(NOT HARDWARE_ABI MATCHES
         "\"stage_payload_lines\": ${FHE_STAGE_LINES}")
-    message(FATAL_ERROR "Hardware ABI stage twiddle line count is not ceil((N/2)/64)")
+    message(FATAL_ERROR "Hardware ABI stage twiddle parameter line count is not 2")
 endif()
 if(NOT HARDWARE_ABI MATCHES
         "\"coefficient_physical_order\": \"memory\\[position\\] = coefficient\\[bit_reverse\\(position\\)\\]\"")
@@ -666,12 +680,28 @@ file(READ "${ROOT}/output/ckks_rescale.asm" RESCALE_ASM)
 foreach(MARKER
         "CKKS RESCALE: rounded drop-last q_${FHE_Q_PRIME} for 2 component(s)"
         "ROUNDED DROP-LAST: round(x/q_${FHE_Q_PRIME}) for 2 component(s)"
-        "add floor(q_last/2) in every Q context"
-        "Formula: ModDown(x + floor(q_last/2), P={q_last})"
+        "component 0 stage-1: add floor(P/2) in Q union P"
+        "component 1 stage-1: add floor(P/2) in Q union P"
+        "Formula: round(x/P) = ModDown(x + floor(P/2), P={P})"
         "MODDOWN stage-1: BConv P -> Q")
     string(FIND "${RESCALE_ASM}" "${MARKER}" POSITION)
     if(POSITION EQUAL -1)
         message(FATAL_ERROR "Rescale stream is missing marker: ${MARKER}")
+    endif()
+endforeach()
+# Rescale uses the shared single-P rounded ModDown backend. Check actual
+# arithmetic as well as its markers: half-P addition in every input context,
+# one subtraction/P^-1 product per retained limb, and exact one-source BConv.
+math(EXPR RESCALE_EXPECTED_PADD "2 * ${FHE_NUM_Q}")
+math(EXPR RESCALE_EXPECTED_PSUB "2 * ${FHE_Q_PRIME}")
+math(EXPR RESCALE_EXPECTED_PMUL "2 * (1 + 2 * ${FHE_Q_PRIME})")
+foreach(OPCODE PADD PSUB PMUL)
+    string(TOLOWER "${OPCODE}" MNEMONIC)
+    string(REGEX MATCHALL "\"${MNEMONIC} p" RESCALE_OPERATIONS "${RESCALE_ASM}")
+    list(LENGTH RESCALE_OPERATIONS RESCALE_OPERATION_COUNT)
+    if(NOT RESCALE_OPERATION_COUNT EQUAL RESCALE_EXPECTED_${OPCODE})
+        message(FATAL_ERROR
+            "Rescale ${MNEMONIC} count ${RESCALE_OPERATION_COUNT} differs from shared rounded ModDown flow")
     endif()
 endforeach()
 file(READ "${ROOT}/src/scheme/ckks/rescale.cpp" RESCALE_SOURCE)
@@ -681,7 +711,7 @@ if(RESCALE_MODDOWN_POSITION EQUAL -1)
     message(FATAL_ERROR "Rescale does not reuse the shared rounded drop-last generator")
 endif()
 file(READ "${ROOT}/src/operator/rounded_drop_last.cpp" ROUNDED_DROP_SOURCE)
-if(NOT ROUNDED_DROP_SOURCE MATCHES "generate_hpu_moddown_body_asm")
+if(NOT ROUNDED_DROP_SOURCE MATCHES "generate_hpu_moddown_contexts_body_asm")
     message(FATAL_ERROR "Shared rounded drop-last backend does not reuse ModDown")
 endif()
 file(READ "${ROOT}/outputs/ckks_rescale/test_data/params.json" RESCALE_PARAMS)
@@ -884,8 +914,10 @@ endif()
 if(NOT RV_EXPECTED_DECODE MATCHES "0x8140005B,0x1028000,custom2,\"pfree p5\"")
     message(FATAL_ERROR "RV decode expectations are missing the architectural pfree encoding")
 endif()
-if(NOT RV_EXPECTED_DECODE MATCHES "0x4480FFDB,0x08901FF,custom2,\"pntt p2, p3, 15, 3, 1\"")
-    message(FATAL_ERROR "RV decode expectations are missing the duplicated-PDATA STG encoding")
+# The smoke fixture uses p0; the encoder self-test separately checks nonzero
+# duplicated PDATA with pntt p2,p3,1,0,0 -> 0x4480C45B / 0x0890188.
+if(NOT RV_EXPECTED_DECODE MATCHES "0x4000FFDB,0x08001FF,custom2,\"pntt p0, p3, 15, 3, 1\"")
+    message(FATAL_ERROR "RV decode expectations are missing the fixed STG encoding")
 endif()
 if(NOT RV_EXPECTED_DECODE MATCHES "0x08B540AB,0x2116A81,custom1,\"dload x10, x11, p4, 2, 1\"")
     message(FATAL_ERROR "RV decode expectations are missing mod_ctx small-bank flag[0]")

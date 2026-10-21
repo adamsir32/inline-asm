@@ -82,7 +82,7 @@ HPU 算术通过证据。目标证据必须来自 RISC-V 分支真正发出的 H
 | 算子数据包 | 21 个目录：18 个 HPU 算子包，以及 3 个 CKKS/BGV/BFV host-only Encode/Decode 包 |
 | 数学与硬件文件 | 所有 manifest 路径、字节数、FNV-1a、256B line geometry、主镜像切片和连续 line map 均通过 |
 | Nexus-AM 同步副本 | BFV 硬件用例为单 kernel CiphertextMultiply 和 ModSwitch；Encode/Decode 不再同步为 HPU 用例，旧双 kernel 包不作为本版签字依据 |
-| HPU_MEM 容量 | BFV CiphertextMultiply 统一镜像为 30913 line；所有包均由交付门禁检查不超过配置的 65536 line |
+| HPU_MEM 容量 | BFV CiphertextMultiply 统一镜像为 20833 line；所有包均由交付门禁检查不超过配置的 65536 line |
 | 本仓库自检 | 指令编码、方案 Encode 和 reference 均通过 |
 | Nexus-AM host 自检 | 53 项无内部失败，但 53 项均按 `PASS_PROBE` 标为 `qualification-pending/Skipped` |
 
@@ -241,8 +241,11 @@ layout。NTT stage 0 前显式执行物理顺序的 `PMUL psi^i`；每个 PNTT b
 由 64 个 BF lane 消费 64 个 twiddle，随后执行 P。PINTT 反向遍历对应的
 前向 stage，每批先执行 `P^-1`，再使用 dual schedule 的 lazy-scale BF
 twiddle。最终显式执行物理顺序的 `PMUL (N^-1 * psi^-i)`，不依赖 PE 隐式
-归一化或 twist。每个 stage 固定 `N/2` 个 `uint32`、`N/128` 条 256B line；
-默认 `N=4096` 时为 2048 words、32 line。
+归一化或 twist。生产镜像的每个 stage 固定为 **128 个 u32、2 条 256B line**
+的 K=8 U/V/R 参数，硬件内部重构原来的 `N/2` 个物理 BF 因子；pre/post
+仍为 N 个 word。即使 N=128、PINTT stage 0，也必须加载两条参数 line。
+旧完整表镜像必须重新生成，不能只缩短 DMA count；精确格式见
+[硬件组迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
 
 硬件组原始 round-trip 自测只能证明 PNTT/PINTT 互逆，不能证明逐点乘对应 FHE
 卷积；自然顺序输入曾出现 round-trip 通过而卷积失败。当前 reference 因此额外检查
@@ -302,7 +305,7 @@ slots 精确比较；CKKS 对全部 `N/2` 个复数 slots 按生成参数中的�
    一致。每条记录都必须是 `RESOLVED`。
 2. 为 ct、tensor、ModUp、rlk、KeySwitch 等中间对象分配 scratch，并在提交前检查
    整个 span 不超过 HPU_MEM window；当前软件上限为 65536 line，BFV 单 kernel
-   实际配置 30913 line，末尾 guard 由 IT runtime 在真实 window 之外维护。
+   实际配置 20833 line，末尾 guard 由 IT runtime 在真实 window 之外维护。
 3. 配置 HPU_MEM CSR，执行提交前 cache clean、读回前 invalidate，并处理
    `HPU_STATUS`、`HPU_FAULT_STATUS`、W1C fault 和完成 IRQ。
 4. `psync` 只放在完整程序末尾，用于向 CPU 报告程序完成；算子内部不把它作为
@@ -312,7 +315,7 @@ slots 精确比较；CKKS 对全部 `N/2` 个复数 slots 按生成参数中的�
 
 1. RTL 正确接受 V1 `mod_ctx = {reserved48, mu48, q32}`、32-line Bank 5 与固定
    `MOD_TABLE_BASE_LINE=0x1400`。
-2. `pntt/pintt stage` 按 `twiddle_map.csv` 的 `N/2` 个值，以 `autotest` 定义的
+2. `pntt/pintt stage` 从 `twiddle_map.csv` 绑定的两条参数 line 在线重构因子，以 `autotest` 定义的
    batch/lane 和 P/P^-1 次序执行，采用物理 out-of-place 提交和显式 pre/post
    PMUL；当前数据为 canonical residue，不是 Montgomery 域。
 3. DMA、allocator 和 PE 对 `pfree`、`dstore rel=0/1` 均释放对象、FAULT/IRQ 的

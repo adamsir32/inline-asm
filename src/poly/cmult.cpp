@@ -19,10 +19,10 @@ std::string generate_hpu_cmult_body_asm(
 
     asm_code << "        /* CMULT: (a0,a1)*(b0,b1)->(out0,out1,out2) over basis Q */\n";
 
-    const auto POBJ_MOD_CTX = hpu::resource::modulus_table;
-    const auto POBJ_A = hpu::resource::value;
-    const auto POBJ_B = hpu::resource::auxiliary;
-    const auto POBJ_OUT = hpu::resource::accumulator;
+    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
+    const auto POBJ_A = hpu::resource::make_operand("value", 0);
+    const auto POBJ_B = hpu::resource::make_operand("auxiliary", 1);
+    const auto POBJ_OUT = hpu::resource::make_operand("accumulator", 2);
 
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,

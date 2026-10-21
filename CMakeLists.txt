@@ -29,6 +29,10 @@ option(HPU_ENABLE_SEAL_INTEGRATION
 option(HPU_ENABLE_DEPLOYMENT_APPLICATION_TESTS
         "Register N=65536 application package tests (longer host execution)"
         OFF)
+set(HPU_RISCV_C_COMPILER "" CACHE FILEPATH
+        "Optional RISC-V GCC for target DMA code generation verification")
+set(HPU_RISCV_OBJDUMP "" CACHE FILEPATH
+        "Optional RISC-V objdump for target DMA code generation verification")
 option(HPU_ENABLE_SEAL_BFV_ORACLE
         "Deprecated alias for HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE"
         OFF)
@@ -158,8 +162,26 @@ target_link_libraries(inline_asm_codegen
 
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
+    add_executable(hpu_fixed_executable_test test/fixed_executable_test.cpp)
+    target_link_libraries(hpu_fixed_executable_test PRIVATE hpu_encode hpu_filesystem_compat)
+    add_test(NAME hpu_fixed_executable_test COMMAND hpu_fixed_executable_test)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        set(target_dma_test_args --generator $<TARGET_FILE:hpu_fixed_executable_test>)
+        if(HPU_RISCV_C_COMPILER)
+            list(APPEND target_dma_test_args --cc ${HPU_RISCV_C_COMPILER})
+        endif()
+        if(HPU_RISCV_OBJDUMP)
+            list(APPEND target_dma_test_args --objdump ${HPU_RISCV_OBJDUMP})
+        endif()
+        add_test(NAME hpu_target_dma_codegen_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/target_dma_codegen_test.py
+                    ${target_dma_test_args})
+        set_tests_properties(hpu_target_dma_codegen_test PROPERTIES
+            SKIP_RETURN_CODE 77 LABELS target-codegen)
+    endif()
     add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
-    target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core)
+    target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core hpu_hardware_model)
     add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)
     add_executable(hpu_instruction_executor_test test/instruction_executor_test.cpp)
     target_link_libraries(hpu_instruction_executor_test PRIVATE hpu_hardware_model hpu_runtime_core)
@@ -498,21 +520,11 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             hpu_filesystem_compat
     )
 
-    add_executable(hpu_bfv_poseidon_pir_example
-            examples/bfv_poseidon_pir_application.cpp
-    )
-    target_link_libraries(hpu_bfv_poseidon_pir_example PRIVATE hpu_seal_delivery)
-
     add_executable(hpu_bfv_sealpir_2d_concentrated_example
             examples/bfv_sealpir_2d_application.cpp
     )
     target_link_libraries(hpu_bfv_sealpir_2d_concentrated_example
             PRIVATE hpu_seal_delivery hpu_filesystem_compat)
-
-    add_executable(hpu_bfv_poseidon_psi_example
-            examples/bfv_poseidon_psi_application.cpp
-    )
-    target_link_libraries(hpu_bfv_poseidon_psi_example PRIVATE hpu_seal_delivery)
 
     add_executable(hpu_bfv_apsi_concentrated_example
             examples/bfv_apsi_concentrated_application.cpp
@@ -591,8 +603,6 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     hpu_application_delivery(ckks ckks_composed_application hpu_ckks_composed_application_example)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application hpu_bfv_multiply_modswitch_example)
     hpu_application_delivery(bfv bfv_rotation_application hpu_bfv_rotation_example)
-    hpu_application_delivery(bfv bfv_poseidon_pir_application hpu_bfv_poseidon_pir_example)
-    hpu_application_delivery(bfv bfv_poseidon_psi_application hpu_bfv_poseidon_psi_example)
     hpu_application_delivery(bgv bgv_plain_chain hpu_bgv_plain_chain_example)
     hpu_application_delivery(bgv bgv_rotate_chain hpu_bgv_rotate_chain_example)
     hpu_application_delivery(bgv bgv_multiply_chain hpu_bgv_multiply_chain_example)

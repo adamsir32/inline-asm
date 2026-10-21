@@ -4,8 +4,7 @@
 
 - `hpu_bfv_sealpir_2d_concentrated_example`：每轮递归编成一张图，共两个应用包。
 
-本示例独立于原有的 `bfv_poseidon_pir_application.cpp`。旧程序仍保留一维查询展开和点积，
-新程序则按照 Microsoft SealPIR 的 `src/main.cpp`、`src/pir.cpp`、
+本程序按照 Microsoft SealPIR 的 `src/main.cpp`、`src/pir.cpp`、
 `src/pir_client.cpp`、`src/pir_server.cpp` 实现两轮递归。参考版本为
 Microsoft SealPIR 提交 `cf55f10be7bffba4e78d5ba32764284ac828d6cd`。
 
@@ -157,7 +156,7 @@ cmake --build build-sealpir --target bfv_sealpir_2d_concentrated_full_delivery
 | 应用包 | 2 |
 | 编码指令 | 4,902,334 |
 | DMA span | 1,733,709 |
-| 最大单包 HPU_MEM 行 | 7,280,771 |
+| 最大单包 HPU_MEM 行 | 7,266,011 |
 | stage0/stage1 最小噪声 | 27/28 bit |
 | 最终 1024-byte 记录 | PASS |
 
@@ -181,9 +180,12 @@ cmake --build build-sealpir --target bfv_sealpir_2d_concentrated_full_delivery
 
 本次服务器实际生成的集中版目录为：
 
-- `outputs/bfv_sealpir_2d_concentrated_small`：约 55 MiB、808 个文件、2 个包；
-- `outputs/bfv_sealpir_2d_concentrated_full`：约 5.5 GiB、102,328 个文件、2 个包。
+- `outputs/bfv_sealpir_2d_concentrated_small`：约 52 MiB、808 个文件、2 个包；
+- `outputs/bfv_sealpir_2d_concentrated_full`：约 5.7 GiB、102,328 个文件、2 个包。
 
-完整目录生成并逐包验证耗时 5:46.42，验证脚本峰值 RSS 为 27,252,252 KiB；两个目录的
+同步原作者上游提交 `7306d1c` 后，完整目录生成并逐包验证耗时 6:07.71，验证脚本峰值
+RSS 为 31,080,760 KiB；两个目录的
 `stage0_concentrated_000` 和 `stage1_concentrated_000` 均已由
 `hpu_validate_package` 校验通过。这是可交给后续 ST 的输入，不代表目标板 ST 已通过。
+同步前后的完整对比及测试环境边界见
+[PIR/PSI 上游同步与验证审计](PIR_PSI_UPSTREAM_SYNC_AUDIT.md)。

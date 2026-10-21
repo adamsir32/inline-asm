@@ -1,3 +1,4 @@
+#include "hpu/model/hardware_ntt.hpp"
 #include "hpu/runtime/application.hpp"
 #include "hpu/runtime/memory_image.hpp"
 #include "hpu/seal/application_image.hpp"
@@ -124,6 +125,42 @@ int main()
                     && rotate_workspace.key_domain == 3,
                 "Rotate twiddles or reserved output shape is incorrect");
 
+        const auto parameter_words = [&](hpu::runtime::HpuMemSpan span) {
+            require(span.line_count == hpu::model::kStageTwiddleParameterLines,
+                    "CKKS stage must use two K=8 parameter lines even at N=128");
+            const auto first = builder.image().words().begin() +
+                span.line_offset * hpu::runtime::kHpuMemLineWords;
+            return std::vector<std::uint32_t>(
+                first, first + hpu::model::kStageTwiddleParameterWords);
+        };
+        for (const auto& twiddles : canonical) {
+            const hpu::model::HardwareNttModel model(
+                spec.poly_modulus_degree, twiddles.modulus,
+                hpu::model::pow_mod(twiddles.canonical_psi, 2, twiddles.modulus));
+            const auto forward = model.forward_twiddles();
+            const auto inverse = model.inverse_twiddles();
+            for (std::size_t stage = 0; stage < forward.size(); ++stage) {
+                require(hpu::model::expand_stage_twiddles(
+                            parameter_words(twiddles.forward_stages[stage]),
+                            twiddles.modulus, spec.poly_modulus_degree) == forward[stage] &&
+                            hpu::model::expand_stage_twiddles(
+                            parameter_words(twiddles.inverse_stages[stage]),
+                            twiddles.modulus, spec.poly_modulus_degree) == inverse.stages[stage],
+                        "CKKS canonical parameter image differs from physical BF tables");
+            }
+        }
+        for (const auto& twiddles : fused) {
+            const hpu::model::HardwareNttModel model(
+                spec.poly_modulus_degree, twiddles.modulus,
+                hpu::model::pow_mod(twiddles.modified_psi, 2, twiddles.modulus));
+            const auto inverse = model.inverse_twiddles();
+            for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
+                require(hpu::model::expand_stage_twiddles(
+                            parameter_words(twiddles.inverse_stages[stage]),
+                            twiddles.modulus, spec.poly_modulus_degree) == inverse.stages[stage],
+                        "CKKS modified-root parameter image lost its stage/root identity");
+            }
+        }
         const auto& image = builder.image();
         const auto half_p = level.special_moduli.front() / 2;
         std::vector<int> half_contexts = level.rns_layout.q_mod_ids;

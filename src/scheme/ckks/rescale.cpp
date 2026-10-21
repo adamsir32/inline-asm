@@ -25,8 +25,8 @@ std::string transform_components(
     bool inverse,
     const char* label)
 {
-    constexpr auto polynomial_object = hpu::resource::value;
-    constexpr auto twiddle_object = hpu::resource::transform_table;
+    const auto polynomial_object = hpu::resource::make_operand("value", 0);
+    const auto twiddle_object = hpu::resource::make_operand("transform_table", 3);
     std::ostringstream asm_code;
     asm_code << "        /* --- " << label << " --- */\n";
     for (int component = 0; component < component_count; ++component) {
@@ -110,7 +110,7 @@ std::string generate_rescale_ntt_body_asm(
         return asm_code.str();
     }
 
-    constexpr auto modulus_table_object = hpu::resource::modulus_table;
+    const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     asm_code
         << "        /* CKKS RESCALE NTT: canonical input -> rounded drop-last -> canonical output */\n";
     if (manage_modulus_table) {

@@ -4,6 +4,8 @@
 
 应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，快速运行见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)，完整程序、接口约束和自定义用例构建见 [HPU 应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
 
+当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端和指令编码不变，旧完整 stage 表镜像需重新生成。硬件格式及集成要求见 [twiddle 编译器迁移说明](doc/reference/TWIDDLE_COMPILER_MIGRATION.md)。
+
 ## 1. 项目结构
 
 代码按照功能依赖分层，并分别维护在 `include` 及 `src` 目录下，包含四层生成模块，以及独立的编码、reference 与测试辅助模块：
@@ -72,8 +74,11 @@
 
 - **[`doc/README.md`](doc/README.md)**：按应用开发、IT 测试、runtime 对接和维护任务提供文档入口。
 - **`doc/getting-started/`、`doc/examples/`**：入门流程和可运行的 CKKS/BFV 应用示例。
-  Poseidon/SealPIR 与 Poseidon/APSI 的移植范围、来源参数和所有显式适配见
-  [Poseidon PIR/PSI 的 HPU 应用移植](doc/examples/POSEIDON_PIR_PSI_APPLICATIONS.md)。
+  二维 SealPIR 与 APSI-compatible PSI 的移植范围、来源参数和所有显式适配分别见
+  [二维 SealPIR HPU 应用](doc/examples/SEALPIR_2D_HPU_APPLICATION.md)和
+  [APSI 无标签 PSI 集中式 HPU 应用](doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md)；
+  最新原作者分支同步、底层零差异证明和完整软件复测见
+  [PIR/PSI 上游同步与验证审计](doc/examples/PIR_PSI_UPSTREAM_SYNC_AUDIT.md)。
 - **`doc/reference/`、`doc/architecture/`**：当前 API、HPU 指令规范和 SEAL 集成设计。
 - **`doc/delivery/`**：通用应用包规范及旧固定参数交付流程。
 - **`doc/audits/`**：按日期保存的规范符合性审计快照。
@@ -391,11 +396,11 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
   CKKS 的 `scale` 和 BGV 的 `correction_factor` 不编码进 HPU 指令，由方案层 API 与未来 runtime/compiler 保存。BGV 使用 `Q|P|t` context 顺序；降层时先计算 `u=-c_last*q_last^-1 mod t`，再对每个保留 limb 计算 `(c_i-c_last-q_last*u)*q_last^-1 mod q_i`。默认 `t=65537` 可由 PE 直接加载。
   SEAL-facing BGV ModSwitch 另外提供 NTT 域生成器：只逆变换被丢弃的 limb，系数域修正经规范化和 NTT 后与保留 limb 相减。单次操作已具备预制 HPU_MEM、逐条 resolved DMA span 和可渲染的 RV runtime 包，并与 modified-SEAL 做两级逐 limb 差分；现已可接入 BGV 图 planner 的跨 level 链，但仍无逐指令软件执行或实体 HPU 验证。
   BGV NTT KeySwitch 已覆盖 singleton-Q digit 累加及 `u=-c_P*P^-1 mod t` 修正；输入、输出保持 canonical HPU NTT。单次重线性化已把 evaluation key、常量和工作区绑定成 HPU_MEM 运行包，并在顶层/降一级使用镜像内容与 modified-SEAL 做逐 limb 对照；现已接入通用 BGV 图 planner 和 `BgvSoftwareExecutor`，仍无逐指令软件执行或实体 HPU 验证。
-  单次 BGV NTT Multiply+Relinearize 现在把 `CMULT -> KeySwitch` 接在同一指令流中：三分量 tensor 由 HPU 写入同一镜像 span，随后直接被 KeySwitch 读取；中间没有 CPU 乘法、host copy 或 `psync`。`N=65536,Q=3,P=1` 的软件镜像需 148481 line，平台须提供相应 window；实体 DMA/window 仍待验证。
+  单次 BGV NTT Multiply+Relinearize 现在把 `CMULT -> KeySwitch` 接在同一指令流中：三分量 tensor 由 HPU 写入同一镜像 span，随后直接被 KeySwitch 读取；中间没有 CPU 乘法、host copy 或 `psync`。`N=65536,Q=3,P=1` 的软件镜像需 83201 line，平台须提供相应 window；实体 DMA/window 仍待验证。
   BGV Add/Sub/Negate 与预制明文的 AddPlain/SubPlain/MultiplyPlain 已有单次 HPU_MEM 包；不同 `correction_factor` 的 Add/Sub 会把平衡标量以预制对象加载，再在 PE 以 `PMUL` 缩放密文 limb。AddPlain/SubPlain 在准备镜像时按 factor 缩放明文，密文运算仍由 HPU 执行。行旋转与列交换也已有“改根 INTT → canonical NTT → Galois KeySwitch”的不中断单次包；元数据由 host 记录，顶层和降一级已与 modified-SEAL 差分。`BgvOperationPlan` 支持预制明文算术、密文 Add/Sub、独立 Multiply/Relinearize、融合乘法、旋转与 ModSwitch 的分支计算图，按节点输入推导 level/factor，并共享重复只读资源。`BgvLinearOperationPlan` 是兼容别名，原尾节点调用保持可用；`BgvSoftwareExecutor` 从同一镜像执行整图并逐步与 SEAL 对比。新示例为 `hpu_bgv_composed_application_example`，原三个 chain 示例继续可用。所有应用示例支持 `--degree 65536`；`hpu_fhe_deployment_delivery` 生成部署规模包，窗口按实际使用收紧，运行流程见 [交付包规范](doc/delivery/HPU_APPLICATION_PACKAGE_V1.md)。实体 HPU 验证仍由 IT 完成。
 
 - **BFV comparison-free 单 kernel 乘法：**
-  BFV 固定使用 `Q|Pks|B|m_sk|t`。输入先执行不带 `m_tilde/SmMRq` 的 `Q -> Bsk` FastBConv，再在 Q/Bsk 下做 tensor product、FastFloor 和 branchless-SK；校正为 `out=y+alpha*(-B) mod Q`。三分量 Q 结果写回统一 HPU_MEM 后立即由同一指令流执行 Q/Pks Relinearization，中间没有 `psync`、host copy 或 window 切换，完整流只有末尾一个 `psync`。默认统一镜像为 30913 line，低于配置的 65536-line 上限。BFV ModSwitch 仍是独立算子，复用 `round(c/q_last)`。
+  BFV 固定使用 `Q|Pks|B|m_sk|t`。输入先执行不带 `m_tilde/SmMRq` 的 `Q -> Bsk` FastBConv，再在 Q/Bsk 下做 tensor product、FastFloor 和 branchless-SK；校正为 `out=y+alpha*(-B) mod Q`。三分量 Q 结果写回统一 HPU_MEM 后立即由同一指令流执行 Q/Pks Relinearization，中间没有 `psync`、host copy 或 window 切换，完整流只有末尾一个 `psync`。默认统一镜像为 20833 line，低于配置的 65536-line 上限。BFV ModSwitch 仍是独立算子，复用 `round(c/q_last)`。
 
 - **SealPIR 二维递归应用：**
   `hpu_bfv_sealpir_2d_concentrated_example` 对每个递归阶段各生成一张大图，共两个应用包。
@@ -407,7 +412,7 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
   [PIR/PSI 原始 HPU 差异审计](doc/examples/PIR_PSI_ORIGINAL_HPU_DIFF_AUDIT.md)。
 
 - **APSI 无标签 PSI 集中式应用：**
-  `hpu_bfv_apsi_concentrated_example` 保留旧简化 PSI，另行实现 APSI 风格的 CPU
+  `hpu_bfv_apsi_concentrated_example` 实现 APSI 风格的 CPU
   OPRF-output fixture、Cuckoo 布局、sender 多位置分桶、batch polynomial、真正的
   source-power 查询、HPU `PowersDag`、普通/Paterson–Stockmeyer 求值、重线性化和
   ModSwitch。所有 bundle 合并为一个 HPU 应用包；客户端只在软件执行与指令模型验证

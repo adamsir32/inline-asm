@@ -112,7 +112,10 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   `scheme=ckks|bfv|bgv`、case 名称及各清单路径。
 - `program/`：`.asm` 是指令流，`.inst32` 每行 32 位指令，`.cmd26` 每行 26 位
   command。C 文件提供 `hpu_program_<stem>(spans, count)` 和固定 DMA span 的
-  `hpu_run_<stem>()`，供 Nexus AM 侧编译调用。
+  `hpu_run_<stem>()`，供 Nexus AM 侧编译调用。动态入口保持原实现，每条 DMA
+  分别设置 `x10/x11`；固定入口在生成前检查 span 范围、bank 容量及对象长度，
+  使用一个连续汇编块，每条 DMA 前设置 `x10`，仅首次及长度变化时设置 `x11`。
+  汇编块声明 `x10`、`x11` 和 `memory` clobber，HPU 指令次序及 DMA ABI 不变。
 - DMA 清单统一为 14 列：`instruction_index,dma_index,operation_index,operation_id,`
   `operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,`
   `line_offset,line_count,word_hex,normalized_asm`。三种方案均保留具体节点的 operation index/ID
@@ -143,6 +146,10 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
 入口，再按 golden 清单读回对应 span，比较有效 word 和补齐区域。
 `.inst32`/`.cmd26` 本身不携带完整 CPU DMA sideband，也不是 ELF/BIN；可执行运行
 需要使用 C wrapper 中的 span 设置，或等效实现 resolved DMA 清单。
+固定入口的代码生成优化不改变包 V1：校验器同时接受新固定汇编入口和此前调用
+动态入口的固定 wrapper。host 指令模型直接消费 DMA span，未执行 CPU wrapper；
+目标代码中的寄存器设置由独立的
+[目标 CPU 包装代码检查](IT_HANDOFF_CHECKLIST.md#31-目标-cpu-包装代码检查) 验证。
 
 ### 新应用镜像的 NTT 表与软件边界
 
@@ -155,8 +162,9 @@ post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i mod q
 
 `i` 为自然系数位置，`raw_inverse.post_scale` 已包含 lazy scale 抵消和 `N^-1`。
 modified-root INTT 使用该 root 的 raw inverse 表，并以 modified psi 代替 psi。
-各 stage 的 `N/2` 个 twiddle word 始终按 loader batch、batch 内 BF lane 顺序
-准备，不对 stage 表做 BR。NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
+各 stage 的完整数学 oracle 按 loader batch、batch 内 BF lane 顺序准备
+`N/2` 个因子，不对 stage 表做 BR，再压缩为两条 line 的 K=8 参数写入镜像。
+NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
 
 Evaluator 前端默认的 `InstructionNttContract::natural_coefficient_boundaries` 在
 PNTT stage 0 的 raw stage 前做数学边界 BR，在最后 PINTT raw stage 后做数学边界
@@ -170,16 +178,19 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 比较失败。历史 `test/reference/main.cpp` 固定 profile 算子包仍使用 BR 系数镜像，
 其布局不因应用包的新约定而改变；该 raw 算子包也不属于本页的新应用镜像协议。
 
-新应用包的 `metadata/parameters.json` 记录固定的表 ABI：
+新应用包的 `metadata/parameters.json` 记录实际的 NTT 数据 ABI：
 
 ```json
 {
   "ntt_table_abi": {
-    "version": 1,
+    "version": 2,
     "coefficient_order": "natural",
     "pre_twist_order": "natural",
     "post_factor_order": "natural",
     "stage_twiddle_order": "reference_loader_batch_lane",
+    "stage_twiddle_format": "hpu-twiddle-k8-v1",
+    "twiddle_chains": 8,
+    "stage_parameter_lines": 2,
     "canonical_ntt_layout": "reference_forward_layout",
     "normalization": "explicit_post_pmul",
     "twist_fused": false
@@ -187,12 +198,26 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 }
 ```
 
+当前 PNTT/PINTT 的 src2 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
+第一条 line 是 64-lane 模板 U；第二条 line 保存 7 个 slot 初始化倍率 V、有效
+stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使用这个布局，
+PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word，指令编码不变。
+精确字段与重构公式见 [硬件组迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+
+`memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
+`stage_parameter_lines`，供直接消费镜像的 IT 程序识别目标格式。package schema
+仍为 v1；其中 NTT 数据 ABI 的 version=2 与 package schema 是两个独立版本。
+
 该对象描述 builder 生成的实际镜像，与回放时选择的 `ntt_contract` 分别记录；
 选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
 schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，应按原生成版本和
 镜像约定回放。迁移到新自然边界时应重新生成完整应用包，包括镜像、golden、元数据
 和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。旧 raw 算子包可以保留
 用于旧契约回归，不将其文件混入新生成的自然镜像包。
+
+旧完整 stage 表即使通过包结构和 checksum 验证，也不代表兼容在线生成 RTL。
+当前 target 无完整表执行分支，必须重新生成镜像、DMA spans、sidecar 和 checksum；
+不能只改 ABI 字段。已有包的结构验证仍允许用于安全替换历史产物。
 
 ## 验证依据
 

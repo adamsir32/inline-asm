@@ -428,7 +428,7 @@ int main()
                     "{ UINT32_C(0), UINT32_C(1) }")
                     != std::string::npos
                 && runtime_artifacts.source.find(
-                    "return hpu_program_ckks_x2_plus_one(")
+                    "\"li x11, 1\\n\\t\"")
                     != std::string::npos
                 && runtime_artifacts.resolved_dma_manifest.find(
                     "operation_dma_index,direction,object_slot")

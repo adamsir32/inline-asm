@@ -6,37 +6,61 @@
 
 namespace hpu::resource {
 
-// Algorithm roles, not physical object IDs. The compatibility renderer alone
-// maps these roles to the historical assembly convention.
-enum class Role { value, auxiliary, accumulator, transform_table,
-                  modulus_table, correction, temporary, extra };
-struct Operand { Role role; };
-inline constexpr Operand value{Role::value};
-inline constexpr Operand auxiliary{Role::auxiliary};
-inline constexpr Operand accumulator{Role::accumulator};
-inline constexpr Operand transform_table{Role::transform_table};
-inline constexpr Operand modulus_table{Role::modulus_table};
-inline constexpr Operand correction{Role::correction};
-inline constexpr Operand temporary{Role::temporary};
-inline constexpr Operand extra{Role::extra};
+using ValueId = std::size_t;
+using PortId = std::size_t;
 
-inline bool operator==(Operand a, Operand b) { return a.role == b.role; }
-inline bool operator!=(Operand a, Operand b) { return !(a == b); }
+// A source-level variable. Each assignment emits a fresh SSA ValueId. The
+// optional slot hint belongs only to the historical assembly renderer.
+struct Operand {
+    std::size_t symbol = 0;
+    std::string label;
+    int compatibility_slot = -1;
+};
+Operand make_operand(std::string label, int compatibility_slot = -1);
+inline bool operator==(const Operand& a, const Operand& b) { return a.symbol == b.symbol; }
+inline bool operator!=(const Operand& a, const Operand& b) { return !(a == b); }
 
+// Legacy aliases, used only by old entry points and their tests. Native kernels
+// declare independent operands with make_operand(), including repeated labels.
+inline const auto value = make_operand("value", 0);
+inline const auto auxiliary = make_operand("auxiliary", 1);
+inline const auto accumulator = make_operand("accumulator", 2);
+inline const auto transform_table = make_operand("transform_table", 3);
+inline const auto modulus_table = make_operand("modulus_table", 4);
+inline const auto correction = make_operand("correction", 5);
+inline const auto temporary = make_operand("temporary", 6);
+inline const auto extra = make_operand("extra", 7);
+
+struct Value {
+    Operand variable;
+    bool parameter = false;
+};
+struct DataPort {
+    std::size_t operation_index = 0;
+    bool load = true;
+    std::optional<hpu::compiler::ResolvedDma> binding;
+};
 struct Operation {
     hpu::Instruction instruction;
-    std::vector<Operand> inputs;
-    std::vector<Operand> outputs;
+    std::vector<ValueId> inputs;
+    std::vector<ValueId> outputs;
+    std::optional<ValueId> reuse;
+    std::optional<std::size_t> tied_input;
+    std::optional<PortId> port;
 };
 struct OperatorProgram {
+    std::vector<Value> values;
+    std::vector<DataPort> ports;
     std::vector<Operation> operations;
+    // Explicit fragment live-outs; used when connecting independently emitted
+    // fragments. Symbols are unique identities, never physical slot numbers.
+    std::map<std::size_t, ValueId> current_values;
     void append(const OperatorProgram& source, std::size_t begin = 0,
                 std::size_t end = static_cast<std::size_t>(-1));
+    void bind_port(PortId id, hpu::compiler::ResolvedDma binding);
+    void bind_ports(const std::vector<hpu::compiler::ResolvedDma>& bindings);
 };
-void record(Operation operation);
 
-// Scoped typed emission supports nested kernel calls and independent threads.
-// No assembly parser or encoded physical operand is used to construct this IR.
 class Recording {
 public:
     Recording();
@@ -44,10 +68,15 @@ public:
     Recording(const Recording&) = delete;
     Recording& operator=(const Recording&) = delete;
     OperatorProgram finish();
+    void append(const OperatorProgram& program);
+    // Explicit SSA access for immutable snapshots and native IR passes.
+    ValueId value(const Operand& variable);
+    std::optional<ValueId> existing(const Operand& variable) const;
+    ValueId define(const Operand& variable);
+    void emit(Operation operation);
 private:
     Recording* previous_;
     OperatorProgram program_;
-    friend void record(Operation operation);
 };
 
 // External data ports and value lifetime hints. The compiler owns the actual
@@ -71,8 +100,13 @@ std::string finish_program();
 Operand compatibility_operand(int slot);
 std::string compatibility_name(Operand operand);
 
-// Bind symbolic ports to the image. Validate the compatibility stream as a
-// baseline, then create virtual objects directly from the operator operations.
+// Bind already resolved native ports to the image without an assembly baseline.
+hpu::compiler::VirtualProgram bind_program(
+    const OperatorProgram& program, const hpu::runtime::HpuMemImage& image);
+std::string render_operator_ir(const OperatorProgram& program);
+
+// Historical adapter: check the compatibility stream and bind its DMA recipe,
+// then create storage objects from native SSA operations.
 hpu::compiler::VirtualProgram bind_program(
     const OperatorProgram& program,
     const std::vector<hpu::EncodedInstruction>& baseline,

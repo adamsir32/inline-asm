@@ -39,9 +39,20 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 `test/reference/main.cpp` 的历史固定 profile 算子包仍是 BR 系数镜像，不能套用
 新应用镜像的自然位置表约定。
 
-新包的固定表 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
+新包的数据 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
 回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
 完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
+
+当前 NTT 数据 ABI version=2，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
+每个 PNTT/PINTT 的 src2 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
+PINTT stage 0；pre/post PMUL 向量仍为 N 个 word。旧完整表镜像不能直接交给
+在线生成 RTL，必须连同 spans、window、manifest 和校验值重新生成。
+物理普通 bank 的分配粒度继续由目标 allocator 决定。
+
+硬件组同时记录了 HpuCmdMerge 背压越序的集成问题：仅更新 twiddle RTL 提交
+不代表未节流 IT 已消除死锁。目标验收需单独确认 Chisel 合流器修复与完整 IT
+结果；本次编译器不新增每 stage 软件等待。详见
+[迁移说明第 8.1 节](../reference/TWIDDLE_COMPILER_MIGRATION.md#81-已知硬件合流器问题与参数迁移分开验收)。
 
 ## 2. 发布方生成步骤
 
@@ -104,6 +115,44 @@ oracle/report.json.overall_status    = pass
 
 `provenance/files.csv` 的 FNV-1a64 用于包内逐文件损坏检查；交付归档的 SHA-256 用于
 确认传输前后拿到的是同一个归档。
+
+### 3.1 目标 CPU 包装代码检查
+
+host 指令模型直接使用 resolved DMA span，不执行 C wrapper。要检查 CPU 编译后
+每条 DMA 实际使用的 `x10/x11`，配置支持 RV32 和 RV64 的 RISC-V GCC：
+
+```bash
+cmake -S . -B build-delivery \
+  -DHPU_ENABLE_SEAL_INTEGRATION=ON \
+  -DHPU_RISCV_C_COMPILER=/path/to/riscv64-unknown-elf-gcc \
+  -DHPU_RISCV_OBJDUMP=/path/to/riscv64-unknown-elf-objdump
+cmake --build build-delivery --target hpu_fixed_executable_test
+ctest --test-dir build-delivery \
+  -R '^hpu_(fixed_executable|target_dma_codegen)_test$' --output-on-failure
+```
+
+`hpu_fixed_executable_test` 检查固定入口生成契约及非法 span/形状拒绝行为。
+`hpu_target_dma_codegen_test` 对测试夹具执行 RV32/RV64、`-O0/-O2` 编译，并运行
+CPU 包装代码，核对 HPU 指令次序、每条 DMA 的 offset/count、`x11` 设置次数及
+寄存器保护。固定入口要求每条 DMA 设置 `x10`，`x11` 只在首次和长度变化时设置。
+objdump 为可选项，用于保存反汇编；未找到编译器时，目标测试返回 77，CTest
+显示 `Skipped`，此时没有目标代码验证结果。
+
+对实际交付包可直接执行脚本，重复 `--package` 检查多个目录：
+
+```bash
+python3 test/target_dma_codegen_test.py \
+  --cc /path/to/riscv64-unknown-elf-gcc \
+  --objdump /path/to/riscv64-unknown-elf-objdump \
+  --package outputs/ckks_evaluator_application \
+  --package outputs/bfv_evaluator_application \
+  --package outputs/bgv_evaluator_application \
+  --output-dir build-delivery/target-dma-check
+```
+
+此检查将自定义指令作为检查点记录，HPU 数学结果仍由指令模型和设备读回验证。
+保存生成的 ELF、反汇编和检查日志，作为所用目标工具链的代码生成证据。
+它不设置包内 RTL/硬件验证状态，也不替代下面的设备验收。
 
 ## 4. IT 消费顺序
 

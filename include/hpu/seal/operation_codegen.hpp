@@ -14,6 +14,7 @@ namespace hpu::seal_adapter {
 struct CkksLoweredOperation {
     CkksOperationStep operation;
     std::string body_asm;
+    std::shared_ptr<const hpu::resource::OperatorProgram> operator_program;
 };
 
 struct CkksLoweredProgram {

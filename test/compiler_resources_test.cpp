@@ -1,11 +1,15 @@
 #include "hpu/compiler/resource_ir.hpp"
 #include "hpu/compiler/operator_resources.hpp"
+#include "hpu/compiler/detail/use_index.hpp"
+#include "hpu/model/instruction_executor.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 #include "assembler.hpp"
 #include "executable.hpp"
 
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -421,6 +425,210 @@ void test_native_operator_resources()
     require_throws([&] { r::bind_program(source, baseline, invalid_dma, image); }, "native read-only write accepted");
 }
 
+void test_use_index()
+{
+    hpu::compiler::VirtualProgram program;
+    program.objects.resize(1000);
+    for (std::size_t i = 0; i < 3000; ++i) {
+        hpu::compiler::VirtualInstruction op;
+        op.instruction.mnemonic = i % 11 == 0 ? hpu::Mnemonic::kPfree : hpu::Mnemonic::kPmul;
+        op.uses = {i % 1000, i % 1000, (i * 7) % 1000};
+        op.reload_retained_object = i % 13 == 0;
+        if (op.reload_retained_object) op.definitions = {(i + 17) % 1000};
+        program.instructions.push_back(op);
+    }
+    hpu::compiler::detail::UseIndex index(program);
+    for (std::size_t i = 0; i < program.instructions.size(); ++i) {
+        index.consume(program.instructions[i], i);
+        for (const auto id : {i % 1000, (i + 17) % 1000}) {
+            auto expected = hpu::compiler::detail::UseIndex::none;
+            for (std::size_t j = i + 1; j < program.instructions.size(); ++j) {
+                const auto& op = program.instructions[j];
+                if (op.instruction.mnemonic == hpu::Mnemonic::kPfree) continue;
+                if (std::find(op.uses.begin(), op.uses.end(), id) != op.uses.end() ||
+                    (op.reload_retained_object && std::find(op.definitions.begin(), op.definitions.end(), id) != op.definitions.end())) {
+                    expected = j; break;
+                }
+            }
+            require(index.next(id) == expected, "indexed next use differs from future scan");
+        }
+    }
+}
+
+void test_ssa_versions_and_ports()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(128);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("a", std::vector<std::uint32_t>(128, 2), AllocationKind::ciphertext);
+    image.add("b", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    image.reserve("old", 128, AllocationKind::output);
+    image.reserve("new", 128, AllocationKind::output);
+    r::Recording recording;
+    const auto mod = r::make_operand("context");
+    const auto a = r::make_operand("input"), b = r::make_operand("input"), sum = r::make_operand("result");
+    require(a != b, "equal debug labels alias independent operands");
+    r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+    r::select_modulus(0);
+    r::read(a, hpu::DataType::poly); r::read(b, hpu::DataType::poly);
+    r::multiply(sum, a, b);
+    const auto old = recording.value(sum);
+    r::accumulate(sum, a, b);
+    require(old != recording.value(sum), "PMAC overwrote an SSA definition");
+    r::Operation save;
+    save.instruction.mnemonic = hpu::Mnemonic::kDstore;
+    save.instruction.rs1 = 10; save.instruction.rs2 = 11; save.instruction.type = 1;
+    save.inputs = {old}; recording.emit(save);
+    r::publish(sum);
+    r::finish_program();
+    auto program = recording.finish();
+    const std::vector<std::string> names{"moduli", "a", "b", "old", "new"};
+    for (std::size_t i = 0; i < names.size(); ++i)
+        program.bind_port(i, {0, names[i], image.allocation(names[i]).span, 0, "ssa", i});
+    auto ir = r::bind_program(program, image);
+    require(ir.buffers.size() > image.allocations().size(), "live old accumulator did not get a snapshot");
+    const auto compiled = hpu::compiler::compile_resources(ir, {}, {}, image);
+    hpu::compiler::CompileOptions noopt;
+    noopt.optimization = hpu::compiler::OptimizationMode::no_opt;
+    const auto plain = hpu::compiler::compile_resources(ir, {}, {}, image, noopt);
+    const auto plain_words = replay(plain.instructions, plain.dma, plain.image);
+    require(allocation_words(plain_words, plain.image, "old") == std::vector<std::uint32_t>(128, 6),
+            "native NoOpt did not preserve an old SSA version");
+    const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+    require(allocation_words(actual, compiled.image, "old") == std::vector<std::uint32_t>(128, 6),
+            "PMAC destroyed the old SSA version");
+    require(allocation_words(actual, compiled.image, "new") == std::vector<std::uint32_t>(128, 12),
+            "PMAC did not initialize its new accumulator version");
+    auto duplicate = program;
+    duplicate.operations.push_back(program.operations.at(4));
+    require_throws([&] { r::bind_program(duplicate, image); }, "duplicate SSA definition accepted");
+    auto missing = program; missing.ports.front().binding.reset();
+    require_throws([&] { r::bind_program(missing, image); }, "missing explicit data binding accepted");
+}
+
+void test_unbounded_operand_ids()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(128);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.reserve("answer", 128, AllocationKind::output);
+    r::Recording recording;
+    const auto mod = r::make_operand("moduli");
+    r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+    r::select_modulus(0);
+    std::vector<r::Operand> inputs;
+    std::vector<std::string> ports{"moduli"};
+    for (int i = 0; i < 20; ++i) {
+        const auto name = "input_" + std::to_string(i);
+        image.add(name, std::vector<std::uint32_t>(128, i + 1), AllocationKind::ciphertext);
+        inputs.push_back(r::make_operand("input"));
+        r::read(inputs.back(), hpu::DataType::poly); ports.push_back(name);
+    }
+    const auto result = r::make_operand("sum");
+    r::add(result, inputs[0], inputs[1]);
+    for (std::size_t i = 2; i < inputs.size(); ++i) r::add(result, result, inputs[i]);
+    r::publish(result); ports.push_back("answer");
+    r::finish_program();
+    auto source = recording.finish();
+    for (std::size_t i = 0; i < ports.size(); ++i)
+        source.bind_port(i, {0, ports[i], image.allocation(ports[i]).span, 0, "sum", i});
+    const auto compiled = hpu::compiler::compile_resources(r::bind_program(source, image), {}, {}, image);
+    const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+    require(allocation_words(actual, compiled.image, "answer") == std::vector<std::uint32_t>(128, 210),
+            "more than eight independent operands corrupted the sum");
+    require(compiled.report.peak_regular_banks <= 5, "unbounded IDs escaped physical capacity checks");
+}
+
+void test_ntt_preserves_live_ssa_input()
+{
+    namespace r = hpu::resource;
+    constexpr std::uint32_t q = 65537;
+    const hpu::model::HardwareNttModel model(128, q, hpu::model::pow_mod(3, (q - 1) / 128, q));
+    for (const bool inverse : {false, true}) {
+        hpu::runtime::HpuMemImage image(64);
+        std::vector<std::uint32_t> input(128);
+        for (std::size_t i = 0; i < input.size(); ++i) input[i] = (i * 97) % q;
+        const auto table = inverse ? model.inverse_twiddles().stages[3] : model.forward_twiddles()[3];
+        constexpr auto mu = std::numeric_limits<std::uint64_t>::max() / q;
+        image.add("moduli", {q, static_cast<std::uint32_t>(mu), static_cast<std::uint32_t>(mu >> 32), 0},
+                  AllocationKind::modulus_table);
+        image.add("input", input, AllocationKind::ciphertext);
+        image.add("table", hpu::model::pack_stage_twiddles(table, q, input.size()),
+                  AllocationKind::twiddle);
+        image.reserve("old", input.size(), AllocationKind::output);
+        image.reserve("new", input.size(), AllocationKind::output);
+        r::Recording recording;
+        const auto mod = r::make_operand("moduli"), data = r::make_operand("data"), twiddle = r::make_operand("table");
+        r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        r::select_modulus(0);
+        r::read(data, hpu::DataType::poly); r::read(twiddle, hpu::DataType::seg);
+        const auto old = recording.value(data);
+        if (inverse) r::intt_stage(data, twiddle, 3);
+        else r::ntt_stage(data, twiddle, 3);
+        r::Operation save;
+        save.instruction.mnemonic = hpu::Mnemonic::kDstore;
+        save.instruction.rs1 = 10; save.instruction.rs2 = 11;
+        save.inputs = {old}; recording.emit(save);
+        r::publish(data); r::finish_program();
+        auto source = recording.finish();
+        const std::vector<std::string> names{"moduli", "input", "table", "old", "new"};
+        for (std::size_t i = 0; i < names.size(); ++i)
+            source.bind_port(i, {0, names[i], image.allocation(names[i]).span, 0, "stage", i});
+        const auto expected = hpu::model::execute_ntt_stage(input, table, q, 3, inverse);
+        for (const auto optimization : {hpu::compiler::OptimizationMode::optimized, hpu::compiler::OptimizationMode::no_opt}) {
+            hpu::compiler::CompileOptions options; options.optimization = optimization;
+            const auto compiled = hpu::compiler::compile_resources(r::bind_program(source, image), {}, {}, image, options);
+            std::vector<hpu::runtime::HpuMemSpan> spans;
+            for (const auto& dma : compiled.dma) spans.push_back(dma.span);
+            hpu::model::InstructionExecutionOptions execution_options;
+            execution_options.ntt_contract = hpu::model::InstructionNttContract::legacy_raw_stage;
+            const auto execution = hpu::model::execute_instructions(compiled.instructions, spans, compiled.image, execution_options);
+            if (!execution.report.completed())
+                throw std::runtime_error("SSA snapshot stage replay failed: " + execution.report.message);
+            require(allocation_words(execution.words, compiled.image, "old") == input,
+                    "transform destroyed or normalized a live old SSA value");
+            require(allocation_words(execution.words, compiled.image, "new") == expected,
+                    "transform did not produce the new SSA value");
+        }
+        auto malformed = source;
+        malformed.operations.at(4).tied_input.reset();
+        require_throws([&] { r::bind_program(malformed, image); }, "untied transform was accepted");
+    }
+}
+
+void test_deferred_reload_storage_lifetime()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(64);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("input", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    image.reserve("scratch", 128, AllocationKind::workspace);
+    image.reserve("old", 128, AllocationKind::output);
+    image.reserve("new", 128, AllocationKind::output);
+    r::Recording recording;
+    const auto mod = r::make_operand("moduli"), input = r::make_operand("input"), data = r::make_operand("data");
+    r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank); r::select_modulus(0);
+    r::read(input, hpu::DataType::poly);
+    r::multiply_immediate(data, input, 2); r::publish(data);
+    // There is no explicit SSA use of the old version until the delayed reload.
+    // Its underlying storage still cannot be reused by this definition.
+    r::multiply_immediate(data, data, 2); r::publish(data);
+    r::read(data, hpu::DataType::poly); r::publish(data); r::finish_program();
+    auto source = recording.finish();
+    const std::vector<std::string> names{"moduli", "input", "scratch", "new", "scratch", "old"};
+    for (std::size_t i = 0; i < names.size(); ++i)
+        source.bind_port(i, {0, names[i], image.allocation(names[i]).span, 0, "reload", i});
+    for (const auto optimization : {hpu::compiler::OptimizationMode::optimized, hpu::compiler::OptimizationMode::no_opt}) {
+        hpu::compiler::CompileOptions options; options.optimization = optimization;
+        const auto compiled = hpu::compiler::compile_resources(r::bind_program(source, image), {}, {}, image, options);
+        const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+        require(allocation_words(actual, compiled.image, "old") == std::vector<std::uint32_t>(128, 6),
+                "reused storage corrupted a delayed reload");
+        require(allocation_words(actual, compiled.image, "new") == std::vector<std::uint32_t>(128, 12),
+                "delayed reload corrupted the new SSA value");
+    }
+}
+
 void test_nested_recording()
 {
     namespace r = hpu::resource;
@@ -441,13 +649,52 @@ void test_nested_recording()
     require(outer.finish().operations.size() == 2, "nested recorder contaminated its parent or failed to restore it");
 }
 
+void test_fragment_ssa_renaming()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(64);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("input", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    image.reserve("output", 128, AllocationKind::output);
+    const auto mod = r::make_operand("moduli"), data = r::make_operand("data");
+    r::Recording outer;
+    r::read(mod, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank); r::select_modulus(0);
+    r::read(data, hpu::DataType::poly);
+    r::OperatorProgram fragment;
+    {
+        r::Recording inner;
+        r::multiply_immediate(data, data, 2);
+        fragment = inner.finish();
+    }
+    outer.append(fragment); outer.append(fragment);
+    r::publish(data); r::finish_program();
+    auto source = outer.finish();
+    require(source.operations.at(3).outputs != source.operations.at(4).outputs,
+            "repeated fragment aliased SSA definitions");
+    require(source.operations.at(4).inputs == source.operations.at(3).outputs,
+            "fragment live-in did not connect to the previous SSA version");
+    const std::vector<std::string> names{"moduli", "input", "output"};
+    for (std::size_t i = 0; i < names.size(); ++i)
+        source.bind_port(i, {0, names[i], image.allocation(names[i]).span, 0, "fragments", i});
+    const auto compiled = hpu::compiler::compile_resources(r::bind_program(source, image), {}, {}, image);
+    const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+    require(allocation_words(actual, compiled.image, "output") == std::vector<std::uint32_t>(128, 12),
+            "renamed fragments corrupted their shared live-in");
+}
+
 } // namespace
 
 int main()
 {
     try {
+        test_use_index();
+        test_ssa_versions_and_ports();
+        test_unbounded_operand_ids();
+        test_ntt_preserves_live_ssa_input();
+        test_deferred_reload_storage_lifetime();
         test_native_operator_resources();
         test_nested_recording();
+        test_fragment_ssa_renaming();
         test_scratch_reuse();
         test_dirty_spill();
         test_stage_bank_and_multiple_readers();

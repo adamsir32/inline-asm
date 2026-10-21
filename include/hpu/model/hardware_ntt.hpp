@@ -6,6 +6,30 @@
 
 namespace hpu::model {
 
+// PNTT/PINTT src2 ABI. Payloads are exactly two 256 B little-endian u32
+// lines, including for N < 1024. The first line is U[64]; the second is
+// V[1..7], R[0..r_count-1], then ones. V[0] is implicitly one.
+inline constexpr std::size_t kStageTwiddleParameterWords = 128;
+inline constexpr std::size_t kStageTwiddleParameterLines = 2;
+inline constexpr std::size_t kTwiddleChains = 8;
+inline constexpr const char* kStageTwiddleParameterFormat = "hpu-twiddle-k8-v1";
+
+// Compress an existing physical batch/BF-lane table. Reconstructs and checks
+// every factor; unsupported physical recurrences throw instead of falling
+// back to the old full-table representation.
+std::vector<std::uint32_t> pack_stage_twiddles(
+    const std::vector<std::uint32_t>& full_table,
+    std::uint32_t modulus,
+    std::size_t degree);
+
+// Expand K=8 parameters for mathematical stage execution. State belongs to
+// this call, so changing modulus, root, direction or stage cannot reuse a
+// previous stage's chain values. Full-table stage APIs below remain oracles.
+std::vector<std::uint32_t> expand_stage_twiddles(
+    const std::vector<std::uint32_t>& parameters,
+    std::uint32_t modulus,
+    std::size_t degree);
+
 struct NttBatch {
     bool interleaved = false;
     std::size_t first = 0;

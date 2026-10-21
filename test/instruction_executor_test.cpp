@@ -171,7 +171,7 @@ void supplied_stages(std::size_t degree)
     std::ostringstream body;
     body << "dload x10, x11, p4, 2, 1\npmodld 0\ndload x10, x11, p0, 1, 0\n";
     for (std::size_t stage = 0; stage < forward_tables.size(); ++stage) {
-        const auto twiddle = image.add("forward/" + std::to_string(stage), forward_tables[stage], AllocationKind::twiddle);
+        const auto twiddle = image.add("forward/" + std::to_string(stage), hpu::model::pack_stage_twiddles(forward_tables[stage], kModulus, degree), AllocationKind::twiddle);
         spans.push_back(twiddle.span);
         body << "dload x10, x11, p1, 1, 0\npntt p0, p1, " << stage << ", 0, 0\npfree p1\n";
     }
@@ -188,7 +188,7 @@ void supplied_stages(std::size_t degree)
             "encoded stages ignored actual supplied twiddles/input permutation");
 
     auto changed_spans = spans;
-    auto changed_twiddles = forward_tables.front();
+    auto changed_twiddles = hpu::model::pack_stage_twiddles(forward_tables.front(), kModulus, degree);
     changed_twiddles[0] = 2;
     const auto changed = image.add("changed/first", changed_twiddles, AllocationKind::twiddle);
     changed_spans[2] = changed.span;
@@ -196,6 +196,16 @@ void supplied_stages(std::size_t degree)
     require(changed_execution.report.completed()
                 && !hpu::model::compare_instruction_memory(changed_execution, {{"output", output.span, expected_forward}}).verified,
             "corrupt twiddle DMA payload did not change instruction result");
+    if (degree != 256) {
+        // N=256's old all-one stage 0 is byte-identical to valid K=8
+        // parameters; a header-free ABI cannot distinguish those bytes.
+        auto legacy_spans = spans;
+        legacy_spans[2] = image.add("old/full/table", forward_tables.front(), AllocationKind::twiddle).span;
+        const auto legacy = hpu::model::execute_instructions(instructions, legacy_spans, image);
+        require(!legacy.report.completed()
+                    && legacy.report.message.find("two-line K=8") != std::string::npos,
+                "encoded transform silently accepted the old full-table format");
+    }
     hpu::model::InstructionExecutionOptions constrained;
     constrained.regular_bank_count = 2;
     const auto no_output_bank = hpu::model::execute_instructions(instructions, spans, image, constrained);
@@ -210,7 +220,7 @@ void supplied_stages(std::size_t degree)
     std::ostringstream inverse_body;
     inverse_body << "dload x10, x11, p4, 2, 1\npmodld 0\ndload x10, x11, p0, 1, 0\n";
     for (std::size_t stage = 0; stage < inverse_tables.stages.size(); ++stage) {
-        const auto twiddle = image.add("inverse/" + std::to_string(stage), inverse_tables.stages[stage], AllocationKind::twiddle);
+        const auto twiddle = image.add("inverse/" + std::to_string(stage), hpu::model::pack_stage_twiddles(inverse_tables.stages[stage], kModulus, degree), AllocationKind::twiddle);
         inverse_spans.push_back(twiddle.span);
         inverse_body << "dload x10, x11, p1, 1, 0\npintt p0, p1, " << stage << ", 0, 0\npfree p1\n";
     }
@@ -285,7 +295,7 @@ void forward_twist_layout_contract()
              << "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
              << "pmul p0, p0, p1\npfree p1\n";
         for (std::size_t s = 0; s < stages.size(); ++s) {
-            spans.push_back(image.add("stage/" + std::to_string(s), stages[s], AllocationKind::twiddle).span);
+            spans.push_back(image.add("stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(stages[s], q, degree), AllocationKind::twiddle).span);
             body << "dload x10, x11, p1, 1, 0\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
         }
         const auto output = image.reserve("output", degree, AllocationKind::output);
@@ -352,7 +362,7 @@ void inverse_boundary_contract()
     std::ostringstream body;
     body << "dload x10, x11, p4, 2, 1\npmodld 0\ndload x10, x11, p0, 1, 0\n";
     for (std::size_t s = 0; s < tables.stages.size(); ++s) {
-        spans.push_back(image.add("inverse/" + std::to_string(s), tables.stages[s], AllocationKind::twiddle).span);
+        spans.push_back(image.add("inverse/" + std::to_string(s), hpu::model::pack_stage_twiddles(tables.stages[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 1, 0\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
@@ -422,14 +432,14 @@ void natural_negacyclic_convolution(std::size_t degree)
     body << "dload x10, x11, p4, 2, 1\npmodld 0\ndload x10, x11, p0, 1, 0\n"
          << "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n";
     for (std::size_t s = 0; s < forward.size(); ++s) {
-        spans.push_back(image.add("ntt/stage/" + std::to_string(s), forward[s], AllocationKind::twiddle).span);
+        spans.push_back(image.add("ntt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(forward[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 1, 0\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(ntt_output.span);
     spans.push_back(ntt_output.span);
     body << "dstore x10, x11, p0, 1\ndload x10, x11, p0, 1, 0\npmul p0, p0, p0\n";
     for (std::size_t s = 0; s < inverse.stages.size(); ++s) {
-        spans.push_back(image.add("intt/stage/" + std::to_string(s), inverse.stages[s], AllocationKind::twiddle).span);
+        spans.push_back(image.add("intt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(inverse.stages[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 1, 0\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
@@ -457,6 +467,83 @@ void natural_negacyclic_convolution(std::size_t degree)
             "instruction model silently repaired a post factor with the wrong coefficient order");
 }
 
+void stage_parameter_context_switches()
+{
+    struct Case {
+        std::size_t degree;
+        std::uint32_t modulus;
+        std::uint32_t root_power;
+        bool inverse;
+        std::size_t stage;
+        unsigned modulus_id;
+    };
+    const std::vector<Case> cases {
+        {128, kModulus, 1, false, 0, 0},
+        {1024, 4293918721U, 3, true, 4, 1},
+        {256, 998244353U, 5, false, 3, 2},
+        {4096, 4293918721U, 1, false, 11, 1},
+        {1024, 4293918721U, 5, false, 4, 1},
+        {1024, 4293918721U, 3, true, 0, 1},
+        {128, kModulus, 3, true, 6, 0},
+        {128, kModulus, 1, false, 0, 0},
+    };
+    std::vector<std::uint32_t> moduli;
+    for (auto q : {kModulus, 4293918721U, 998244353U}) {
+        const auto record = modulus_record(q);
+        moduli.insert(moduli.end(), record.begin(), record.end());
+    }
+    HpuMemImage image(4096);
+    const auto table = image.add("contexts/moduli", moduli, AllocationKind::modulus_table);
+    std::vector<HpuMemSpan> spans{table.span};
+    std::vector<hpu::model::InstructionMemoryExpectation> expected;
+    std::ostringstream body;
+    body << "dload x10, x11, p4, 2, 1\n";
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        const auto& item = cases[index];
+        std::uint32_t omega = 0;
+        for (std::uint32_t base = 2; base < 128; ++base) {
+            const auto candidate = hpu::model::pow_mod(base,
+                (static_cast<std::uint64_t>(item.modulus) - 1) / item.degree, item.modulus);
+            if (hpu::model::pow_mod(candidate, item.degree / 2, item.modulus) != 1) {
+                omega = hpu::model::pow_mod(candidate, item.root_power, item.modulus);
+                break;
+            }
+        }
+        require(omega != 0, "context test could not select primitive root");
+        hpu::model::HardwareNttModel model(item.degree, item.modulus, omega);
+        const auto full = item.inverse ? model.inverse_twiddles().stages[item.stage]
+                                       : model.forward_twiddles()[item.stage];
+        std::vector<std::uint32_t> input(item.degree);
+        for (std::size_t i = 0; i < item.degree; ++i)
+            input[i] = static_cast<std::uint32_t>((std::uint64_t(i) * i + 31 * i + 7) % item.modulus);
+        const auto prefix = "contexts/" + std::to_string(index);
+        const auto data = image.add(prefix + "/input", input, AllocationKind::ciphertext);
+        const auto parameters = image.add(prefix + "/parameters",
+            hpu::model::pack_stage_twiddles(full, item.modulus, item.degree), AllocationKind::twiddle);
+        require(parameters.span.line_count == 2, "context parameters used non-two-line DMA");
+        const auto output = image.reserve(prefix + "/output", item.degree, AllocationKind::output);
+        spans.insert(spans.end(), {data.span, parameters.span, output.span});
+        expected.push_back({prefix, output.span,
+            hpu::model::execute_ntt_stage(input, full, item.modulus, item.stage, item.inverse)});
+        body << "pmodld " << item.modulus_id << "\ndload x10, x11, p0, 1, 0\n"
+             << "dload x10, x11, p1, 1, 0\n"
+             << (item.inverse ? "pintt" : "pntt") << " p0, p1, " << item.stage << ", 0, 0\n"
+             << "pfree p1\ndstore x10, x11, p0, 1\n";
+    }
+    body << "pfree p4\npsync\n";
+    hpu::model::InstructionExecutionOptions options;
+    options.ntt_contract = InstructionNttContract::legacy_raw_stage;
+    const auto result = hpu::model::execute_instructions(hpu::assemble_source(body.str()), spans, image, options);
+    require(hpu::model::compare_instruction_memory(result, expected).verified,
+            "stage parameter state leaked across direction/modulus/root/stage context reloads");
+
+    // Even all-one inverse stage 0 requires a real, resident src2 object.
+    const auto missing = hpu::assemble_source(
+        "dload x10, x11, p4, 2, 1\npmodld 0\ndload x10, x11, p0, 1, 0\npintt p0, p1, 0, 0, 0\npsync\n");
+    require(!hpu::model::execute_instructions(missing, {table.span, spans[1]}, image, options).report.completed(),
+            "PINTT stage 0 bypassed its parameter object dependency");
+}
+
 } // namespace
 
 int main()
@@ -465,11 +552,13 @@ int main()
         arithmetic_and_dma();
         supplied_stages(128);
         supplied_stages(256);
+        supplied_stages(1024);
         pre_twist_is_pointwise();
         forward_twist_layout_contract();
         inverse_boundary_contract();
         natural_negacyclic_convolution(128);
         natural_negacyclic_convolution(256);
+        stage_parameter_context_switches();
         std::cout << "Instruction execution tests passed\n";
         return 0;
     } catch (const std::exception& error) {

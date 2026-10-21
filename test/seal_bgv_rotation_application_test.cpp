@@ -90,8 +90,12 @@ void check(const seal::SEALContext& context, seal::Evaluator& evaluator,
             degree, q, hpu::model::pow_mod(psi, 2, q));
         hpu::model::InverseNttTables tables;
         for (std::size_t stage = 0; stage < model.log_degree(); ++stage) {
-            tables.stages.push_back(words(package.image,
-                prefix + "/stage" + std::to_string(stage)));
+            const auto parameter_id = prefix + "/stage" + std::to_string(stage);
+            require(package.image.allocation(parameter_id).span.line_count ==
+                        hpu::model::kStageTwiddleParameterLines,
+                    "BGV rotation stage must use two K=8 parameter lines");
+            tables.stages.push_back(hpu::model::expand_stage_twiddles(
+                words(package.image, parameter_id), q, degree));
         }
         tables.set_natural_post_scale(words(package.image,
             prefix + "/post_untwist_scale"));
@@ -237,7 +241,7 @@ int main()
         check(context, evaluator, input, keys, 1, false);
         check(context, evaluator, input, keys, 0, true);
         require(hpu::seal_adapter::estimate_bgv_rotation_image_lines(
-                    65536, 3, 4) == 169985,
+                    65536, 3, 4) == 80225,
                 "BGV target-degree rotation capacity estimate changed");
         bool rejected = false;
         try {
