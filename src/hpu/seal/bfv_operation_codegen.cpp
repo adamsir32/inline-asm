@@ -59,18 +59,27 @@ std::string lower_step(const BfvOperationStep& step, const BfvLevelChain& level_
         if (step.inputs.size() != 2 || step.resources.requires_canonical_twiddles) {
             throw std::invalid_argument("invalid planned BFV Add/Subtract inputs");
         }
-        const auto& level = require_coefficient_value_shape(level_chain, step.inputs[0], 2,
+        const auto components = step.inputs[0].component_count;
+        if ((components != 2 && components != 3) ||
+            step.inputs[1].component_count != components ||
+            step.output.component_count != components) {
+            throw std::invalid_argument(
+                "planned BFV Add/Subtract requires matching two- or three-component values");
+        }
+        const auto& level = require_coefficient_value_shape(level_chain, step.inputs[0], components,
                                                             "planned BFV Add/Subtract left input");
-        require_coefficient_value_shape(level_chain, step.inputs[1], 2,
+        require_coefficient_value_shape(level_chain, step.inputs[1], components,
                                         "planned BFV Add/Subtract right input");
-        require_coefficient_value_shape(level_chain, step.output, 2,
+        require_coefficient_value_shape(level_chain, step.output, components,
                                         "planned BFV Add/Subtract output");
         require_same_level(step.inputs[0], step.inputs[1], "planned BFV Add/Subtract");
         require_same_level(step.inputs[0], step.output, "planned BFV Add/Subtract output");
         const int num_q = static_cast<int>(level.q_moduli.size());
         return step.kind == BfvOperationKind::add
-                   ? hpu::scheme::bfv::generate_add_body_asm(num_q, false, false)
-                   : hpu::scheme::bfv::generate_subtract_body_asm(num_q, false, false);
+                   ? hpu::scheme::bfv::generate_add_body_asm(
+                         num_q, false, false, static_cast<int>(components))
+                   : hpu::scheme::bfv::generate_subtract_body_asm(
+                         num_q, false, false, static_cast<int>(components));
     }
     case BfvOperationKind::multiply:
     case BfvOperationKind::multiply_tensor: {

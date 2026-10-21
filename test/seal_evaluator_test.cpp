@@ -142,7 +142,7 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     ApplicationBuilder nonlinear(*context);
     auto operations = nonlinear.evaluator();
     const auto a = nonlinear.import_ciphertext("input/a", saved_input);
-    Ciphertext square, product, relined, rotated, flipped, changed;
+    Ciphertext square, product, relined, rotated, flipped, changed, tensor_sum, tensor_sum_relined;
     operations.square(a, square);
     operations.multiply(a, a, product);
     operations.relinearize(square, relin, relined);
@@ -166,7 +166,12 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
         operations.mod_switch_to_next(relined, changed);
         rejects([&] { operations.set_scale(changed, 2); }, "integer scale mutation accepted");
         rejects([&] { operations.rescale_to_next(a, later); }, "integer rescale accepted");
-        if (scheme == seal::scheme_type::bfv) operations.negate(a, later);
+        if (scheme == seal::scheme_type::bfv) {
+            operations.negate(a, later);
+            operations.add(square, product, tensor_sum);
+            operations.relinearize(tensor_sum, relin, tensor_sum_relined);
+            nonlinear.mark_output("tensor_sum_relined", tensor_sum_relined);
+        }
         else rejects([&] { operations.negate(a, later); }, "unsupported BGV negate accepted");
     }
     nonlinear.mark_output("changed", changed);
@@ -178,6 +183,14 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     require(full.instruction_verified(), "natural-boundary nonlinear graph instruction verification failed");
     require(full.oracle_result(square).size() == 3 && full.oracle_result(relined).size() == 2,
         "tensor/relinearization shapes were lost");
+    if (scheme == seal::scheme_type::bfv) {
+        require(full.oracle_result(tensor_sum).size() == 3 &&
+                    full.oracle_result(tensor_sum_relined).size() == 2 &&
+                    identical(full.software_result(tensor_sum), full.oracle_result(tensor_sum)) &&
+                    identical(full.software_result(tensor_sum_relined),
+                              full.oracle_result(tensor_sum_relined)),
+                "BFV three-component Add/Relinearize differs from SEAL");
+    }
     const auto repeat = nonlinear.compile("frontend_nonlinear", diagnostic);
     require(full.package().program.instructions.size() == repeat.package().program.instructions.size() &&
         full.package().initial_image->words() == repeat.package().initial_image->words(), "compile is not deterministic");

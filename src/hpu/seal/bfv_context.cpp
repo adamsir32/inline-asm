@@ -48,13 +48,21 @@ BfvContextBundle create_bfv_context(const BfvContextSpec& spec)
         throw std::invalid_argument(
             "HPU BFV plaintext modulus must fit the 31-bit prepared-plaintext ABI");
     }
+    if (spec.plain_modulus &&
+        (*spec.plain_modulus < 2 || *spec.plain_modulus > UINT32_C(0x7fffffff))) {
+        throw std::invalid_argument(
+            "HPU BFV explicit plaintext modulus must fit the 31-bit prepared-plaintext ABI");
+    }
 
     ::seal::EncryptionParameters parameters(::seal::scheme_type::bfv);
     parameters.set_poly_modulus_degree(spec.poly_modulus_degree);
     parameters.set_coeff_modulus(::seal::CoeffModulus::Create(
         spec.poly_modulus_degree, spec.coeff_modulus_bits));
-    parameters.set_plain_modulus(::seal::PlainModulus::Batching(
-        spec.poly_modulus_degree, spec.plain_modulus_bits));
+    if (spec.plain_modulus)
+        parameters.set_plain_modulus(*spec.plain_modulus);
+    else
+        parameters.set_plain_modulus(::seal::PlainModulus::Batching(
+            spec.poly_modulus_degree, spec.plain_modulus_bits));
     if (spec.random_seed) {
         ::seal::prng_seed_type seed{};
         std::copy(spec.random_seed->begin(), spec.random_seed->end(), seed.begin());
@@ -100,7 +108,8 @@ BfvContextBundle create_bfv_context(const BfvContextSpec& spec)
         first_data->parms().plain_modulus(),
         "SEAL BFV t exceeds the HPU uint32 ABI");
     if (!first_data->qualifiers().using_batching) {
-        throw std::logic_error("SEAL BFV context does not support batching");
+        throw std::invalid_argument(
+            "SEAL BFV plaintext modulus does not support batching for this N");
     }
     return result;
 }

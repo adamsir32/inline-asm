@@ -405,6 +405,14 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
   内存重建的实际密文，不使用 SEAL oracle 代替。参数差异、命令和 ST 产物见
   [二维 SealPIR HPU 应用](doc/examples/SEALPIR_2D_HPU_APPLICATION.md)。
 
+- **APSI 无标签 PSI 集中式应用：**
+  `hpu_bfv_apsi_concentrated_example` 保留旧简化 PSI，另行实现 APSI 风格的 CPU
+  OPRF-output fixture、Cuckoo 布局、sender 多位置分桶、batch polynomial、真正的
+  source-power 查询、HPU `PowersDag`、普通/Paterson–Stockmeyer 求值、重线性化和
+  ModSwitch。所有 bundle 合并为一个 HPU 应用包，客户端仅从 HPU 软件执行结果恢复
+  交集。范围、参数差异、验证命令与安全边界见
+  [APSI 无标签 PSI 集中式 HPU 应用](doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md)。
+
 - **生成与编码分层解耦：**
   `inline-asm` 仍负责汇编生成，`encode` 模块则负责解析、归一化和 32 位编码。两者保留独立边界，但通过同一 CMake 工程统一构建，从而降低汇编语义更新后生成器与编码器失配的风险。
 

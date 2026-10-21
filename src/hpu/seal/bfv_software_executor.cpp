@@ -220,14 +220,21 @@ void BfvSoftwareExecutor::ciphertext_binary(const PreparedBfvRnsObject& left,
                                             const PreparedBfvRnsObject& output,
                                             hpu::runtime::PointwiseOperation operation)
 {
-    validate_object(left, 2, hpu::runtime::PolynomialDomain::coefficient);
-    validate_object(right, 2, hpu::runtime::PolynomialDomain::coefficient);
-    validate_object(output, 2, hpu::runtime::PolynomialDomain::coefficient);
+    const auto component_count = left.components.size();
+    if ((component_count != 2 && component_count != 3) ||
+        right.components.size() != component_count ||
+        output.components.size() != component_count) {
+        throw std::invalid_argument(
+            "BFV Add/Subtract requires matching two- or three-component objects");
+    }
+    validate_object(left, component_count, hpu::runtime::PolynomialDomain::coefficient);
+    validate_object(right, component_count, hpu::runtime::PolynomialDomain::coefficient);
+    validate_object(output, component_count, hpu::runtime::PolynomialDomain::coefficient);
     if (left.parms_id != right.parms_id || left.parms_id != output.parms_id ||
         operation == hpu::runtime::PointwiseOperation::multiply) {
         throw std::invalid_argument("BFV Add/Subtract operands or operation are invalid");
     }
-    for (std::size_t component = 0; component < 2; ++component) {
+    for (std::size_t component = 0; component < component_count; ++component) {
         const auto& left_polynomial = left.components[component];
         const auto& right_polynomial = right.components[component];
         const auto& output_polynomial = output.components[component];
