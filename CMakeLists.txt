@@ -520,6 +520,18 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             hpu_filesystem_compat
     )
 
+    add_executable(hpu_bfv_sealpir_2d_concentrated_example
+            examples/bfv_sealpir_2d_application.cpp
+    )
+    target_link_libraries(hpu_bfv_sealpir_2d_concentrated_example
+            PRIVATE hpu_seal_delivery hpu_filesystem_compat)
+
+    add_executable(hpu_bfv_apsi_concentrated_example
+            examples/bfv_apsi_concentrated_application.cpp
+    )
+    target_link_libraries(hpu_bfv_apsi_concentrated_example
+            PRIVATE hpu_seal_delivery hpu_filesystem_compat)
+
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
         "Directory for scheme-neutral application packages")
@@ -595,6 +607,87 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     hpu_application_delivery(bgv bgv_rotate_chain hpu_bgv_rotate_chain_example)
     hpu_application_delivery(bgv bgv_multiply_chain hpu_bgv_multiply_chain_example)
     hpu_application_delivery(bgv bgv_composed_application hpu_bgv_composed_application_example)
+
+    add_custom_target(bfv_sealpir_2d_concentrated_small_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_sealpir_2d_concentrated_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_sealpir_2d_concentrated_small
+            --profile small --record-index 127
+        DEPENDS hpu_bfv_sealpir_2d_concentrated_example hpu_validate_package
+        COMMENT "Generating concentrated two-package BFV SealPIR delivery: small profile"
+        VERBATIM)
+    add_dependencies(hpu_bfv_delivery bfv_sealpir_2d_concentrated_small_delivery)
+
+    # Full generation is explicit because it records the complete 86x85 graph and
+    # produces large ST artifacts even though only two packages are emitted.
+    add_custom_target(bfv_sealpir_2d_concentrated_full_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_sealpir_2d_concentrated_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_sealpir_2d_concentrated_full
+            --profile full --record-index 65535
+        DEPENDS hpu_bfv_sealpir_2d_concentrated_example hpu_validate_package
+        COMMENT "Generating concentrated two-package BFV SealPIR delivery: full 86x85 profile"
+        VERBATIM)
+
+    add_custom_target(bfv_apsi_concentrated_small_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_concentrated_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_apsi_concentrated_small
+            --profile small --scenario multi
+        DEPENDS hpu_bfv_apsi_concentrated_example hpu_validate_package
+        COMMENT "Generating one-package APSI-compatible BFV PSI delivery: small profile"
+        VERBATIM)
+    add_dependencies(hpu_bfv_delivery bfv_apsi_concentrated_small_delivery)
+
+    # The medium profile retains the official APSI 1M-1024-com table,
+    # source-power and Paterson-Stockmeyer structure. It is explicit because it
+    # compiles a materially larger graph and set-preprocessing workload.
+    add_custom_target(bfv_apsi_concentrated_medium_delivery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_concentrated_delivery_test.py
+            --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
+            --validator $<TARGET_FILE:hpu_validate_package>
+            --output ${HPU_APPLICATION_OUTPUT_ROOT}/bfv_apsi_concentrated_medium
+            --profile medium --scenario multi
+        DEPENDS hpu_bfv_apsi_concentrated_example hpu_validate_package
+        COMMENT "Generating one-package APSI-compatible BFV PSI delivery: medium PS profile"
+        VERBATIM)
+
+    if(BUILD_TESTING)
+        foreach(sealpir_record 0 64 127)
+            add_test(NAME hpu_bfv_sealpir_2d_concentrated_small_record_${sealpir_record}
+                COMMAND hpu_bfv_sealpir_2d_concentrated_example
+                    --profile small --record-index ${sealpir_record})
+            set_tests_properties(hpu_bfv_sealpir_2d_concentrated_small_record_${sealpir_record}
+                PROPERTIES LABELS "sealpir-2d;application;concentrated" RUN_SERIAL TRUE TIMEOUT 900)
+        endforeach()
+        add_test(NAME bfv_sealpir_2d_concentrated_small_delivery_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+                --example $<TARGET_FILE:hpu_bfv_sealpir_2d_concentrated_example>
+                --validator $<TARGET_FILE:hpu_validate_package>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/sealpir_2d_concentrated_delivery_test
+                --profile small --record-index 127)
+        set_tests_properties(bfv_sealpir_2d_concentrated_small_delivery_test
+            PROPERTIES LABELS "application-delivery;sealpir-2d;concentrated" RUN_SERIAL TRUE TIMEOUT 1200)
+
+        foreach(apsi_scenario empty single multi boundary)
+            add_test(NAME hpu_bfv_apsi_concentrated_small_${apsi_scenario}
+                COMMAND hpu_bfv_apsi_concentrated_example
+                    --profile small --scenario ${apsi_scenario})
+            set_tests_properties(hpu_bfv_apsi_concentrated_small_${apsi_scenario}
+                PROPERTIES LABELS "apsi;application;concentrated" RUN_SERIAL TRUE TIMEOUT 1800)
+        endforeach()
+        add_test(NAME bfv_apsi_concentrated_small_delivery_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_concentrated_delivery_test.py
+                --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
+                --validator $<TARGET_FILE:hpu_validate_package>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/apsi_concentrated_delivery_test
+                --profile small --scenario multi)
+        set_tests_properties(bfv_apsi_concentrated_small_delivery_test
+            PROPERTIES LABELS "application-delivery;apsi;concentrated" RUN_SERIAL TRUE TIMEOUT 2400)
+    endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application_n65536 hpu_bfv_multiply_modswitch_example 65536)
     hpu_application_delivery(bfv bfv_rotation_application_n65536 hpu_bfv_rotation_example 65536)
