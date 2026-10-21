@@ -82,17 +82,35 @@ private:
 };
 
 struct Fixture {
-    hpu::runtime::HpuMemImage image{4};
+    hpu::runtime::HpuMemImage image;
     hpu::delivery::ApplicationPackageRequest request;
 
-    Fixture()
+    explicit Fixture(bool legacy_transform = false)
+        : image(legacy_transform ? 8 : 4)
     {
+        std::string assembly;
+        std::vector<hpu::runtime::HpuMemSpan> prefix_spans;
+        std::vector<std::string> allocation_ids;
+        if (legacy_transform) {
+            const auto data = image.add(
+                "legacy/data", std::vector<std::uint32_t>(128, 1),
+                hpu::runtime::AllocationKind::ciphertext, true);
+            const auto twiddle = image.add(
+                "legacy/twiddle", std::vector<std::uint32_t>(64, 1),
+                hpu::runtime::AllocationKind::twiddle, true);
+            prefix_spans = {data.span, twiddle.span};
+            allocation_ids = {"legacy/data", "legacy/twiddle"};
+            assembly = "dload x10, x11, p1, 1, 0\n"
+                       "dload x10, x11, p2, 1, 0\n"
+                       "pntt p1, p2, 0, 0, 0\n"
+                       "pfree p1\npfree p2\n";
+        }
         const auto input = image.add(
             "input", {9, 8, 7, 6},
             hpu::runtime::AllocationKind::plaintext, true);
         const auto output = image.reserve(
             "result", 4, hpu::runtime::AllocationKind::output);
-        const std::string assembly =
+        assembly +=
             "dload x10, x11, p0, 0, 0\n"
             "dstore x10, x11, p0, 0\n"
             "psync\n";
@@ -110,7 +128,10 @@ struct Fixture {
             hpu::collect_dma_relocations(instructions).size());
         request.program.source = hpu::render_executable_source(
             request.program.stem, instructions, image.capacity_lines());
-        request.program.ordered_dma_spans = {input.span, output.span};
+        request.program.ordered_dma_spans = prefix_spans;
+        request.program.ordered_dma_spans.insert(
+            request.program.ordered_dma_spans.end(), {input.span, output.span});
+        allocation_ids.insert(allocation_ids.end(), {"input", "result"});
         const auto relocations = hpu::collect_dma_relocations(instructions);
         std::ostringstream resolved;
         resolved << "instruction_index,dma_index,operation_index,operation_id,"
@@ -125,7 +146,7 @@ struct Fixture {
                      << static_cast<unsigned>(dma.object_id) << ','
                      << static_cast<unsigned>(dma.type_or_release) << ','
                      << static_cast<unsigned>(dma.flag) << ','
-                     << (index == 0 ? "input" : "result") << ','
+                     << allocation_ids[index] << ','
                      << span.line_offset << ',' << span.line_count << ','
                      << hpu::format_word_hex(instruction.word) << ",\""
                      << instruction.normalized_asm << "\"\n";
@@ -353,6 +374,11 @@ void test_happy_path_package()
             std::filesystem::is_regular_file(package / relative),
             ("missing required package file: " + relative.string()).c_str());
     }
+    const auto abi = read_file(package / "memory/abi.json");
+    require(abi.find("\"stage_twiddle_format\": \"hpu-twiddle-k8-v1\"") != std::string::npos
+                && abi.find("\"twiddle_chains\": 8") != std::string::npos
+                && abi.find("\"stage_parameter_lines\": 2") != std::string::npos,
+            "package omitted the K=8 target twiddle ABI");
     hpu::delivery::validate_application_package_on_disk(package);
 }
 
@@ -654,6 +680,66 @@ void test_fixed_entry_compatibility_and_sideband_integrity()
         "        HPU_PROGRAM_MINIMAL_APP_DMA_COUNT);\n}\n";
     const auto legacy = hpu::delivery::write_application_package(scratch.path() / "legacy", fixture.request);
     hpu::delivery::validate_application_package_on_disk(legacy.root);
+}
+
+void test_historical_full_twiddle_fixed_package()
+{
+    ScratchDirectory scratch;
+    Fixture fixture(true);
+    auto& program = fixture.request.program;
+    const std::string marker = "#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
+    program.header.insert(program.header.find(marker), "int hpu_run_minimal_app(void);\n\n");
+    // Start with the dynamic source so request validation does not claim the
+    // current target accepts this historical one-line N=128 stage table.
+    const auto package = hpu::delivery::write_application_package(
+        scratch.path() / "historical_full_twiddle", fixture.request);
+    const auto current_abi = read_file(package.root / "memory/abi.json");
+    std::vector<hpu::ExecutableDmaSpan> spans;
+    for (const auto& span : program.ordered_dma_spans)
+        spans.push_back({span.line_offset, span.line_count});
+    const auto historical_source = hpu::render_fixed_executable_source(
+        program.stem, program.instructions, fixture.image.capacity_lines(), spans,
+        hpu::ExecutableTwiddleFormat::legacy_full_table);
+    const std::string historical_abi =
+        "{\n"
+        "  \"schema\": \"hpu-dma-abi\",\n"
+        "  \"schema_version\": 1,\n"
+        "  \"rs1\": \"x10\",\n"
+        "  \"rs2\": \"x11\",\n"
+        "  \"word_bits\": 32,\n"
+        "  \"line_words\": 64,\n"
+        "  \"line_bytes\": 256,\n"
+        "  \"byte_order\": \"little-endian\"\n"
+        "}\n";
+    write_file(package.root / "program/minimal_app.c", historical_source);
+    write_file(package.root / "memory/abi.json", historical_abi);
+    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+    refresh_files_manifest_entry(package.root, "memory/abi.json");
+    hpu::delivery::validate_application_package_on_disk(package.root);
+
+    // Structural backward compatibility still verifies actual fixed DMA
+    // setup. Re-signing a changed address must not make it acceptable.
+    auto corrupt = historical_source;
+    const auto position = corrupt.find("li x10, 0");
+    require(position != std::string::npos, "historical fixture omitted its first fixed DMA address");
+    corrupt.replace(position, std::string("li x10, 0").size(), "li x10, 1");
+    write_file(package.root / "program/minimal_app.c", corrupt);
+    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"program", "source"},
+        "historical package accepted a re-signed incorrect fixed DMA address");
+
+    // Declaring current K=8 metadata must enable current shape checks, even
+    // when all payload and source checksums have been recomputed.
+    write_file(package.root / "program/minimal_app.c", historical_source);
+    write_file(package.root / "memory/abi.json", current_abi);
+    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+    refresh_files_manifest_entry(package.root, "memory/abi.json");
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"fixed executable", "twiddles", "format"},
+        "current K=8 metadata accepted a historical one-line stage table");
 }
 
 void test_validator_rejects_resigned_program_header_mismatch()
@@ -1418,6 +1504,10 @@ int main()
     run_test(
         "fixed entry compatibility and DMA sideband integrity",
         test_fixed_entry_compatibility_and_sideband_integrity,
+        failures);
+    run_test(
+        "historical full-twiddle fixed package compatibility",
+        test_historical_full_twiddle_fixed_package,
         failures);
     run_test(
         "reject re-signed mismatched C program header",

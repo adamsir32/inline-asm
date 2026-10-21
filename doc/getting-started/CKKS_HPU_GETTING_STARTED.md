@@ -299,8 +299,10 @@ ModUp/ModDown 的 N-word BConv/P-inverse 对象，并预留可复用 Q|P workspa
 两条路径分别消费对应格式，不会把紧凑软件记录绑定到多项式 DMA。
 
 变换路径会
-从同一个 HPU_MEM image 读取 pre-twist、每个 stage 的 N/2 个 twiddle，以及
-INTT post-untwist/scale；不会在执行时偷偷重新生成另一套表。
+从同一个 HPU_MEM image 读取完整 pre-twist、每个 stage 的两条 line K=8 参数，
+以及完整 INTT post-untwist/scale。stage 参数按硬件 stride-8 递推展开为 BF 因子，
+不会绕过实际镜像另生成 canonical 根表。精确格式见
+[twiddle 迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
 `hpu_seal_ckks_software_executor_test` 将输出转换回 SEAL NTT，并要求和独立
 `seal::Evaluator` 输出逐字相同，包括不同输入的 Multiply→Relinearize→Rescale、
 Square 后的独立 KeySwitch/Relinearize，

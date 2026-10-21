@@ -10,6 +10,12 @@
 namespace hpu {
 namespace {
 
+// Current target ABI: PNTT/PINTT src2 carries K=8 online parameters,
+// independently of the polynomial degree. Keep encode independent of models.
+constexpr std::uint64_t kStageParameterLines = 2;
+constexpr std::uint64_t kMinNttPolynomialLines = 2;
+constexpr std::uint64_t kMaxNttPolynomialLines = 1024;
+
 std::string hex_word(std::uint32_t word) {
     std::ostringstream output;
     output << "0x" << std::uppercase << std::hex << std::setw(8)
@@ -32,14 +38,16 @@ std::string csv_field(const std::string& value) {
 }
 
 void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
-                          std::uint64_t capacity,
-                          const std::vector<ExecutableDmaSpan>& spans) {
+                         std::uint64_t capacity,
+                         const std::vector<ExecutableDmaSpan>& spans,
+                         ExecutableTwiddleFormat twiddle_format) {
     const auto maximum = std::numeric_limits<std::uint32_t>::max();
     if (capacity == 0 || capacity > maximum)
         throw std::invalid_argument("fixed executable capacity exceeds the uint32 span ABI");
     if (collect_dma_relocations(encoded).size() != spans.size())
         throw std::invalid_argument("fixed executable DMA span count differs from instructions");
     std::array<std::uint64_t, 8> lengths{};
+    std::array<bool, 8> small_bank{};
     std::size_t dma_index = 0;
     for (const auto& item : encoded) {
         const auto& op = item.instruction;
@@ -53,6 +61,7 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
                 if (span.line_count > limit)
                     throw std::invalid_argument("fixed executable DMA exceeds bank capacity");
                 lengths.at(op.obj_id) = span.line_count;
+                small_bank.at(op.obj_id) = op.dma_flag != 0;
             } else {
                 if (span.line_count != lengths.at(op.obj_id))
                     throw std::invalid_argument("fixed executable DSTORE length differs from its object");
@@ -67,12 +76,24 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
                     (lengths.at(op.pdst) != 0 && lengths.at(op.pdst) != length))
                     throw std::invalid_argument("fixed executable arithmetic operand lengths differ");
                 lengths.at(op.pdst) = length;
+                small_bank.at(op.pdst) = false;
                 break;
             }
-            case Mnemonic::kPntt: case Mnemonic::kPintt:
-                if (lengths.at(op.pdst) != 2 * lengths.at(op.psrc1))
-                    throw std::invalid_argument("fixed executable transform data/twiddle lengths differ");
+            case Mnemonic::kPntt: case Mnemonic::kPintt: {
+                const auto data_lines = lengths.at(op.pdst);
+                const auto table_lines = lengths.at(op.psrc1);
+                const bool valid_twiddle = twiddle_format == ExecutableTwiddleFormat::online_k8
+                    ? table_lines == kStageParameterLines : data_lines == 2 * table_lines;
+                if (data_lines < kMinNttPolynomialLines ||
+                    data_lines > kMaxNttPolynomialLines ||
+                    (data_lines & (data_lines - 1)) != 0 ||
+                    !valid_twiddle ||
+                    small_bank.at(op.pdst) || small_bank.at(op.psrc1))
+                    throw std::invalid_argument(
+                        "fixed executable transform requires a power-of-two polynomial "
+                        "and ordinary-bank twiddles matching its declared format");
                 break;
+            }
             case Mnemonic::kPfree: lengths.at(op.idx0) = 0; break;
             default: break;
             }
@@ -341,9 +362,10 @@ std::string render_fixed_executable_source(
     const std::string& stem,
     const std::vector<EncodedInstruction>& encoded,
     std::uint64_t hpu_mem_line_count,
-    const std::vector<ExecutableDmaSpan>& spans) {
+    const std::vector<ExecutableDmaSpan>& spans,
+    ExecutableTwiddleFormat twiddle_format) {
     const auto dynamic_source = render_executable_source(stem, encoded, hpu_mem_line_count);
-    validate_fixed_spans(encoded, hpu_mem_line_count, spans);
+    validate_fixed_spans(encoded, hpu_mem_line_count, spans, twiddle_format);
     const auto id = c_identifier(stem);
     std::ostringstream output;
     output << dynamic_source;

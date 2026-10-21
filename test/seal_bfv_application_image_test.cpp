@@ -91,7 +91,11 @@ void require_fused_automorphism(
         degree, table.modulus, hpu::model::pow_mod(table.modified_psi, 2, table.modulus));
     hpu::model::InverseNttTables inverse;
     for (const auto& stage : table.inverse_stages) {
-        inverse.stages.push_back(span_words(image, stage, degree / 2));
+        require(stage.line_count == hpu::model::kStageTwiddleParameterLines,
+                "BFV inverse stage did not use two K=8 parameter lines");
+        inverse.stages.push_back(hpu::model::expand_stage_twiddles(
+            span_words(image, stage, hpu::model::kStageTwiddleParameterWords),
+            table.modulus, degree));
     }
     inverse.set_natural_post_scale(span_words(image, table.post_untwist_scale, degree));
     const auto actual = model.inverse(canonical_ntt, inverse);
@@ -182,6 +186,29 @@ int main()
                                        twiddles.inverse_stages.size() == 7;
                             }),
                 "BFV canonical NTT stage count is incorrect");
+        for (const auto& twiddles : canonical) {
+            const hpu::model::HardwareNttModel model(
+                spec.poly_modulus_degree, twiddles.modulus,
+                hpu::model::pow_mod(twiddles.canonical_psi, 2, twiddles.modulus));
+            const auto forward = model.forward_twiddles();
+            const auto inverse = model.inverse_twiddles();
+            for (std::size_t stage = 0; stage < forward.size(); ++stage) {
+                require(twiddles.forward_stages[stage].line_count ==
+                            hpu::model::kStageTwiddleParameterLines &&
+                            twiddles.inverse_stages[stage].line_count ==
+                            hpu::model::kStageTwiddleParameterLines,
+                        "BFV canonical stages must use two K=8 parameter lines");
+                require(hpu::model::expand_stage_twiddles(
+                            span_words(builder.image(), twiddles.forward_stages[stage],
+                                       hpu::model::kStageTwiddleParameterWords),
+                            twiddles.modulus, spec.poly_modulus_degree) == forward[stage] &&
+                            hpu::model::expand_stage_twiddles(
+                            span_words(builder.image(), twiddles.inverse_stages[stage],
+                                       hpu::model::kStageTwiddleParameterWords),
+                            twiddles.modulus, spec.poly_modulus_degree) == inverse.stages[stage],
+                        "BFV canonical parameter image differs from physical BF tables");
+            }
+        }
         require(std::none_of(canonical.begin(), canonical.end(),
                              [&](const auto& twiddles) {
                                  return twiddles.modulus_id ==

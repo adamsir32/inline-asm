@@ -87,12 +87,14 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
               hpu::runtime::AllocationKind::twiddle);
     const auto forward = model.forward_twiddles();
     for (std::size_t stage = 0; stage < forward.size(); ++stage) {
-        image.add(stage_id(prefix + "/ntt", stage), forward[stage],
+        image.add(stage_id(prefix + "/ntt", stage),
+                  hpu::model::pack_stage_twiddles(forward[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const auto inverse = model.inverse_twiddles();
     for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
-        image.add(stage_id(prefix + "/intt", stage), inverse.stages[stage],
+        image.add(stage_id(prefix + "/intt", stage),
+                  hpu::model::pack_stage_twiddles(inverse.stages[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const std::uint32_t inverse_psi = hpu::model::inverse_mod_prime(psi, modulus);
@@ -115,7 +117,10 @@ void add_galois_twiddles(hpu::runtime::HpuMemImage& image,
     for (std::size_t basis = 0; basis < tables.size(); ++basis) {
         const auto prefix = mod_id("constants/twiddle/galois", basis) + "/intt";
         for (std::size_t stage = 0; stage < tables[basis].stages.size(); ++stage) {
-            image.add(stage_id(prefix, stage), tables[basis].stages[stage],
+            image.add(stage_id(prefix, stage),
+                      hpu::model::pack_stage_twiddles(
+                          tables[basis].stages[stage], tables[basis].modulus,
+                          tables[basis].post_untwist_scale.size()),
                       hpu::runtime::AllocationKind::twiddle);
         }
         const auto& raw_post = tables[basis].post_untwist_scale;
@@ -226,7 +231,7 @@ std::uint64_t estimate_bgv_keyswitch_image_lines(
     }
     const std::uint64_t q = active_q_count;
     const std::uint64_t polynomial_lines = degree / hpu::runtime::kHpuMemLineWords;
-    const std::uint64_t stage_lines = degree / (2 * hpu::runtime::kHpuMemLineWords);
+    const std::uint64_t stage_lines = hpu::model::kStageTwiddleParameterLines;
     const std::uint64_t stages = ntt_stage_count(degree);
     const std::uint64_t twiddle_lines_per_modulus =
         2 * polynomial_lines + 2 * stages * stage_lines;
@@ -257,7 +262,7 @@ std::uint64_t estimate_bgv_rotation_image_lines(
     const std::uint64_t base = estimate_bgv_keyswitch_image_lines(
         degree, active_q_count, key_modulus_count);
     const std::uint64_t polynomial_lines = degree / hpu::runtime::kHpuMemLineWords;
-    const std::uint64_t stage_lines = degree / (2 * hpu::runtime::kHpuMemLineWords);
+    const std::uint64_t stage_lines = hpu::model::kStageTwiddleParameterLines;
     return base + active_q_count *
         (3 * polynomial_lines + ntt_stage_count(degree) * stage_lines);
 }
@@ -427,14 +432,14 @@ static BgvKeySwitchApplication build_bgv_keyswitch_application_impl(
     };
     const auto inverse_twiddles = [&](std::size_t id) {
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/intt", stage), degree / 2);
+            recipe.load(3, stage_id(twiddle(id) + "/intt", stage), hpu::model::kStageTwiddleParameterWords);
         }
         recipe.load(3, twiddle(id) + "/intt/post_untwist_scale", degree);
     };
     const auto forward_twiddles = [&](std::size_t id) {
         recipe.load(3, twiddle(id) + "/ntt/pre_twist", degree);
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/ntt", stage), degree / 2);
+            recipe.load(3, stage_id(twiddle(id) + "/ntt", stage), hpu::model::kStageTwiddleParameterWords);
         }
     };
 
@@ -695,12 +700,12 @@ static BgvKeySwitchApplication build_bgv_galois_application(
             recipe.load(0,
                 mod_id("input/original/c" + std::to_string(component), basis), degree);
             for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(fused_prefix, stage), degree / 2);
+                recipe.load(3, stage_id(fused_prefix, stage), hpu::model::kStageTwiddleParameterWords);
             }
             recipe.load(3, fused_prefix + "/post_untwist_scale", degree);
             recipe.load(3, canonical_prefix + "/pre_twist", degree);
             for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(canonical_prefix, stage), degree / 2);
+                recipe.load(3, stage_id(canonical_prefix, stage), hpu::model::kStageTwiddleParameterWords);
             }
             recipe.store(0,
                 mod_id(component == 0 ? "input/c0" : "input/c2", basis), degree);

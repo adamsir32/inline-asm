@@ -196,7 +196,8 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
         for (std::size_t stage = 0; stage < forward.size(); ++stage) {
             prepared.forward_stages.push_back(image_
                                                   .add(stage_id(prefix + "/ntt", stage),
-                                                       forward[stage],
+                                                       hpu::model::pack_stage_twiddles(
+                                                           forward[stage], current_modulus, degree),
                                                        hpu::runtime::AllocationKind::twiddle, true)
                                                   .span);
         }
@@ -204,7 +205,8 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
         for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
             prepared.inverse_stages.push_back(image_
                                                   .add(stage_id(prefix + "/intt", stage),
-                                                       inverse.stages[stage],
+                                                       hpu::model::pack_stage_twiddles(
+                                                           inverse.stages[stage], current_modulus, degree),
                                                        hpu::runtime::AllocationKind::twiddle, true)
                                                   .span);
         }
@@ -420,7 +422,10 @@ BfvApplicationImageBuilder::add_fused_automorphism_twiddles(
         for (std::size_t stage = 0; stage < tables[basis].stages.size(); ++stage) {
             prepared.inverse_stages.push_back(
                 image_
-                    .add(stage_id(prefix, stage), tables[basis].stages[stage],
+                    .add(stage_id(prefix, stage),
+                         hpu::model::pack_stage_twiddles(
+                             tables[basis].stages[stage], prepared.modulus,
+                             tables[basis].post_untwist_scale.size()),
                          hpu::runtime::AllocationKind::twiddle, true)
                     .span);
         }

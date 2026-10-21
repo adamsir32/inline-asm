@@ -39,9 +39,20 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 `test/reference/main.cpp` 的历史固定 profile 算子包仍是 BR 系数镜像，不能套用
 新应用镜像的自然位置表约定。
 
-新包的固定表 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
+新包的数据 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
 回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
 完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
+
+当前 NTT 数据 ABI version=2，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
+每个 PNTT/PINTT 的 src2 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
+PINTT stage 0；pre/post PMUL 向量仍为 N 个 word。旧完整表镜像不能直接交给
+在线生成 RTL，必须连同 spans、window、manifest 和校验值重新生成。
+物理普通 bank 的分配粒度继续由目标 allocator 决定。
+
+硬件组同时记录了 HpuCmdMerge 背压越序的集成问题：仅更新 twiddle RTL 提交
+不代表未节流 IT 已消除死锁。目标验收需单独确认 Chisel 合流器修复与完整 IT
+结果；本次编译器不新增每 stage 软件等待。详见
+[迁移说明第 8.1 节](../reference/TWIDDLE_COMPILER_MIGRATION.md#81-已知硬件合流器问题与参数迁移分开验收)。
 
 ## 2. 发布方生成步骤
 

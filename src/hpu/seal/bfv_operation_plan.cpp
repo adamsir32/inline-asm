@@ -75,6 +75,8 @@ void validate_twiddle_resource(const hpu::runtime::HpuMemImage& image, const std
     try {
         const auto& allocation = image.allocation(id);
         if (!same_span(allocation.span, span) || allocation.word_count != word_count ||
+            allocation.span.line_count !=
+                (word_count + hpu::runtime::kHpuMemLineWords - 1) / hpu::runtime::kHpuMemLineWords ||
             allocation.kind != hpu::runtime::AllocationKind::twiddle || !allocation.read_only) {
             throw std::invalid_argument(std::string(role) +
                                         " does not match its BFV HPU_MEM allocation");
@@ -401,7 +403,9 @@ void BfvOperationPlan::validate_canonical_twiddles(const BfvLevelDescriptor& lev
     const auto require_twiddle = [&](const std::string& id, std::size_t words) {
         try {
             const auto& allocation = image_builder_.image().allocation(id);
-            if (allocation.word_count != words || allocation.span.line_count == 0 ||
+            if (allocation.word_count != words ||
+                allocation.span.line_count !=
+                    (words + hpu::runtime::kHpuMemLineWords - 1) / hpu::runtime::kHpuMemLineWords ||
                 allocation.kind != hpu::runtime::AllocationKind::twiddle || !allocation.read_only) {
                 throw std::invalid_argument(
                     "BFV canonical twiddle has an incompatible allocation: " + id);
@@ -423,8 +427,8 @@ void BfvOperationPlan::validate_canonical_twiddles(const BfvLevelDescriptor& lev
         const std::string prefix = "constants/twiddle/canonical/mod" + std::to_string(modulus_id);
         require_twiddle(prefix + "/ntt/pre_twist", degree);
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            require_twiddle(prefix + "/ntt/stage" + std::to_string(stage), degree / 2);
-            require_twiddle(prefix + "/intt/stage" + std::to_string(stage), degree / 2);
+            require_twiddle(prefix + "/ntt/stage" + std::to_string(stage), hpu::model::kStageTwiddleParameterWords);
+            require_twiddle(prefix + "/intt/stage" + std::to_string(stage), hpu::model::kStageTwiddleParameterWords);
         }
         require_twiddle(prefix + "/intt/post_untwist_scale", degree);
     }
@@ -687,7 +691,7 @@ PreparedBfvRnsObject BfvOperationPlan::append_galois(
         for (std::size_t stage = 0; stage < stages; ++stage) {
             validate_twiddle_resource(image_builder_.image(),
                                        table.id + "/stage" + std::to_string(stage),
-                                       table.inverse_stages[stage], degree / 2,
+                                       table.inverse_stages[stage], hpu::model::kStageTwiddleParameterWords,
                                        "BFV Galois fused twiddle stage");
         }
         validate_twiddle_resource(image_builder_.image(), table.id + "/post_untwist_scale",

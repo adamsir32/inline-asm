@@ -1,6 +1,7 @@
 #include "hpu/seal/operation_relocation.hpp"
 
 #include "hpu/seal/ckks_level.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
 #include <regex>
@@ -437,7 +438,7 @@ void bind_transform_limb(
             3, canonical_twiddle_id(
                 modulus_id, inverse,
                 "stage" + std::to_string(stage)),
-            degree / 2);
+            hpu::model::kStageTwiddleParameterWords);
     }
     if (inverse) {
         bindings.load_words(
@@ -460,7 +461,7 @@ void bind_fused_inverse_limb(
     for (std::size_t stage = 0; stage < stages; ++stage) {
         bindings.load_words(
             3, twiddle_prefix + "/stage" + std::to_string(stage),
-            degree / 2);
+            hpu::model::kStageTwiddleParameterWords);
     }
     bindings.load_words(
         3, twiddle_prefix + "/post_untwist_scale", degree);

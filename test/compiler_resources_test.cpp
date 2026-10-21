@@ -553,7 +553,8 @@ void test_ntt_preserves_live_ssa_input()
         image.add("moduli", {q, static_cast<std::uint32_t>(mu), static_cast<std::uint32_t>(mu >> 32), 0},
                   AllocationKind::modulus_table);
         image.add("input", input, AllocationKind::ciphertext);
-        image.add("table", table, AllocationKind::twiddle);
+        image.add("table", hpu::model::pack_stage_twiddles(table, q, input.size()),
+                  AllocationKind::twiddle);
         image.reserve("old", input.size(), AllocationKind::output);
         image.reserve("new", input.size(), AllocationKind::output);
         r::Recording recording;

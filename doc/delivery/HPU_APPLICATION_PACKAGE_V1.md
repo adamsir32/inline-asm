@@ -162,8 +162,9 @@ post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i mod q
 
 `i` 为自然系数位置，`raw_inverse.post_scale` 已包含 lazy scale 抵消和 `N^-1`。
 modified-root INTT 使用该 root 的 raw inverse 表，并以 modified psi 代替 psi。
-各 stage 的 `N/2` 个 twiddle word 始终按 loader batch、batch 内 BF lane 顺序
-准备，不对 stage 表做 BR。NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
+各 stage 的完整数学 oracle 按 loader batch、batch 内 BF lane 顺序准备
+`N/2` 个因子，不对 stage 表做 BR，再压缩为两条 line 的 K=8 参数写入镜像。
+NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
 
 Evaluator 前端默认的 `InstructionNttContract::natural_coefficient_boundaries` 在
 PNTT stage 0 的 raw stage 前做数学边界 BR，在最后 PINTT raw stage 后做数学边界
@@ -177,16 +178,19 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 比较失败。历史 `test/reference/main.cpp` 固定 profile 算子包仍使用 BR 系数镜像，
 其布局不因应用包的新约定而改变；该 raw 算子包也不属于本页的新应用镜像协议。
 
-新应用包的 `metadata/parameters.json` 记录固定的表 ABI：
+新应用包的 `metadata/parameters.json` 记录实际的 NTT 数据 ABI：
 
 ```json
 {
   "ntt_table_abi": {
-    "version": 1,
+    "version": 2,
     "coefficient_order": "natural",
     "pre_twist_order": "natural",
     "post_factor_order": "natural",
     "stage_twiddle_order": "reference_loader_batch_lane",
+    "stage_twiddle_format": "hpu-twiddle-k8-v1",
+    "twiddle_chains": 8,
+    "stage_parameter_lines": 2,
     "canonical_ntt_layout": "reference_forward_layout",
     "normalization": "explicit_post_pmul",
     "twist_fused": false
@@ -194,12 +198,26 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 }
 ```
 
+当前 PNTT/PINTT 的 src2 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
+第一条 line 是 64-lane 模板 U；第二条 line 保存 7 个 slot 初始化倍率 V、有效
+stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使用这个布局，
+PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word，指令编码不变。
+精确字段与重构公式见 [硬件组迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+
+`memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
+`stage_parameter_lines`，供直接消费镜像的 IT 程序识别目标格式。package schema
+仍为 v1；其中 NTT 数据 ABI 的 version=2 与 package schema 是两个独立版本。
+
 该对象描述 builder 生成的实际镜像，与回放时选择的 `ntt_contract` 分别记录；
 选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
 schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，应按原生成版本和
 镜像约定回放。迁移到新自然边界时应重新生成完整应用包，包括镜像、golden、元数据
 和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。旧 raw 算子包可以保留
 用于旧契约回归，不将其文件混入新生成的自然镜像包。
+
+旧完整 stage 表即使通过包结构和 checksum 验证，也不代表兼容在线生成 RTL。
+当前 target 无完整表执行分支，必须重新生成镜像、DMA spans、sidecar 和 checksum；
+不能只改 ABI 字段。已有包的结构验证仍允许用于安全替换历史产物。
 
 ## 验证依据
 

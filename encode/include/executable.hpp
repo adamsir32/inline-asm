@@ -27,6 +27,10 @@ struct ExecutableDmaSpan {
     std::uint64_t line_count = 0;
 };
 
+// The legacy variant exists to reproduce and validate archived V1 sources.
+// Current code generators use online_k8 and never select a legacy fallback.
+enum class ExecutableTwiddleFormat { online_k8, legacy_full_table };
+
 std::string c_identifier(std::string value);
 std::vector<DmaRelocation> collect_dma_relocations(
     const std::vector<EncodedInstruction>& encoded);
@@ -45,7 +49,8 @@ std::string render_fixed_executable_source(
     const std::string& stem,
     const std::vector<EncodedInstruction>& encoded,
     std::uint64_t hpu_mem_line_count,
-    const std::vector<ExecutableDmaSpan>& spans);
+    const std::vector<ExecutableDmaSpan>& spans,
+    ExecutableTwiddleFormat twiddle_format = ExecutableTwiddleFormat::online_k8);
 std::string render_dma_manifest(
     const std::vector<EncodedInstruction>& encoded);
 

@@ -87,6 +87,15 @@ first runtime version therefore forbids a kernel boundary in the middle of a
 modified-root transform; only the resulting Galois key domain needs to survive
 until KeySwitch.
 
+Stage DMA payloads use the fixed K=8 online-twiddle ABI: 128 little-endian u32
+words (two 256-byte lines) per stage, for every supported degree. Builders pack
+the original physical oracle tables into U/V/R parameters and verify their full
+reconstruction. Instruction and scheme executors expand the actual image
+parameters before invoking the original mathematical stage model. Explicit
+pre/post factors remain degree-sized vectors. The frontend and instruction
+encoding are unchanged; old full-table images must be regenerated. See the
+[hardware compiler migration contract](../reference/TWIDDLE_COMPILER_MIGRATION.md).
+
 `hpu::seal_adapter::ciphertext_component_to_hpu` implements the first exact
 SEAL bridge. It uses the pinned SEAL inverse NTT to recover canonical
 coefficients and then runs the HPU negacyclic model, rather than assuming that

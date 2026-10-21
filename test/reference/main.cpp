@@ -2731,11 +2731,12 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
             image_index = add_hardware_image(
                 images,
                 "constants/twiddle/ntt/" + basis_dir + "/" + stage_name + ".u32.bin",
-                "forward DIT stage twiddles in hardware batch/lane consumption order",
-                {g_n / 2},
-                ntt_tables[stage]);
+                "K=8 online forward-stage twiddle parameters: U[64], V[7], R, ones",
+                {hpu::model::kStageTwiddleParameterWords},
+                hpu::model::pack_stage_twiddles(
+                    ntt_tables[stage], checked_u32(modulus, "twiddle modulus"), g_n));
             twiddle_entries.push_back({"ntt", basis, modulus, "butterfly", static_cast<int>(stage),
-                                        g_n / 2, g_n / 128, 64,
+                                        hpu::model::kStageTwiddleParameterWords, g_n / 128, 64,
                                         ntt_tables[stage].front(), 0, image_index});
         }
 
@@ -2754,11 +2755,12 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
             image_index = add_hardware_image(
                 images,
                 "constants/twiddle/intt/" + basis_dir + "/" + stage_name + ".u32.bin",
-                "inverse DIF lazy-scale BF twiddles in dual-loader batch/lane order",
-                {g_n / 2},
-                intt_tables[stage]);
+                "K=8 online inverse-stage lazy BF twiddle parameters: U[64], V[7], R, ones",
+                {hpu::model::kStageTwiddleParameterWords},
+                hpu::model::pack_stage_twiddles(
+                    intt_tables[stage], checked_u32(modulus, "twiddle modulus"), g_n));
             twiddle_entries.push_back({"intt", basis, modulus, "butterfly", static_cast<int>(stage),
-                                        g_n / 2, g_n / 128, 64,
+                                        hpu::model::kStageTwiddleParameterWords, g_n / 128, 64,
                                         intt_tables[stage].front(), 0, image_index});
         }
 
@@ -2968,14 +2970,17 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
     if (includes_twiddles) {
         abi << ",\n"
             << "  \"twiddle\": {\n"
+            << "    \"version\": 2,\n"
+            << "    \"stage_twiddle_format\": \"hpu-twiddle-k8-v1\",\n"
+            << "    \"twiddle_chains\": 8,\n"
             << "    \"convention\": \"autotest dual schedule: 128 registers, 64 BF lanes, P after PNTT and P^-1 before PINTT\",\n"
             << "    \"coefficient_physical_order\": \"memory[position] = coefficient[bit_reverse(position)]\",\n"
             << "    \"ntt_physical_order\": \"memory[position] = logical_ntt[forward_layout[position]]\",\n"
             << "    \"pre_twist_execution\": \"explicit PMUL by psi^bit_reverse(position) before PNTT stage 0\",\n"
-            << "    \"stage_payload_words\": " << g_n / 2 << ",\n"
+            << "    \"stage_payload_words\": " << hpu::model::kStageTwiddleParameterWords << ",\n"
             << "    \"stage_payload_lines\": "
-            << (g_n / 2 + kHpuWordsPerLine - 1) / kHpuWordsPerLine << ",\n"
-            << "    \"stage_payload\": \"N/2 physical values in loader-batch then BF-lane consumption order\",\n"
+            << hpu::model::kStageTwiddleParameterLines << ",\n"
+            << "    \"stage_payload\": \"K=8 parameters: line 0 U[64]; line 1 V[1..7], stride-8 carry ratios, one padding\",\n"
             << "    \"batch_rule\": \"N/128 batches, 64 lane twiddles per batch; labels follow every preceding P network\",\n"
             << "    \"intt_rule\": \"reverse forward stage order, P^-1 before BF, lazy-scale w_bf=alpha/beta\",\n"
             << "    \"stage_alignment\": \"each stage image starts at a 256-byte line\",\n"
@@ -3018,8 +3023,9 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
         << "hardware maintains DMA consistency, so pmodld needs no software psync. ";
     if (includes_twiddles) {
         hardware_readme
-            << "`twiddle_map.csv` gives each modulus, direction, phase, stage, loader-batch/lane "
-            << "order, line offset, and line count. ";
+            << "`twiddle_map.csv` gives each modulus, direction, phase, stage, K=8 parameter "
+            << "payload size, line offset, and line count. Stage payloads are always two lines; "
+            << "pre/post vectors retain N words. ";
     } else {
         hardware_readme
             << "This operator has no PNTT/PINTT stage, so the package intentionally omits "
@@ -3925,7 +3931,7 @@ void generate(const std::filesystem::path& output_root,
         << "has a complete annotated `.dec.txt` view. Dimensions, readable paths, and checksums "
         << "are listed in `artifact_manifest.csv`; basis order is Q followed by P.\n\n"
         << "The independent `hardware/` tree contains uint32 hardware images, q/Barrett contexts, "
-        << "physical per-stage twiddles, 256-byte line offsets/counts, and a complete HPU_MEM image/config.\n\n"
+        << "K=8 stage parameters, full-length pre/post vectors, 256-byte line offsets/counts, and a complete HPU_MEM image/config.\n\n"
         << "The validation path is: encrypt two test messages, NTT, three-component tensor "
         << "product, INTT, digit ModUp to Q union P, NTT, multiply by the relinearization key, "
         << "INTT, ModDown by P, compose the two-component ciphertext, decrypt, and compare with "

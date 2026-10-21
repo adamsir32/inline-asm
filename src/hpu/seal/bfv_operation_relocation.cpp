@@ -1,6 +1,7 @@
 #include "hpu/seal/bfv_operation_relocation.hpp"
 
 #include "hpu/seal/bfv_level.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
 #include <regex>
@@ -271,7 +272,7 @@ void bind_transform_limb(OperationBindingBuilder& bindings, const std::string& i
     for (std::size_t stage = 0; stage < stages; ++stage) {
         bindings.load_words(
             3, canonical_twiddle_id(modulus_id, inverse, "stage" + std::to_string(stage)),
-            degree / 2);
+            hpu::model::kStageTwiddleParameterWords);
     }
     if (inverse) {
         bindings.load_words(3, canonical_twiddle_id(modulus_id, true, "post_untwist_scale"),
@@ -290,11 +291,11 @@ void bind_automorphism_limb(OperationBindingBuilder& bindings, const std::string
     for (std::size_t stage = 0; stage < stages; ++stage) {
         bindings.load_words(3, canonical_twiddle_id(
                                    modulus_id, false, "stage" + std::to_string(stage)),
-                            degree / 2);
+                            hpu::model::kStageTwiddleParameterWords);
     }
     for (std::size_t stage = 0; stage < stages; ++stage) {
         bindings.load_words(3, fused_twiddle_prefix + "/stage" + std::to_string(stage),
-                            degree / 2);
+                            hpu::model::kStageTwiddleParameterWords);
     }
     bindings.load_words(3, fused_twiddle_prefix + "/post_untwist_scale", degree);
     bindings.store(0, output_id);
@@ -725,13 +726,13 @@ void bind_multiply_plain(OperationBindingBuilder& bindings, const BfvOperationSt
             for (std::size_t stage = 0; stage < stages; ++stage) {
                 bindings.load_words(
                     3, canonical_twiddle_id(modulus_id, false, "stage" + std::to_string(stage)),
-                    degree / 2);
+                    hpu::model::kStageTwiddleParameterWords);
             }
             bindings.load(1, limb_id(step.inputs[1], 0, modulus_id));
             for (std::size_t stage = 0; stage < stages; ++stage) {
                 bindings.load_words(
                     3, canonical_twiddle_id(modulus_id, true, "stage" + std::to_string(stage)),
-                    degree / 2);
+                    hpu::model::kStageTwiddleParameterWords);
             }
             bindings.load_words(3, canonical_twiddle_id(modulus_id, true, "post_untwist_scale"),
                                 degree);

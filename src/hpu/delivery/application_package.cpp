@@ -5,6 +5,7 @@
 #include "hpu/delivery/checksum.hpp"
 #include "hpu/delivery/io.hpp"
 #include "hpu/delivery/resource_compiler.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -339,7 +340,9 @@ std::string render_build_json(const ApplicationPackageRequest& request)
 
 std::string render_abi_json()
 {
-    return
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output <<
         "{\n"
         "  \"schema\": \"hpu-dma-abi\",\n"
         "  \"schema_version\": 1,\n"
@@ -348,8 +351,12 @@ std::string render_abi_json()
         "  \"word_bits\": 32,\n"
         "  \"line_words\": 64,\n"
         "  \"line_bytes\": 256,\n"
-        "  \"byte_order\": \"little-endian\"\n"
+        "  \"byte_order\": \"little-endian\",\n"
+        "  \"stage_twiddle_format\": \"" << hpu::model::kStageTwiddleParameterFormat << "\",\n"
+        "  \"twiddle_chains\": " << hpu::model::kTwiddleChains << ",\n"
+        "  \"stage_parameter_lines\": " << hpu::model::kStageTwiddleParameterLines << '\n' <<
         "}\n";
+    return output.str();
 }
 
 std::string render_memory_config_json(
@@ -1426,7 +1433,8 @@ void validate_program_source(
     const std::string& source,
     const std::vector<hpu::EncodedInstruction>& instructions,
     std::uint64_t capacity_lines,
-    const std::vector<hpu::runtime::HpuMemSpan>& spans)
+    const std::vector<hpu::runtime::HpuMemSpan>& spans,
+    hpu::ExecutableTwiddleFormat twiddle_format = hpu::ExecutableTwiddleFormat::online_k8)
 {
     const std::string base = hpu::render_executable_source(
         stem, instructions, capacity_lines);
@@ -1452,7 +1460,8 @@ void validate_program_source(
     if (source == expected.str()) return; // Historical V1 fixed-table wrapper.
     std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
-    if (source != hpu::render_fixed_executable_source(stem, instructions, capacity_lines, fixed_spans)) {
+    if (source != hpu::render_fixed_executable_source(stem, instructions, capacity_lines, fixed_spans,
+                                                    twiddle_format)) {
         throw std::runtime_error(
             "application package program source differs from encoded instructions or DMA spans");
     }
@@ -1608,11 +1617,26 @@ void validate_physical_artifacts(const std::filesystem::path& root)
         read_file(root / "program/dma_relocation_manifest.csv"),
         root / "program/dma_relocation_manifest.csv", assembled, memory,
         used_lines, nullptr);
+    // Historical packages must remain structurally verifiable so managed
+    // generation can safely replace them. This does not execute their data on
+    // the current target. New requests are always validated with online_k8.
+    const auto abi_path = root / "memory/abi.json";
+    const auto abi = read_file(abi_path);
+    const auto format = extract_json_string(abi, "stage_twiddle_format", abi_path, false);
+    auto twiddle_format = hpu::ExecutableTwiddleFormat::online_k8;
+    if (format.empty()) {
+        twiddle_format = hpu::ExecutableTwiddleFormat::legacy_full_table;
+    } else if (format != hpu::model::kStageTwiddleParameterFormat
+               || extract_json_u64(abi, "twiddle_chains", abi_path) != hpu::model::kTwiddleChains
+               || extract_json_u64(abi, "stage_parameter_lines", abi_path)
+                   != hpu::model::kStageTwiddleParameterLines) {
+        throw std::runtime_error("application package memory ABI has unsupported stage twiddle format");
+    }
     validate_program_source(
         std::filesystem::path(asm_path).stem().string(),
         read_file(root / extract_json_string(
             descriptor, "program_source", descriptor_path, true)),
-        assembled, capacity_lines, resolved_spans);
+        assembled, capacity_lines, resolved_spans, twiddle_format);
     validate_program_header(
         std::filesystem::path(asm_path).stem().string(),
         read_file(root / extract_json_string(

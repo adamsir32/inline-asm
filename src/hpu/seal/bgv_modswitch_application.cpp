@@ -82,12 +82,14 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
               hpu::runtime::AllocationKind::twiddle);
     const auto forward = model.forward_twiddles();
     for (std::size_t stage = 0; stage < forward.size(); ++stage) {
-        image.add(stage_id(prefix + "/ntt", stage), forward[stage],
+        image.add(stage_id(prefix + "/ntt", stage),
+                  hpu::model::pack_stage_twiddles(forward[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const auto inverse = model.inverse_twiddles();
     for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
-        image.add(stage_id(prefix + "/intt", stage), inverse.stages[stage],
+        image.add(stage_id(prefix + "/intt", stage),
+                  hpu::model::pack_stage_twiddles(inverse.stages[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
     const std::uint32_t inverse_psi = hpu::model::inverse_mod_prime(psi, modulus);
@@ -304,7 +306,7 @@ BgvModSwitchApplication build_bgv_modswitch_application(
         const std::string u_t = "workspace/bgv_modswitch/" + component_prefix + "/u_t";
         recipe.load(0, mod_id("input/" + component_prefix, last_id), degree);
         for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle_last + "/intt", stage), degree / 2);
+            recipe.load(3, stage_id(twiddle_last + "/intt", stage), hpu::model::kStageTwiddleParameterWords);
         }
         recipe.load(3, twiddle_last + "/intt/post_untwist_scale", degree);
         recipe.store(0, last_coeff, degree);
@@ -319,7 +321,7 @@ BgvModSwitchApplication build_bgv_modswitch_application(
             recipe.load(1, last_coeff, degree);
             recipe.load(3, twiddle_q + "/ntt/pre_twist", degree);
             for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(twiddle_q + "/ntt", stage), degree / 2);
+                recipe.load(3, stage_id(twiddle_q + "/ntt", stage), hpu::model::kStageTwiddleParameterWords);
             }
             recipe.load(1, mod_id("input/" + component_prefix, id), degree);
             recipe.load(0, mod_id(constant_prefix + "/q_last_inv", id), degree);

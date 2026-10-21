@@ -91,7 +91,7 @@ struct Fixture {
     {
         std::uint64_t offset = 0;
         for (const std::uint64_t count :
-             {1, 512, 512, 512, 1024, 512, 1024, 1024, 1024, 512, 512}) {
+             {1, 512, 512, 512, 1024, 2, 1024, 1024, 1024, 512, 512}) {
             spans.push_back({offset, count});
             offset += count + 1;
         }
@@ -198,9 +198,33 @@ void test_rejected_spans_and_shapes()
     expect_rejected(
         two_sources + "pmul p1, p0, 2\npfree p0\npfree p1\npsync\n",
         16, {{0, 1}, {1, 2}}, "unequal live arithmetic destination length");
+    for (const std::string direction : {"pntt", "pintt"}) {
+        const auto transform = two_sources + direction +
+            " p0, p1, 0, 0, 0\npfree p0\npfree p1\npsync\n";
+        expect_rejected(transform, 16, {{0, 2}, {2, 1}},
+                        "one-line stage parameters at N=128");
+        expect_rejected(transform, 4096, {{0, 1024}, {1024, 512}},
+                        "legacy full-stage twiddle payload");
+        const auto archived = hpu::render_fixed_executable_source(
+            "archived", hpu::assemble_source(transform), 4096,
+            {{0, 1024}, {1024, 512}}, hpu::ExecutableTwiddleFormat::legacy_full_table);
+        require(archived.find("li x11, 512") != std::string::npos,
+                "archived full-table source cannot be reproduced for validation");
+        expect_rejected(transform, 16, {{0, 1}, {1, 2}},
+                        "NTT degree below 128");
+        expect_rejected(transform, 16, {{0, 3}, {3, 2}},
+                        "non-power-of-two NTT degree");
+        for (const std::uint64_t lines : {2, 4, 16, 64, 1024}) {
+            (void)hpu::render_fixed_executable_source(
+                "k8_shape", hpu::assemble_source(transform), lines + 2,
+                {{0, lines}, {lines, 2}});
+        }
+    }
     expect_rejected(
-        two_sources + "pntt p0, p1, 0, 0, 0\npfree p0\npfree p1\npsync\n",
-        16, {{0, 2}, {2, 2}}, "unequal NTT data/twiddle shape");
+        "dload x10, x11, p0, 1, 0\n"
+        "dload x10, x11, p1, 2, 1\n"
+        "pntt p0, p1, 0, 0, 0\npfree p0\npfree p1\npsync\n",
+        16, {{0, 2}, {2, 2}}, "small-bank stage parameters");
 
     // A span may end exactly at capacity; immediate multiplication has no
     // second resident operand whose length must be checked.

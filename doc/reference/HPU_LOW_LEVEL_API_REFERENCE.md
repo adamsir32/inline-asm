@@ -373,9 +373,9 @@ auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_relin", program);
   host 对拍。实体 HPU 运行证据由 IT 验收提供。
 - `estimate_bgv_keyswitch_image_lines(N, active_q, key_modulus_count)` 给出当前
   all-resident 布局的精确容量，并在构建前检查 `capacity_lines`。例如
-  `N=65536,Q=3,P=1` 需 136193 个 256B line，超过旧的 65536-line 软件 profile；
+  K=8 参数迁移后，`N=65536,Q=3,P=1` 需 70913 个 256B line，超过旧的 65536-line 软件 profile；
   若平台允许更大的 HPU_MEM window，可直接按估计值或以上配置，而无需为这一步
-  引入分段调度。目标 `N=65536,Q=3,P=1` 的真实镜像已按 136193 line 构建，
+  引入分段调度。目标 `N=65536,Q=3,P=1` 的镜像按 70913 line 配置，
   475 个 DMA 绑定和 runtime manifest 均通过软件检查；这不替代实体 DMA/window 验证。
 
 #### 2.2.7 BGV 连续 Multiply+Relinearize 应用包
@@ -396,7 +396,7 @@ auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_multiply_relin", pr
   中间无 `psync`、host copy 或 window 切换。
 - 完整流只有一次模表加载与末尾 `psync`。`parms_id` 保持原 level，
   `correction_factor` 在 host 更新为两输入因子的乘积模 `t`。
-- `N=65536,Q=3,P=1` 的实际镜像占 148481 个 256B line，包含 508 个
+- `N=65536,Q=3,P=1` 的实际镜像占 83201 个 256B line，包含 508 个
   resolved DMA 绑定。顶层及降一级 tensor 与 modified-SEAL 差分一致，
   KeySwitch 后缀与独立运行包逐条一致；尚无实体 HPU 执行证据。
 
@@ -447,7 +447,7 @@ auto artifacts = render_bgv_keyswitch_runtime_artifacts("bgv_rows", rows);
   指令流中执行 BGV Galois KeySwitch；不通过 CPU 计算旋转后密文。
   `parms_id` 与 `correction_factor` 保持不变，只有末尾一次 `psync`。
 - 正/负行步长及列交换在顶层和降一级与 modified-SEAL 逐 limb 差分；
-  `N=65536,Q=3,P=1` 估算需 169985 个 256B line。前端及 Plan 包会对其原生资源 IR
+  `N=65536,Q=3,P=1` 估算需 80225 个 256B line。前端及 Plan 包会对其原生资源 IR
   做严格逐指令 host 对拍，实际优化后的容量以包内报告为准；实体 HPU 验证由 IT 提供。
 
 #### 2.2.10 BGV 跨 level 计算图

@@ -395,6 +395,14 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 边界转换，不额外编码 BR 指令。三方案 builder 与 SoftwareExecutor 使用相同的
 自然系数 pre/post 索引，twist、untwist 和归一化由显式 PMUL 完成。
 
+当前 stage DMA 使用固定 512 B 的 K=8 在线生成参数。镜像构建时，公共
+`pack_stage_twiddles` 从完整物理 oracle 表提取 U/V/R 并重构全表校验；逐指令层和
+算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
+raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
+参数只改变 src2 数据格式，前端 API、PNTT/PINTT 编码、pre/post 和普通 bank
+分配规则保持原契约。精确布局见
+[K=8 编译器迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+
 完整公式、stage 表顺序及 raw inverse API 适配见
 [编程手册的变换契约](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)，
 数据 ABI 与旧包迁移见

@@ -154,6 +154,8 @@ void validate_twiddle_resource(
         const auto& allocation = image.allocation(id);
         if (!same_span(allocation.span, span)
             || allocation.word_count != word_count
+            || allocation.span.line_count !=
+                (word_count + hpu::runtime::kHpuMemLineWords - 1) / hpu::runtime::kHpuMemLineWords
             || allocation.kind != hpu::runtime::AllocationKind::twiddle
             || !allocation.read_only) {
             throw std::invalid_argument(
@@ -628,7 +630,7 @@ PreparedRnsObject CkksOperationPlan::append_galois(
             validate_twiddle_resource(
                 image_builder_.image(),
                 table.id + "/stage" + std::to_string(stage),
-                table.inverse_stages[stage], degree / 2,
+                table.inverse_stages[stage], hpu::model::kStageTwiddleParameterWords,
                 "CKKS Galois fused twiddle stage");
         }
         validate_twiddle_resource(

@@ -1,6 +1,7 @@
 #include "hpu/seal/software_executor.hpp"
 
 #include "hpu/model/hardware_ntt.hpp"
+#include "hpu/seal/detail/stage_twiddle_memory.hpp"
 #include "scheme/ckks/galois.hpp"
 
 #include <algorithm>
@@ -395,7 +396,8 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
         hpu::model::InverseNttTables inverse_tables;
         inverse_tables.stages.reserve(prepared.inverse_stages.size());
         for (const auto& span : prepared.inverse_stages) {
-            inverse_tables.stages.push_back(memory_.read(span, degree / 2));
+            inverse_tables.stages.push_back(detail::read_stage_twiddles(
+                memory_, span, q, degree));
         }
         inverse_tables.set_natural_post_scale(memory_.read(
             prepared.post_untwist_scale, degree));
@@ -405,7 +407,8 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
     std::vector<std::vector<std::uint32_t>> forward_tables;
     forward_tables.reserve(prepared.forward_stages.size());
     for (const auto& span : prepared.forward_stages) {
-        forward_tables.push_back(memory_.read(span, degree / 2));
+        forward_tables.push_back(detail::read_stage_twiddles(
+            memory_, span, q, degree));
     }
     const auto pre_twist = memory_.read(prepared.pre_twist, degree);
     auto coefficients = words;
@@ -767,7 +770,8 @@ void CkksSoftwareExecutor::rotate(
             hpu::model::InverseNttTables inverse_tables;
             inverse_tables.stages.reserve(fused.inverse_stages.size());
             for (const auto& span : fused.inverse_stages) {
-                inverse_tables.stages.push_back(memory_.read(span, degree / 2));
+                inverse_tables.stages.push_back(detail::read_stage_twiddles(
+                    memory_, span, q, degree));
             }
             inverse_tables.set_natural_post_scale(memory_.read(
                 fused.post_untwist_scale, degree));
