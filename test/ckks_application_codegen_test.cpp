@@ -1,7 +1,9 @@
 #include "scheme/ckks/ciphertext_multiply.hpp"
 #include "scheme/ckks/basic_arithmetic.hpp"
 
+#include "assembler.hpp"
 #include "util/hpu_asm.hpp"
+#include "util/ntt.hpp"
 
 #include <cstddef>
 #include <iostream>
@@ -28,11 +30,46 @@ void require(bool condition, const char* message)
     }
 }
 
+void check_transform_cache_policy()
+{
+    // Exercise the complete legacy entry points as well as the transform
+    // bodies used by every scheme. Only transform tables request LLC allocation.
+    for (const auto& source : {generate_hpu_ntt_asm(8192, 0, 3, 4),
+                               generate_hpu_intt_asm(8192, 0, 3, 4)}) {
+        std::size_t table_loads = 0;
+        std::size_t stage_loads = 0;
+        for (const auto& encoded : hpu::assemble_source(source)) {
+            const auto& instruction = encoded.instruction;
+            if (instruction.mnemonic == hpu::Mnemonic::kDload) {
+                const bool is_table = instruction.obj_id == 3;
+                require(instruction.cp == (is_table ? 1 : 0),
+                        "transform DMA did not apply twiddle-only LLC allocation");
+                require(((encoded.word >> 13U) & 1U) == instruction.cp,
+                        "transform CP hint was not encoded in bit 13");
+                if (is_table) {
+                    ++table_loads;
+                    require(instruction.type == 0,
+                            "twiddle load incorrectly selected the modulus table");
+                    if (instruction.dma_flag == 0x20) ++stage_loads;
+                    else require(instruction.dma_flag == 0,
+                                 "pre/post table changed SRAM placement");
+                }
+            } else if (instruction.mnemonic == hpu::Mnemonic::kDstore) {
+                require(instruction.cp == 0,
+                        "transform result store requested LLC allocation");
+            }
+        }
+        require(table_loads == 14 && stage_loads == 13,
+                "forward/inverse transform did not cache both stage and pre/post tables");
+    }
+}
+
 } // namespace
 
 int main()
 {
     try {
+        check_transform_cache_policy();
         constexpr int degree = 128;
         constexpr int num_q = 4;
         constexpr int num_p = 1;

@@ -115,6 +115,7 @@ std::string compile_application_resources(
         for (const auto& output : request.outputs) baseline_output_spans.push_back(output.destination);
     }
     hpu::compiler::CompileOptions options;
+    options.dma_cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
     options.optimization = optimize ? hpu::compiler::OptimizationMode::optimized
                                    : hpu::compiler::OptimizationMode::no_opt;
     using Layout = hpu::compiler::MemoryLayout;
@@ -161,6 +162,7 @@ std::string compile_application_resources(
     }
 
     render_program(request.program, resources);
+    request.program.dma_cache_policy = options.dma_cache_policy;
 
     const auto resource_report = hpu::compiler::render_resource_report(resources);
     image = std::move(resources.image);

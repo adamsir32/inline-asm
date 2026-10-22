@@ -16,6 +16,7 @@ using BufferId = std::size_t;
 using ObjectId = std::size_t;
 
 enum class OptimizationMode { no_opt, optimized };
+enum class DmaCachePolicy { preserve, twiddle_loads_only };
 enum class ResourceIrOrigin { encoded_import, operator_emission };
 enum class MemoryLayout {
     unspecified,
@@ -34,6 +35,9 @@ struct CompileOptions {
     // Explicit buffer ABI annotations. They never permute payload words.
     // Workspace whose layout changes during execution must stay unspecified.
     std::map<std::string, MemoryLayout> buffer_layouts;
+    // Applied after DMA relocation using the final physical allocation kind.
+    // preserve retains explicit per-command hints, including in NoOpt mode.
+    DmaCachePolicy dma_cache_policy = DmaCachePolicy::preserve;
 };
 
 // Scheme-independent DMA provenance. Direction and object operands are taken
@@ -138,7 +142,8 @@ VirtualProgram import_resolved_program(
     const std::vector<ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image);
 
-// NoOpt preserves the original instruction words, DMA ranges and image bytes.
+// NoOpt preserves original instructions, DMA ranges and image bytes, except
+// for an explicitly requested DMA cache-policy rewrite.
 // Optimized keeps immutable resources and every non-workspace allocation,
 // reuses proven scratch lifetimes and predicts aligned physical intervals.
 CompiledResources optimize_resources(

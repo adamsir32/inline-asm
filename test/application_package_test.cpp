@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,7 +86,10 @@ struct Fixture {
     hpu::runtime::HpuMemImage image;
     hpu::delivery::ApplicationPackageRequest request;
 
-    explicit Fixture(bool legacy_transform = false, unsigned cp = 0)
+    explicit Fixture(
+        bool legacy_transform = false, unsigned cp = 0,
+        hpu::runtime::AllocationKind input_kind = hpu::runtime::AllocationKind::plaintext,
+        std::optional<unsigned> store_cp = std::nullopt)
         : image(legacy_transform ? 8 : 4)
     {
         std::string assembly;
@@ -107,11 +111,11 @@ struct Fixture {
         }
         const auto input = image.add(
             "input", {9, 8, 7, 6},
-            hpu::runtime::AllocationKind::plaintext, true);
+            input_kind, true);
         const auto output = image.reserve(
             "result", 4, hpu::runtime::AllocationKind::output);
         assembly += "dload x10, x11, p0, 0, " + std::to_string(cp) + ", 0\n"
-                    "dstore x10, x11, p0, 0, " + std::to_string(cp) + "\n"
+                    "dstore x10, x11, p0, 0, " + std::to_string(store_cp.value_or(cp)) + "\n"
                     "psync\n";
         const auto instructions = hpu::assemble_source(assembly);
 
@@ -398,6 +402,59 @@ void test_cp_manifest_roundtrip_and_tampering()
         [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
         {"DMA", "disagrees with the encoded program"},
         "validator accepted a re-signed cache policy unlike the instruction");
+}
+
+void test_twiddle_cache_policy_contract()
+{
+    using hpu::compiler::DmaCachePolicy;
+    Fixture table(false, 1, hpu::runtime::AllocationKind::twiddle, 0);
+    table.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    ScratchDirectory scratch;
+    const auto package = hpu::delivery::write_application_package(
+        scratch.path() / "twiddle", table.request);
+    hpu::delivery::validate_application_package_on_disk(package.root);
+    require(read_file(package.root / "memory/abi.json").find(
+                "\"dma_cache_policy\": \"twiddle_loads_only\"") != std::string::npos,
+            "package omitted the declared DMA cache policy");
+
+    Fixture missing_hint(false, 0, hpu::runtime::AllocationKind::twiddle);
+    missing_hint.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    Fixture bad_load(false, 1, hpu::runtime::AllocationKind::plaintext, 0);
+    bad_load.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    Fixture bad_store(false, 1, hpu::runtime::AllocationKind::twiddle, 1);
+    bad_store.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    for (const auto* fixture : {&missing_hint, &bad_load, &bad_store}) {
+        require_throws_with_fragments(
+            [&] { hpu::delivery::validate_application_package_request(fixture->request); },
+            {"DMA cache policy mismatch"},
+            "request validator accepted a DMA incompatible with its declared policy");
+    }
+
+    // Re-signing consistent instructions and CSV must not bypass data-kind validation.
+    Fixture preserved(false, 1);
+    const auto other = hpu::delivery::write_application_package(
+        scratch.path() / "preserved", preserved.request);
+    const auto abi_path = other.root / "memory/abi.json";
+    const auto original_abi = read_file(abi_path);
+    const std::string declaration = "  \"dma_cache_policy\": \"preserve\",\n";
+    const auto position = original_abi.find(declaration);
+    require(position != std::string::npos, "low-level package omitted preserve policy");
+    for (const auto* policy : {"twiddle_loads_only", "unknown", ""}) {
+        auto abi = original_abi;
+        abi.replace(position, declaration.size(),
+                    "  \"dma_cache_policy\": \"" + std::string(policy) + "\",\n");
+        write_file(abi_path, abi);
+        refresh_files_manifest_entry(other.root, "memory/abi.json");
+        require_throws_with_fragments(
+            [&] { hpu::delivery::validate_application_package_on_disk(other.root); },
+            {"DMA cache policy"},
+            "on-disk validator accepted a false or unknown cache policy declaration");
+    }
+    auto legacy_abi = original_abi;
+    legacy_abi.erase(position, declaration.size());
+    write_file(abi_path, legacy_abi);
+    refresh_files_manifest_entry(other.root, "memory/abi.json");
+    hpu::delivery::validate_application_package_on_disk(other.root);
 }
 
 void test_deterministic_generation()
@@ -1427,6 +1484,9 @@ void test_native_writer_preserves_caller()
     require(report.find("\"ir_source\": \"operator\"") != std::string::npos &&
             report.find("\"host_instruction_model_verified\":true") != std::string::npos,
             "writer omitted native resource compilation or strict verification");
+    require(read_file(destination / "memory/abi.json").find(
+                "\"dma_cache_policy\": \"twiddle_loads_only\"") != std::string::npos,
+            "native writer did not apply the default application cache policy");
 }
 
 template <typename Function>
@@ -1450,6 +1510,7 @@ int main()
 {
     std::vector<std::string> failures;
     run_test("native writer preserves caller", test_native_writer_preserves_caller, failures);
+    run_test("twiddle cache policy contract", test_twiddle_cache_policy_contract, failures);
     run_test("happy path package", test_happy_path_package, failures);
     run_test(
         "deterministic generation", test_deterministic_generation, failures);

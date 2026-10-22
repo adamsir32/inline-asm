@@ -34,6 +34,8 @@ def main():
         assert abi["allocation_granule_lines"] == 128
         assert abi["stage_parameter_mod"] == 0 and abi["stage_parameter_bank_mask"] == 32
         assert abi["dload_mask_scope"] == "load_only" and abi["dstore_rel0_retains"] is True
+        assert abi["default_cp"] == 0
+        assert abi["dma_cache_policy"] == "twiddle_loads_only"
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         assert parameters["scheme"] == scheme
         assert parameters["poly_modulus_degree"] > 0
@@ -86,6 +88,17 @@ def main():
         assert (package / descriptor["semantic_report"]).is_file()
         dma = rows(package / descriptor["dma_relocation_manifest"])
         assert dma and len(dma[0]) == 15
+        allocations = {entry["allocation_id"]: entry for entry in memory}
+        instruction_words = [int(line, 2) for line in
+                             (package / descriptor["program_inst32"]).read_text().splitlines()]
+        for binding in dma:
+            allocation = allocations[binding["allocation_id"]]
+            expected_cp = int(binding["direction"] == "dload" and
+                              allocation["kind"] == "twiddle")
+            assert int(binding["cp"]) == expected_cp, binding
+            word = instruction_words[int(binding["instruction_index"])]
+            assert ((word >> 13) & 1) == expected_cp, binding
+            assert ((int(binding["word_hex"], 16) >> 13) & 1) == expected_cp
         config = json.loads((package / descriptor["memory_config"]).read_text())
         assert config["capacity_lines"] == config["used_lines"]
         node_dma_counts = {}

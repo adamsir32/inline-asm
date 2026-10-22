@@ -27,7 +27,9 @@ std::string generate_hpu_ntt_body_asm(
     // 假设调用方已经加载过密文模数
     // Negacyclic NTT = pointwise pre-twist followed by a cyclic NTT.
     asm_code << "\n        // Negacyclic pre-twist: explicit PMUL by psi^i\n";
-    asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+    asm_code << hpu::resource::read(
+        twiddle_obj, hpu::DataType::poly,
+        hpu::DloadFlag::regular_bank, hpu::CachePolicy::allocate);
     asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
     asm_code << hpu::resource::discard(twiddle_obj);
 
@@ -37,7 +39,9 @@ std::string generate_hpu_ntt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pntt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::twiddle_parameters);
+        asm_code << hpu::resource::read(
+            twiddle_obj, hpu::DataType::twiddle_parameters,
+            hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
         asm_code << hpu::resource::ntt_stage(data_obj, twiddle_obj, stage, 0);
         asm_code << hpu::resource::discard(twiddle_obj);
     }
@@ -76,14 +80,18 @@ std::string generate_hpu_intt_body_asm(
         asm_code << "\n        // ==========================================\n";
         asm_code << "        // Stage " << stage << " (Stage-level pintt)\n";
         asm_code << "        // ==========================================\n";
-        asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::twiddle_parameters);
+        asm_code << hpu::resource::read(
+            twiddle_obj, hpu::DataType::twiddle_parameters,
+            hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
         asm_code << hpu::resource::intt_stage(data_obj, twiddle_obj, stage, 0);
         asm_code << hpu::resource::discard(twiddle_obj);
     }
 
     // The PE butterfly does not implicitly normalize or apply the inverse twist.
     asm_code << "\n        // INTT normalize and inverse-twist: explicit PMUL by N^-1 * psi^-i\n";
-    asm_code << hpu::resource::read(twiddle_obj, hpu::DataType::poly);
+    asm_code << hpu::resource::read(
+        twiddle_obj, hpu::DataType::poly,
+        hpu::DloadFlag::regular_bank, hpu::CachePolicy::allocate);
     asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
     asm_code << hpu::resource::discard(twiddle_obj);
 

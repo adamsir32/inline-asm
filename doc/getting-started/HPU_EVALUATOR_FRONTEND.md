@@ -103,7 +103,7 @@ cmake --build build -j --target \
 - [BFV 前端应用](../../examples/bfv_evaluator_application.cpp)：`x*(RotateRows(x,1)+RotateColumns(x))+7`，显式重线性化及降层。
 - [BGV 前端应用](../../examples/bgv_evaluator_application.cpp)：相同整数表达式，使用 BGV 的 correction factor 和降层规则。
 
-CLI 支持 `--degree N`、`--emit-dir PATH`、`--print-asm` 和 `--no-opt`。默认示例使用 N=128，部署规模可使用 N=65536。`--no-opt` 保留原始指令、DMA span 和镜像，便于比较优化结果。
+CLI 支持 `--degree N`、`--emit-dir PATH`、`--print-asm` 和 `--no-opt`。默认示例使用 N=128，部署规模可使用 N=65536。`--no-opt` 保留原始调度、DMA span 和镜像，便于比较资源优化结果；应用交付编译仍独立设置 CP，仅 twiddle DLOAD 为 1，其他 DMA 为 0，因此不保证原始指令字的 CP 位不变。
 
 CKKS 示例在小 N 使用 `2^20` 输入 scale，大 N 使用原 composed 示例的 `2^35`，
 保留 `1e-2` 解码容差。应用编程时仍需按计算深度和精度需求选择 scale。

@@ -53,8 +53,9 @@ dstore x10, x11, p39, 1, 1      # 成功后释放，并请求 LLC 写分配
 编码为 MOD=1，其他均为 MOD=0。`twiddle_parameters` 的默认 helper 会显式输出
 mask=0x20，原始指令本身没有 twiddle 专用装载类型。
 
-维护算子的代码可以选择 CP，默认不需要更改调用。以下片段生成读写资源操作；
-实际外存地址由调用者为 data port 绑定：
+手工维护算子的代码可以选择 CP。以下片段生成读写资源操作；实际外存地址由
+调用者为 data port 绑定。它展示底层 `preserve` 策略保留显式 CP 的用法；
+应用交付编译另行采用下文的 twiddle 专用策略：
 
 ```cpp
 #include "hpu/compiler/operator_resources.hpp"
@@ -73,6 +74,17 @@ const auto output_store = hpu::resource::publish(
 `hpu::dload` 与 `hpu::dstore` 的最后一个 C++ 参数也可传入同一枚举；省略时为
 `CachePolicy::no_allocate`（CP=0）。CP 与 SRAM bank mask、MOD、REL 独立，
 每条命令重新选择，不保存到对象表；顶层应用 `Evaluator` API 保持不变。
+
+公共资源编译器的默认 `DmaCachePolicy::preserve` 保留各条命令的显式 CP，
+便于手写指令及底层实验。Evaluator 和 CKKS/BFV/BGV Plan 应用交付链路使用
+`DmaCachePolicy::twiddle_loads_only`：以最终内存分配的 `AllocationKind::twiddle`
+为依据，stage 参数、pre-twist 和 post-untwist/scale 向量的 DLOAD 均设 CP=1，
+其余 DLOAD 和全部 DSTORE 均设 CP=0。这一步在最终布局确定后处理，也覆盖
+资源编译器插入的 reload，在 NoOpt 模式下仍生效。它不按对象编号、bank 或
+分配名猜测 twiddle，也不会将某次装载的 CP 继承到后续命令。
+
+应用包在 `memory/abi.json.dma_cache_policy` 声明所用策略；
+`default_cp=0` 仍表示底层 API 的省略参数默认值，不表示包中全部 CP 均为 0。
 
 | CP | 外部内存端 DLOAD ARCACHE | 外部内存端 DSTORE AWCACHE |
 | --- | --- | --- |

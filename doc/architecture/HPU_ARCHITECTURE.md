@@ -264,8 +264,12 @@ DSTORE REL=0 保留对象，REL=1 成功完成后释放；spill 需明确释放�
 
 ### 6.5 NoOpt 基准
 
-`OptimizationMode::no_opt` 保留原始指令字、每条 DMA 的 offset/count、原始镜像
-字节和分配，同时检查对象、DMA 与 bank 容量，并生成资源统计。
+`OptimizationMode::no_opt` 保留原始调度、每条 DMA 的 offset/count、原始镜像
+字节和分配，同时检查对象、DMA 与 bank 容量，并生成资源统计。公共资源编译器
+在默认 `DmaCachePolicy::preserve` 下也保留原始指令字；若另选
+`twiddle_loads_only`，仍在资源处理后独立重写 DMA 的 CP 位，其他编码保持不变。
+应用交付链路采用后一策略，因此 NoOpt 包的指令字可能与原始流存在 CP 位差异，
+不承诺逐字保持；该差异不改变数学结果、DMA span 或镜像。
 
 上述保留行为适用于提供兼容指令基线的现有前端。直接编写原生 SSA IR、没有提供
 基线时，NoOpt 仍执行必要的槽位分配，但关闭 workspace 写回延迟和 DDR 复用。
@@ -401,7 +405,11 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
 raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
 前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数以 MOD=0、
-显式 mask=0x20 放入 Bank 5，CP 默认 0；普通 bank 按 128-line 单元分配。K=8 参数内容继承先前迁移，
+显式 mask=0x20 放入 Bank 5；普通 bank 按 128-line 单元分配。应用交付编译在
+最终布局确定后按 `AllocationKind::twiddle` 设置 DMA：twiddle DLOAD 为 CP=1，
+其他 DLOAD 与全部 DSTORE 为 CP=0，覆盖 stage 参数、pre/post 向量和编译器
+插入的 reload，NoOpt 模式也采用相同策略。底层 API 默认 CP=0、公共资源编译器
+默认保留手工 CP；包内 `dma_cache_policy` 区分两种策略。K=8 参数内容继承先前迁移，
 最新 ISA 与放置规则见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
 
 完整公式、stage 表顺序及 raw inverse API 适配见

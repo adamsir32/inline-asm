@@ -4,6 +4,7 @@
 #include "hpu/model/instruction_executor.hpp"
 #include "hpu/model/hardware_ntt.hpp"
 #include "assembler.hpp"
+#include "encoder.hpp"
 #include "executable.hpp"
 
 #include <algorithm>
@@ -771,6 +772,136 @@ void test_per_command_cache_policy()
     }
 }
 
+void require_twiddle_cache_policy(const hpu::compiler::CompiledResources& compiled)
+{
+    for (const auto& dma : compiled.dma) {
+        const auto& encoded = compiled.instructions.at(dma.instruction_index);
+        const auto& op = encoded.instruction;
+        const auto& allocation = compiled.image.allocation(dma.allocation_id);
+        const auto expected = op.mnemonic == hpu::Mnemonic::kDload
+                && allocation.kind == AllocationKind::twiddle
+            ? 1 : 0;
+        require(op.cp == expected, "final DMA hint does not match physical allocation kind");
+        require(encoded.word == hpu::encode_instruction(op)
+                    && encoded.command26 == hpu::precode_command26(encoded.word)
+                    && encoded.normalized_asm == hpu::to_string(op),
+                "DMA cache rewrite left stale machine code or assembly");
+    }
+}
+
+void test_twiddle_cache_policy()
+{
+    hpu::runtime::HpuMemImage image(64);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("opaque/alpha", std::vector<std::uint32_t>(128, 1), AllocationKind::twiddle);
+    image.add("opaque/beta", std::vector<std::uint32_t>(256, 2), AllocationKind::twiddle);
+    image.add_alias("renamed/vector", "opaque/beta");
+    // Both its name and its Bank 5 placement deliberately resemble twiddles.
+    image.add("twiddle/not_a_table", std::vector<std::uint32_t>(128, 7), AllocationKind::constant);
+    image.add("input", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    image.reserve("writable/table", 128, AllocationKind::twiddle);
+    image.reserve("output", 128, AllocationKind::output);
+    const auto instructions = hpu::assemble_source(
+        "dload x10, x11, p4, 1, 1, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 32\npfree p0\n"
+        "dload x10, x11, p1, 0, 1, 32\npfree p1\n"
+        "dload x10, x11, p2, 0, 0, 0\npfree p2\n"
+        "dload x10, x11, p0, 0, 1, 0\npmul p0, p0, 2\n"
+        "dstore x10, x11, p0, 0, 1\ndstore x10, x11, p0, 1, 1\n"
+        "pfree p4\npsync\n");
+    auto dma = bindings(instructions, image,
+        {"moduli", "opaque/alpha", "twiddle/not_a_table", "renamed/vector", "input",
+         "writable/table", "output"});
+    // A load of a subspan through an alias must retain its physical kind.
+    ++dma[3].span.line_offset;
+    dma[3].span.line_count = 2;
+    for (const auto mode : {hpu::compiler::OptimizationMode::no_opt,
+                            hpu::compiler::OptimizationMode::optimized}) {
+        hpu::compiler::CompileOptions options;
+        options.optimization = mode;
+        options.dma_cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
+        const auto compiled = hpu::compiler::optimize_resources(instructions, dma, image, options);
+        require_twiddle_cache_policy(compiled);
+        require(compiled.dma.size() == dma.size(), "cache policy changed required DMA coverage");
+        const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+        require(allocation_words(actual, compiled.image, "output") == std::vector<std::uint32_t>(128, 6),
+                "cache policy changed arithmetic output");
+        if (mode == hpu::compiler::OptimizationMode::no_opt) {
+            require(compiled.image.words() == image.words(), "NoOpt cache policy changed payloads");
+            for (std::size_t i = 0; i < instructions.size(); ++i) {
+                const auto mnemonic = instructions[i].instruction.mnemonic;
+                if (mnemonic != hpu::Mnemonic::kDload && mnemonic != hpu::Mnemonic::kDstore)
+                    require(compiled.instructions[i].word == instructions[i].word,
+                            "cache policy changed a non-DMA instruction");
+            }
+        }
+    }
+}
+
+void test_twiddle_cache_policy_after_eviction()
+{
+    hpu::runtime::HpuMemImage image(8192);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    for (int i = 0; i < 6; ++i)
+        image.add("opaque/" + std::to_string(i), std::vector<std::uint32_t>(65536, i + 1),
+                  i == 0 ? AllocationKind::twiddle : AllocationKind::ciphertext);
+    image.reserve("output", 65536, AllocationKind::output);
+    const auto instructions = hpu::assemble_source(
+        "dload x10, x11, p4, 1, 1, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 0, 1, 0\ndload x10, x11, p2, 0, 1, 0\n"
+        "dload x10, x11, p3, 0, 1, 0\ndload x10, x11, p5, 0, 1, 0\n"
+        "dload x10, x11, p6, 0, 1, 0\n"
+        "padd p1, p1, p2\npfree p2\npadd p3, p3, p5\npfree p5\n"
+        "padd p6, p6, p1\npfree p1\npadd p0, p0, p3\npfree p3\n"
+        "padd p0, p0, p6\npfree p6\ndstore x10, x11, p0, 1, 1\npfree p4\npsync\n");
+    const auto dma = bindings(instructions, image,
+        {"moduli", "opaque/0", "opaque/1", "opaque/2", "opaque/3", "opaque/4", "opaque/5", "output"});
+    hpu::compiler::CompileOptions options;
+    options.dma_cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
+    const auto compiled = hpu::compiler::optimize_resources(instructions, dma, image, options);
+    require(compiled.report.reloads > 0, "twiddle pressure test did not force a reload");
+    require_twiddle_cache_policy(compiled);
+    std::size_t table_loads = 0;
+    for (const auto& entry : compiled.dma) {
+        const auto& op = compiled.instructions[entry.instruction_index].instruction;
+        if (entry.allocation_id == "opaque/0" && op.mnemonic == hpu::Mnemonic::kDload) ++table_loads;
+    }
+    require(table_loads >= 2, "evicted twiddle was not reloaded from its immutable allocation");
+    const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+    require(allocation_words(actual, compiled.image, "output") == std::vector<std::uint32_t>(65536, 21),
+            "cache policy changed arithmetic across an eviction");
+
+    // Once modified, the same logical object spills into workspace. Its
+    // reload must use that final physical kind, rather than remember CP=1.
+    std::string dirty_source;
+    for (const auto& encoded : instructions) {
+        dirty_source += encoded.normalized_asm + '\n';
+        if (encoded.instruction.mnemonic == hpu::Mnemonic::kDload
+            && encoded.instruction.obj_id == 0)
+            dirty_source += "pmul p0, p0, 2\n";
+    }
+    const auto dirty_instructions = hpu::assemble_source(dirty_source);
+    const auto dirty_dma = bindings(dirty_instructions, image,
+        {"moduli", "opaque/0", "opaque/1", "opaque/2", "opaque/3", "opaque/4", "opaque/5", "output"});
+    const auto dirty = hpu::compiler::optimize_resources(dirty_instructions, dirty_dma, image, options);
+    require(dirty.report.spills > 0 && dirty.report.reloads > 0,
+            "dirty twiddle pressure test did not insert spill and reload");
+    require_twiddle_cache_policy(dirty);
+    std::size_t workspace_loads = 0, workspace_stores = 0;
+    for (const auto& entry : dirty.dma) {
+        if (dirty.image.allocation(entry.allocation_id).kind != AllocationKind::workspace) continue;
+        const auto& op = dirty.instructions[entry.instruction_index].instruction;
+        if (op.mnemonic == hpu::Mnemonic::kDload) ++workspace_loads;
+        else ++workspace_stores;
+    }
+    require(workspace_loads > 0 && workspace_stores > 0,
+            "dirty spill did not pass through a non-twiddle physical allocation");
+    const auto dirty_actual = replay(dirty.instructions, dirty.dma, dirty.image);
+    require(allocation_words(dirty_actual, dirty.image, "output") == std::vector<std::uint32_t>(65536, 22),
+            "cache policy changed arithmetic across a dirty spill");
+}
+
 void test_nested_recording()
 {
     namespace r = hpu::resource;
@@ -830,6 +961,8 @@ int main()
 {
     try {
         test_per_command_cache_policy();
+        test_twiddle_cache_policy();
+        test_twiddle_cache_policy_after_eviction();
         test_use_index();
         test_ssa_versions_and_ports();
         test_unbounded_operand_ids();

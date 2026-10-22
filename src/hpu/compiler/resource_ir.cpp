@@ -100,6 +100,29 @@ std::vector<std::optional<std::size_t>> dma_by_instruction(
     return indices;
 }
 
+void apply_dma_cache_policy(CompiledResources& resources, DmaCachePolicy policy)
+{
+    if (policy == DmaCachePolicy::preserve) return;
+    if (policy != DmaCachePolicy::twiddle_loads_only) {
+        throw std::invalid_argument("unknown DMA cache policy");
+    }
+    // Require complete one-to-one provenance before editing any hint. Object
+    // slots and Bank 5 masks cannot identify data after eviction and reuse.
+    dma_by_instruction(resources.instructions, resources.dma);
+    for (const auto& dma : resources.dma) {
+        const auto& allocation = resources.image.allocation(dma.allocation_id);
+        if (!contains(allocation.span, dma.span)) {
+            throw std::invalid_argument("DMA cache policy range exceeds allocation: " + allocation.id);
+        }
+        auto& encoded = resources.instructions.at(dma.instruction_index);
+        auto instruction = encoded.instruction;
+        instruction.cp = instruction.mnemonic == hpu::Mnemonic::kDload
+                && allocation.kind == hpu::runtime::AllocationKind::twiddle
+            ? 1 : 0;
+        encoded = encode(instruction);
+    }
+}
+
 // Removing a writeback is safe only when there is one exact consumer before
 // the next overlapping write. Other loads could observe the old DDR contents.
 std::map<std::size_t, std::size_t> deferred_store_pairs(
@@ -972,6 +995,7 @@ CompiledResources compile_resources(
             result.buffers.push_back({buffer.id, buffer.id, buffer.original_span,
                 buffer.original_span, true, buffer.first_use, buffer.last_use, buffer.layout});
         }
+        apply_dma_cache_policy(result, options.dma_cache_policy);
         return result;
     }
     if (options.optimization == OptimizationMode::no_opt) {
@@ -1009,6 +1033,7 @@ CompiledResources compile_resources(
                             entry.range.line_count};
         result.dma.push_back(std::move(entry.origin));
     }
+    apply_dma_cache_policy(result, options.dma_cache_policy);
     return result;
 }
 

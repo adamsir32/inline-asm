@@ -13,6 +13,12 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 通过普通 MOD=0 显式选择 Bank 5；DSTORE REL=0 保留对象。
 DMA 清单当前为 15 列，末列 `cp`；`type_or_release` 对读/写分别表示 MOD/REL，
 `flag` 是 DLOAD bank mask。检查 CP 位没有截断完整的 rs2 字段。
+新应用包另声明 `dma_cache_policy=twiddle_loads_only`：按最终 memory manifest
+的 `kind=twiddle`，仅相应 DLOAD 的 CP=1；stage 参数与 pre/post 向量均包括在内，
+其他 DLOAD 和全部 DSTORE 的 CP=0。该规则包括编译器 reload，关闭资源优化也
+保持不变。`default_cp=0` 是底层接口默认值，不表示包内全部 DMA 的 CP 为 0。
+`preserve` 策略用于手工 CP 实验；较早 v1.2 包缺少策略字段时按 `preserve`
+校验，重新生成后采用新策略。请按包内声明和实际指令验收缓存提示。
 所有旧 `.inst32/.cmd26` 与 ELF 必须重新生成。CPU/SoC 的有效 RTL、六位 fault
 通路及命令 sideband 仍需按 [RTL 交接说明](HPU_64OBJ_INTEGRATION_HANDOFF.md)
 同步；HPU 子模块的局部验证不代表 SoC IT 通过。
@@ -178,6 +184,9 @@ python3 test/target_dma_codegen_test.py \
 
 - 检查 DLOAD `[14]=MOD`、DSTORE `[14]=REL`，两者 `[13]=CP`，完整 rs2 位段保持 `[24:20]`。
 - 分别覆盖 MOD=0/1、REL=0/1 与 CP=0/1；确认 CP 每条命令锁存，不从旧对象继承。
+- 对 `twiddle_loads_only` 包核对每条 resolved DMA 与最终分配 kind：仅 twiddle
+  DLOAD 的 CP 为 1，全部 DSTORE 为 0；同时覆盖 stage 参数、pre/post 向量和
+  编译器插入的 reload。LLC 命中率、DDR 流量和耗时需单独测量，软件对拍不证明收益。
 - 在外部内存端观察 CP=0 的 ARCACHE/AWCACHE 均为 0x3；CP=1 时分别为 0x7/0xB。内部 SRAM 属性保持 0x3。
 - 需要评估收益时分别记录计算总耗时、随后重载和最终 DDR 写回。CP=1 不保证驻留，DMA 完成/B 响应不等于 DDR 已完成写回。
 

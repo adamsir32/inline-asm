@@ -375,16 +375,28 @@ golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不�
 | `mod_table_lines` | 4 | Bank 5 固定模表保留长度 |
 | `stage_parameter_mod` | 0 | stage 参数通过普通 DLOAD 装入 |
 | `stage_parameter_bank_mask` | 32 | 生成器显式选择 Bank 5 |
-| `default_cp` | 0 | 默认不请求 LLC 分配 |
+| `default_cp` | 0 | 底层 API 省略 CP 参数时不请求 LLC 分配 |
+| `dma_cache_policy` | `twiddle_loads_only` | 应用交付编译仅为 twiddle DLOAD 请求 LLC 分配 |
 
 默认模表最多 64 contexts，其余 14 个参数槽按两条 line 对齐。每个参数对象
 实际为两条 line，长度在 PNTT/PINTT 使用时检查；不存在 TYPE3 装入类型。
 MOD=0、mask=0 选择普通 bank；生成器为 stage 参数明确写出 mask=32。
 DLOAD mask 不继承到结果，DSTORE REL=0 保留、REL=1 成功后释放。
 
+应用交付编译采用 `twiddle_loads_only`：根据最终 `memory_manifest.csv` 的
+`kind=twiddle` 将相应 DLOAD 的 CP 设为 1；包括两条 line 的 stage 参数和
+全长 pre/post 向量。其他 DLOAD 和全部 DSTORE 的 CP 为 0，编译器插入的
+reload 也遵守该规则，关闭资源优化时同样执行。校验器按分配元数据核对清单、
+指令 CP 位和所声明的策略。应用编写者不需要更改 Evaluator 调用。
+
+公共底层资源编译默认 `preserve`，保留手工设置的 CP，用于定向实验；导出此类
+包时 `dma_cache_policy` 声明 `preserve`。较早的 v1.2 包若没有该字段，按
+`preserve` 接收，重新生成后使用新策略；这不改变 ISA v1.2 或 CSV 的 15 列格式。
+
 CP 与 MOD/REL、SRAM 位置独立，按命令选择。CP=0 仍可命中 LLC；CP=1 请求
 读/写分配，不保证驻留。功能报告不模拟 LLC，DSTORE 完成不代表 DDR 写回完成，
-不能由数学对拍或 DMA 完成时间推断缓存收益。性能和一致性要求见
+仅为 twiddle 请求分配也不保证 LLC 中只有 twiddle。不能由数学对拍或 DMA 完成
+时间推断缓存收益。性能和一致性要求见
 [编程手册 4.5 节](../reference/HPU_PROGRAMMING_MANUAL.md#45-llc-分配提示-cp)。
 
 v1.2 将 v1.1 的 TYPE 位改为 MOD/REL、CP；旧 TYPE1 位会变成普通对象 CP=1，

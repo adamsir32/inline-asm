@@ -45,6 +45,9 @@ struct ProgramArtifacts {
     std::vector<hpu::compiler::ResolvedDma> resource_dma;
     // The common exporter must not schedule an already compiled stream again.
     bool resources_compiled = false;
+    // Serialized in memory/abi.json and checked against final DMA bindings.
+    hpu::compiler::DmaCachePolicy dma_cache_policy =
+        hpu::compiler::DmaCachePolicy::preserve;
 };
 
 struct VerifiedOutputLimb {

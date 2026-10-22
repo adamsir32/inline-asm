@@ -47,8 +47,11 @@ HPU `Evaluator` 的调用记录图，`compile()` 执行 host 验证与编译；�
 静态图与静态指令序列。
 
 当前底层使用 [HPU ISA v1.2](HPU_PROGRAMMING_MANUAL.md)。本轮 DMA MOD/REL/CP
-更新不改变本手册的顶层 API；默认 CP=0。已有应用重新编译并导出完整包即可，
-旧 `.inst32/.cmd26` 与 ELF 不能复用。CP 的显式选择属于底层算子接口，见
+更新不改变本手册的顶层 API。编译器根据最终内存分配的 `kind=twiddle`，自动为
+对应 DLOAD 设置 CP=1，覆盖 stage 参数和 pre/post 向量；其他 DLOAD 及全部
+DSTORE 设置 CP=0。该策略也覆盖编译器插入的重载，编写应用无需手工设置 CP。
+已有应用重新编译并导出完整包即可，旧 `.inst32/.cmd26` 与 ELF 不能复用。
+底层手工 CP 接口和 LLC 提示的限制见
 [DMA 参数与 LLC 提示](HPU_LOW_LEVEL_API_REFERENCE.md#11-dma-参数与可选-llc-分配提示)。
 
 ## 2. 完整示例：CKKS 计算 x²+1
@@ -508,6 +511,9 @@ const auto compiled = app.compile("my_application", options);
 选择 NoOpt 使用 `optimize_resources=false`；保留失败指令报告使用
 `require_instruction_verification=false`。诊断模式仍执行和记录指令比较，SEAL 与
 方案模型必须通过，资源优化改变基准结果也会失败。
+
+关闭资源优化时，交付编译仍按同一规则设置 CP：仅 twiddle DLOAD 为 1，
+其他 DMA 为 0。缓存策略与资源优化分别处理，不改变顶层编译选项或数学结果。
 
 当前新应用使用自然系数边界与显式 twist/untwist PMUL。`legacy_raw_stage`
 用于回放旧 raw 镜像，选择它不转换镜像或表，也不改变硬件 ABI。完整约定和

@@ -276,8 +276,9 @@ HPU 本地 CSR FAULT_STATUS 的对象号扩展为 `[9:4]`；VALID=[0]，IS_LOAD=
 - 顶层 `ApplicationBuilder`、`Evaluator`、密文/明文句柄 API 保持不变，应用写法见 [应用编程手册](HPU_SEAL_API_REFERENCE.md)。ISA 更新作用于编译、编码、资源调度与指令模型。
 - 本项目默认 `R=4`；64 个模上下文与 64 个逻辑对象是不同资源。交付包 `memory/abi.json` 声明 `instruction_isa=hpu-objects64-v1.2`、`dma_format=mod_rel_cp`、`default_cp=0`、对象数、分配粒度和模表保留长度。旧 ISA 包必须重新生成，不能复用 v1.1 或更早的 `.inst32/.cmd26`。
 - C++ 的 `DataType::seg/poly/mod_ctx/twiddle_parameters` 是生成器的数据角色，不再直接编码成 DMA TYPE。只有 `mod_ctx` 产生 MOD=1，其余产生 MOD=0。`twiddle_parameters` 生成器默认显式输出 mask=0x20；原始汇编的 MOD=0、mask=0 则选择普通 bank。
-- stage 参数实际为两条 line，使用 `MOD=0, CP=0, mask=0x20`；pre/post 向量使用 `MOD=0, CP=0, mask=0`。参数对象可以逐 stage 重载，也可以同时保留多个。参数长度在 NTT/INTT 使用时检查，普通 DLOAD 没有专用 twiddle 类型。
-- CP 默认 0，维护底层算子的开发者可在 `resource::read/publish` 或 `hpu::dload/dstore` 中显式指定 `CachePolicy::allocate`。CP 不参与数学结果、SRAM 区间分配或对象生命周期，不继承上次命令；功能指令模型检查其编码，但不模拟 LLC 命中、替换或写回时间。
+- stage 参数实际为两条 line，应用交付编译使用 `MOD=0, CP=1, mask=0x20`；pre/post 向量使用 `MOD=0, CP=1, mask=0`。参数对象可以逐 stage 重载，也可以同时保留多个。参数长度在 NTT/INTT 使用时检查，普通 DLOAD 没有专用 twiddle 类型。
+- 应用交付编译采用 `dma_cache_policy=twiddle_loads_only`：按最终分配的 `kind=twiddle` 为相应 DLOAD 设置 CP=1，其他 DLOAD 与全部 DSTORE 设置 CP=0。该步骤覆盖编译器插入的 reload，NoOpt 模式也执行；仅请求 twiddle 的 LLC 读分配，不保证 LLC 中没有其他数据，也不保证驻留。
+- 底层 API 的省略参数默认仍为 CP=0，资源编译器默认 `preserve` 保留显式 CP，供手工实验；可在 `resource::read/publish` 或 `hpu::dload/dstore` 中指定 `CachePolicy::allocate`。包内 `dma_cache_policy` 声明实际策略，`default_cp=0` 只声明底层默认值。CP 不参与数学结果、SRAM 区间分配或对象生命周期，不继承上次命令；功能指令模型检查其编码，但不模拟 LLC 命中、替换或写回时间。
 - 算子仍采用独立 pre-twist 和 post-untwist/scale PMUL。系数域边界为自然顺序；NTT 域按 HPU 物理排列与 SEAL 转换后对拍。PNTT 的内部 shuffle 由功能模型模拟，不额外向指令流添加输入位反转。
 - 编译器和逐指令模型共用 `runtime::BankAllocator`；按正常完成顺序预测物理 bank/区间，不模拟 DMA 周期。容量与数学对拍通过不代表周期性能或 CPU/SoC 已验证。
 - 本项目生成器仍在完整程序末尾统一发出 PSYNC，避免在内部算子重复通知 CPU；ISA 本身允许等待此前操作完成，PSYNC 不隐式释放对象。

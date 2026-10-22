@@ -24,6 +24,11 @@
 - 当前应用包声明 `instruction_isa=hpu-objects64-v1.2`、`dma_format=mod_rel_cp`、
   `stage_parameter_mod=0`、`stage_parameter_bank_mask=32`、`default_cp=0`；
   resolved DMA CSV 为 15 列，最后一列为 `cp`。顶层 Evaluator API 保持不变。
+- 新应用包声明 `dma_cache_policy=twiddle_loads_only`，根据最终分配的
+  `kind=twiddle`，仅相应 DLOAD 的 CP=1，含 stage 参数、pre/post 向量及编译器
+  插入的 reload；其他 DLOAD 与全部 DSTORE 为 CP=0，NoOpt 同样执行。
+  `default_cp=0` 仍指底层 API 默认值。底层实验可用 `preserve` 保留手工 CP；
+  较早 v1.2 包无此字段时按 `preserve` 校验。该策略只控制分配提示，性能需实测。
 
 ## 2. CPU/SoC 接入验收
 

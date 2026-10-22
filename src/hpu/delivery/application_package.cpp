@@ -338,7 +338,16 @@ std::string render_build_json(const ApplicationPackageRequest& request)
     return output.str();
 }
 
-std::string render_abi_json()
+const char* dma_cache_policy_name(hpu::compiler::DmaCachePolicy policy)
+{
+    switch (policy) {
+    case hpu::compiler::DmaCachePolicy::preserve: return "preserve";
+    case hpu::compiler::DmaCachePolicy::twiddle_loads_only: return "twiddle_loads_only";
+    }
+    throw std::invalid_argument("application package has an invalid DMA cache policy");
+}
+
+std::string render_abi_json(hpu::compiler::DmaCachePolicy policy)
 {
     std::ostringstream output;
     output.imbue(std::locale::classic());
@@ -353,6 +362,7 @@ std::string render_abi_json()
         "  \"stage_parameter_mod\": 0,\n"
         "  \"stage_parameter_bank_mask\": 32,\n"
         "  \"default_cp\": 0,\n"
+        "  \"dma_cache_policy\": \"" << dma_cache_policy_name(policy) << "\",\n"
         "  \"dma_format\": \"mod_rel_cp\",\n"
         "  \"dload_mask_scope\": \"load_only\",\n"
         "  \"dstore_rel0_retains\": true,\n"
@@ -1360,8 +1370,10 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<AllocationManifestRow>& allocations,
     std::uint64_t used_lines,
-    const std::vector<hpu::runtime::HpuMemSpan>* ordered_spans)
+    const std::vector<hpu::runtime::HpuMemSpan>* ordered_spans,
+    hpu::compiler::DmaCachePolicy cache_policy)
 {
+    (void)dma_cache_policy_name(cache_policy);
     static constexpr const char* kHeader =
         "instruction_index,dma_index,operation_index,operation_id,"
         "operation_dma_index,direction,object_slot,type_or_release,flag,"
@@ -1431,6 +1443,16 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
                     throw std::runtime_error(
                         "application package DMA manifest DSTORE targets read_only allocation '"
                         + allocation.allocation_id + "'");
+                }
+                if (cache_policy == hpu::compiler::DmaCachePolicy::twiddle_loads_only) {
+                    const auto expected_cp = relocation.direction == hpu::Mnemonic::kDload
+                        && allocation.kind == "twiddle" ? 1 : 0;
+                    if (relocation.cp != expected_cp) {
+                        throw std::runtime_error(
+                            "application package DMA cache policy mismatch for allocation '"
+                            + allocation.allocation_id + "' at relocation "
+                            + std::to_string(index));
+                    }
                 }
                 found = true;
                 break;
@@ -1618,6 +1640,16 @@ void validate_physical_artifacts(const std::filesystem::path& root)
     const std::filesystem::path descriptor_path = root / "package.json";
     const auto target_abi_path = root / "memory/abi.json";
     const auto target_abi = read_file(target_abi_path);
+    // Earlier v1.2 packages did not declare a policy and preserve their CP bits.
+    auto cache_policy = hpu::compiler::DmaCachePolicy::preserve;
+    if (JsonReader(target_abi, target_abi_path).read_document().count("dma_cache_policy")) {
+        const auto policy_name = extract_json_string(
+            target_abi, "dma_cache_policy", target_abi_path, true);
+        if (policy_name == "twiddle_loads_only")
+            cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
+        else if (policy_name != "preserve")
+            throw std::runtime_error("application package memory/abi.json has an unknown DMA cache policy");
+    }
     if (extract_json_string(target_abi, "instruction_isa", target_abi_path, false)
             != "hpu-objects64-v1.2"
         || extract_json_u64(target_abi, "object_slots", target_abi_path) != 64
@@ -1661,7 +1693,7 @@ void validate_physical_artifacts(const std::filesystem::path& root)
     const auto resolved_spans = validate_resolved_dma_manifest(
         read_file(root / "program/dma_relocation_manifest.csv"),
         root / "program/dma_relocation_manifest.csv", assembled, memory,
-        used_lines, nullptr);
+        used_lines, nullptr, cache_policy);
     const auto abi_path = root / "memory/abi.json";
     const auto abi = read_file(abi_path);
     const auto format = extract_json_string(abi, "stage_twiddle_format", abi_path, false);
@@ -1955,6 +1987,7 @@ void validate_application_package_request(
     for (const auto& allocation : allocations) {
         AllocationManifestRow row;
         row.allocation_id = allocation.id;
+        row.kind = allocation_kind_name(allocation.kind);
         row.line_offset = allocation.span.line_offset;
         row.line_count = allocation.span.line_count;
         row.read_only = allocation.read_only;
@@ -1963,7 +1996,8 @@ void validate_application_package_request(
     validate_resolved_dma_manifest(
         request.program.resolved_dma_manifest,
         "program/dma_relocation_manifest.csv", request.program.instructions,
-        dma_allocations, image.used_lines(), &request.program.ordered_dma_spans);
+        dma_allocations, image.used_lines(), &request.program.ordered_dma_spans,
+        request.program.dma_cache_policy);
     validate_program_source(
         request.program.stem, request.program.source,
         request.program.instructions, image.capacity_lines(),
@@ -2127,7 +2161,7 @@ ApplicationPackageReport write_application_package(
     add("memory/hpu_mem_image.u32.bin", render_u32_le(image.words()));
     add("memory/line_map.csv", render_line_map(image));
     add("memory/memory_manifest.csv", render_memory_manifest(image));
-    add("memory/abi.json", render_abi_json());
+    add("memory/abi.json", render_abi_json(request.program.dma_cache_policy));
     add("memory/hpu_mem_config.json", render_memory_config_json(image));
     add("golden/golden_manifest.csv", render_golden_manifest(request.outputs));
     for (const auto& output : request.outputs) {

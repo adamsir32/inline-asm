@@ -2922,6 +2922,7 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
         << "  \"modulus_count\": " << moduli.size() << ",\n"
         << "  \"dma_format\": \"mod_rel_cp\",\n"
         << "  \"default_cp\": 0,\n"
+        << "  \"dma_cache_policy\": \"twiddle_loads_only\",\n"
         << "  \"coefficient_bits\": 32,\n"
         << "  \"byte_order\": \"little-endian\",\n"
         << "  \"line_bytes\": " << kHpuLineBytes << ",\n"
@@ -3055,8 +3056,8 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
         hardware_readme
             << "`twiddle_map.csv` gives each modulus, direction, phase, stage, K=8 parameter "
             << "payload size, line offset, and line count. Stage payloads are always two lines "
-            << "and use ordinary DLOAD MOD=0, CP=0, mask=0x20 (explicit Bank 5, even line alignment); "
-            << "pre/post vectors retain N words and use ordinary MOD=0, CP=0, mask=0 loads. ";
+            << "and use ordinary DLOAD MOD=0, CP=1, mask=0x20 (explicit Bank 5, even line alignment); "
+            << "pre/post vectors retain N words and use ordinary MOD=0, CP=1, mask=0 loads. ";
     } else {
         hardware_readme
             << "This operator has no PNTT/PINTT stage, so the package intentionally omits "
@@ -3065,7 +3066,8 @@ void write_hardware_package(const std::filesystem::path& test_data_root,
     hardware_readme
         << "Every individual binary has an annotated decimal view.\n\n"
         << "DMA control bits are MOD/REL at bit 14 and CP at bit 13. This package "
-        << "defaults to CP=0. CP=1 requests LLC read allocation (DLOAD ARCACHE=0x7) "
+        << "uses CP=1 only for twiddle loads (stage parameters and pre/post vectors); "
+        << "all other loads and all stores use CP=0. CP=1 requests LLC read allocation (DLOAD ARCACHE=0x7) "
         << "or write allocation (DSTORE AWCACHE=0xB); CP=0 uses 0x3 and can still hit "
         << "existing LLC lines. CP applies to each DMA command independently and does not "
         << "alter object placement or mathematical results. It neither guarantees residency "

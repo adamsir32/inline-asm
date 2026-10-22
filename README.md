@@ -4,7 +4,7 @@
 
 应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，快速运行见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)，完整程序、接口约束和自定义用例构建见 [HPU 应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
 
-当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.2 编码，stage 参数以 MOD=0、显式 mask=0x20 放入 Bank 5，DMA 的 CP 提示默认 0。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
+当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.2 编码，stage 参数以 MOD=0、显式 mask=0x20 放入 Bank 5。应用交付编译仅为 twiddle DLOAD 设置 CP=1，覆盖 stage 参数、pre/post 向量和编译器重载；其他 DMA 为 CP=0，NoOpt 同样执行。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
 
 ## 1. 项目结构
 
@@ -442,6 +442,9 @@ RTL/板级执行后的逐字比对、FAULT/IRQ 状态和外部 monitor 记录为
 当前目标为 [HPU ISA v1.2](doc/reference/HPU_PROGRAMMING_MANUAL.md)。顶层 Evaluator
 API 不变；旧 `.inst32/.cmd26` 与新硬件不兼容，须重新生成交付包。新包通过
 `memory/abi.json` 标识 ISA、`dma_format=mod_rel_cp`、64 个对象与默认 4-line 模表配置。
-v1.1 的 TYPE 字段已改为独立 MOD/REL、CP；CP 是 LLC 分配提示，默认 0。
+v1.1 的 TYPE 字段已改为独立 MOD/REL、CP；CP 是 LLC 分配提示。底层 API 默认
+CP=0；应用包采用 `dma_cache_policy=twiddle_loads_only`，仅 twiddle DLOAD 为
+CP=1，其他 DMA 为 CP=0，NoOpt 同样执行。判断依据是最终内存分配的
+`kind=twiddle`，而不是 bank 或对象编号；底层 `preserve` 策略仍支持手工 CP 实验。
 CP=0 仍可命中缓存，CP=1 不保证驻留；数学计算和顶层 Evaluator API 保持不变。
 [RTL 集成交接](doc/delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md) 说明 CPU/SoC 尚需同步的部分。
