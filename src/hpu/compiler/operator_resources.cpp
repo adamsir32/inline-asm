@@ -206,23 +206,26 @@ Operand compatibility_operand(int slot)
 
 std::string compatibility_name(Operand operand) { return hpu::pobj(compatibility_slot(operand)); }
 
-std::string read(Operand object, hpu::DataType type, hpu::DloadFlag flag)
+std::string read(Operand object, hpu::DataType type, hpu::DloadFlag flag, hpu::CachePolicy cp)
 {
     hpu::Instruction op;
     op.mnemonic = hpu::Mnemonic::kDload;
     op.rs1 = 10; op.rs2 = 11;
-    op.type = static_cast<std::uint8_t>(type);
-    op.dma_flag = static_cast<std::uint8_t>(flag);
+    // DataType describes the logical payload; the v1.2 wire flag is MOD only.
+    op.type = static_cast<std::uint8_t>(hpu::dma_mod_bit(type));
+    op.dma_flag = static_cast<std::uint8_t>(hpu::dma_bank_mask(type, flag));
+    op.cp = static_cast<std::uint8_t>(cp);
     emit(op, {}, {object});
-    return object.compatibility_slot < 0 ? std::string{} : hpu::dload(object.compatibility_slot, type, flag);
+    return object.compatibility_slot < 0 ? std::string{} : hpu::dload(object.compatibility_slot, type, flag, cp);
 }
-std::string publish(Operand object, int release)
+std::string publish(Operand object, int release, hpu::CachePolicy cp)
 {
     hpu::Instruction op;
     op.mnemonic = hpu::Mnemonic::kDstore;
     op.rs1 = 10; op.rs2 = 11; op.type = static_cast<std::uint8_t>(release);
+    op.cp = static_cast<std::uint8_t>(cp);
     emit(op, {object}, {});
-    return object.compatibility_slot < 0 ? std::string{} : hpu::dstore(object.compatibility_slot, release);
+    return object.compatibility_slot < 0 ? std::string{} : hpu::dstore(object.compatibility_slot, release, cp);
 }
 std::string discard(Operand object)
 {
@@ -276,8 +279,10 @@ std::string render_operator_ir(const OperatorProgram& program)
             out << " stage=" << inst.idx0 << " mode=" << unsigned(inst.mode) << " flag=" << unsigned(inst.flag); break;
         case hpu::Mnemonic::kPmodld: out << " mod_id=" << inst.mod_id; break;
         case hpu::Mnemonic::kDload:
-            out << " type=" << unsigned(inst.type) << " bank_mask=" << unsigned(inst.dma_flag); break;
-        case hpu::Mnemonic::kDstore: out << " release=" << unsigned(inst.type); break;
+            out << " mod=" << unsigned(inst.type) << " cp=" << unsigned(inst.cp)
+                << " bank_mask=" << unsigned(inst.dma_flag); break;
+        case hpu::Mnemonic::kDstore:
+            out << " release=" << unsigned(inst.type) << " cp=" << unsigned(inst.cp); break;
         default: if (inst.imm8 >= 0) out << " imm=" << inst.imm8; break;
         }
         if (op.port) {

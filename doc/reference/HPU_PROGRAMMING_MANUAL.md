@@ -1,10 +1,10 @@
 # HPU 软件编程手册：64 逻辑对象 ISA
 
-版本：1.1；日期：2026-10-21。规范对应 `rtl/cpu/SCPU_RTL/RTL/hpu/rtl/`。
+版本：1.2；日期：2026-10-22。规范对应 `Nsnhuv_5.0_integra/main` 的 `hpu/rtl/`。
 
-**本版删除 PPLACE，OPC=9…F 保留且译码非法。DLOAD mask 只约束本次装入，不保存为对象的后续策略。新结果按第 5 节的固定规则分配，编译器须同步此规则。**
+**本版将 DMA `[14:13]` 从 TYPE 改为 `{MOD/REL,CP}`。MOD 只标记模数表，CP 为读写共用的 LLC 分配提示；旧 TYPE=3 参数机器码必须重新生成。删除 PPLACE，OPC=9…F 保留且译码非法。DLOAD mask 只约束本次装入，不保存为对象的后续策略。新结果按第 5 节的固定规则分配，编译器须同步此规则。**
 
-本版替代附件《HPU_PROGRAMMING_MANUAL.pdf》0.4 的指令编码、对象编号和分配约定。数学算子语义保持；旧 `.inst32/.cmd26` 必须重新生成。当前 SoC 的 `RTL/latest/` 尚未同步本版，接入要求见 [集成交接](../delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)。
+本版替代附件《HPU_PROGRAMMING_MANUAL.pdf》0.4 的指令编码、对象编号和分配约定。数学算子语义保持；旧 `.inst32/.cmd26` 必须重新生成。本仓库使用单套 `hpu/rtl`；Chisel 重新生成和核侧集成由集成同事处理，接入要求见 [集成交接](../delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)。
 
 ## 1. 编程模型与容量
 
@@ -49,7 +49,7 @@ Bank 5 物理为 **32 line=8 KiB**，全局 line 地址 `0x1400…0x141F`。`MOD
 
 ## 3. 在线 twiddle：只读种子，不向参数对象写回
 
-TYPE=3 对象的实际长度固定为 **2 line=512 B**：
+NTT/INTT 使用的参数对象实际长度必须为 **2 line=512 B**：
 
 | line | word | 内容 |
 |---|---|---|
@@ -87,7 +87,7 @@ for b = 0…B-1:
 
 模表读取和两条参数读取共用既有 rd2 通路；NTT 稳态不再持续读取 Bank 5。DMA 只在装载/替换参数时写 Bank 5。使用期间禁止覆盖或释放参数对象。
 
-软件可选择一个参数对象逐 stage 重载，或者预加载多个参数对象。默认 TYPE=3 自动选择 Bank 5；也可以显式选择普通 bank，代价是两条 line 会占一个 128-line 单元。
+软件可选择一个参数对象逐 stage 重载，或者预加载多个参数对象。参数通过普通 DLOAD（MOD=0）装入，必须显式指定 mask=0x20 才仅选择 Bank 5；mask=0 默认选择普通 bank，代价是两条 line 会占一个 128-line 单元。
 
 pre-twist、post-untwist/scale 仍是普通向量常量；本版没有把它们并入在线 twiddle 生成。
 
@@ -139,29 +139,48 @@ PFREE 在对象不忙且已分配时，由控制器本地释放，不进入 PE �
 
 ### 4.4 DMA：rs1/rs2 位置不变
 
+**不兼容旧 TYPE 编码：旧 TYPE1 的原始位现在表示普通对象 CP=1；旧 TYPE3 的原始位现在表示模数表 CP=1，不能继续用于 twiddle。必须重新汇编。rs2 高位仍属于完整长度，CP 不占 GPR 操作数位。**
+
 | 位段 | DLOAD | DSTORE |
 |---|---|---|
 | `[31:26]` | OBJ6 | OBJ6 |
 | `[25]` | BANK_MASK[5] | 0 |
 | `[24:20]` | **rs2** | **rs2** |
 | `[19:15]` | **rs1** | **rs1** |
-| `[14:13]` | TYPE2 | `{REL,0}` |
+| `[14]` | MOD：1 固定模数表，0 普通对象 | REL：成功完成后释放对象 |
+| `[13]` | CP：请求 LLC 读分配 | CP：请求 LLC 写分配 |
 | `[12]` | DIR=0 | DIR=1 |
 | `[11:7]` | BANK_MASK[4:0] | 0 |
 | `[6:0]` | **0x2B** | **0x2B** |
 
-TYPE：0 普通片段，1 多项式/向量常量，2 固定模表，3 在线 twiddle 参数。原 small_bank 单独字段删除，改为 bank mask。
+原 TYPE0/1/3 合并为普通对象（MOD=0），原 TYPE2 改为 MOD=1。twiddle 对象在 PNTT/PINTT 使用时检查长度恰为两行，不再有独立装入类型。原 small_bank 单独字段已由 bank mask 替代。
 
-建议新汇编接口：`dload rs1,rs2,pdst,type,bank_mask`，`dstore rs1,rs2,psrc,rel`。旧调用最后一个 small_bank=1 不能原样当作新 mask=1；后者表示 Bank 0。
+建议新汇编接口：`dload rs1,rs2,pdst,mod,cp,bank_mask`，`dstore rs1,rs2,psrc,rel,cp`。旧调用最后一个 small_bank=1 不能原样当作新 mask=1；后者表示 Bank 0。
 
-- mask=0：TYPE=0/1 默认 Bank 0…4；TYPE=2/3 默认 Bank 5。
-- 非零 mask：bit b 对应 Bank b。指定单 bank 或一组 bank。TYPE=2 只接受 0 或 0x20。
+- mask=0：MOD=0 默认 Bank 0…4；MOD=1 默认 Bank 5。
+- 非零 mask：bit b 对应 Bank b。指定单 bank 或一组 bank。MOD=1 只接受 0 或 0x20。
 - 同时允许 Bank 5 和普通 bank 时，allocator 优先符合容量的 Bank 5 区间，否则尝试允许的普通 bank。
 - Bank 5 分配受模表保留区与物理 32-line 边界约束，普通 bank 分配粒度仍为 128 line。
 - **mask 仅约束本次 DLOAD。** 不存入对象表，不限制后续 NTT/PMAC 或其他结果的分配。例如 mask=1 将输入装到 Bank 0，NTT 结果仍可分配到 Bank 1…4。
 - `GPR[rs1]` 为外部 HPU memory window 的 line offset；DLOAD 的 `GPR[rs2]` 为实际 line count。DSTORE 的传输长度来自 OBJ.len，rs2 仍占固定寄存器字段。
-- DLOAD len 必须非零；TYPE=2 长度不超过 R；TYPE=3 必须为 2；普通请求不超过 1024 line。offset+实际传输长度必须位于 memory window。
+- DLOAD len 必须非零；MOD=1 长度不超过 R；普通请求不超过 1024 line；twiddle 参数长度在 NTT/INTT 使用时检查为 2。offset+实际传输长度必须位于 memory window。
 - DSTORE REL=0 保留对象 ALLOC/V，REL=1 仅在成功完成后释放。传输期间对象不得覆盖或释放。
+
+### 4.5 LLC 分配提示 CP
+
+| CP | DLOAD 内存侧 ARCACHE | DSTORE 内存侧 AWCACHE |
+|---|---|---|
+| 0（默认） | 0x3：不请求读分配 | 0x3：不请求写分配 |
+| 1 | 0x7：请求读分配 | 0xB：请求写分配 |
+
+- CP=0 仍可命中已有 LLC 行；不表示绕过缓存、不缓存或非一致性。
+- CP=1 是分配提示，不锁定缓存行，不保证驻留或命中。共享 LLC 容量及其他主机竞争仍限制收益。
+- CP 每条 DMA 命令独立选择，在 DMA 接收时锁存并用于所有分块；不存入对象表，也不从前一次装入继承。
+- 仅外部内存端修改属性，内部 SRAM 源/目的属性保持 0x3。DLOAD 改源读属性，DSTORE 改目的写属性。
+- 复用参数、密钥可用 DLOAD CP=1；一次性输入默认 CP=0。需要随后重新装入的输出可用 DSTORE CP=1；最终输出默认 CP=0。
+- CP 和 MOD/REL 独立。DSTORE REL=1、CP=1 允许在成功写出后释放 SRAM 对象，同时请求输出分配到 LLC。后续 DLOAD 应使用有效外存地址和新建/重新装入的对象。
+- DSTORE 完成及 B 响应不等于 DDR 已写回。计算总耗时、后续读取和最终写回必须分别统计，不能据此宣称 DDR 写带宽提高。
+- CP 不是密钥或敏感数据标签；不提供安全隔离、清除或擦除语义。
 
 ## 5. 确定性的 bank 分配：编译器必须同步
 
@@ -222,20 +241,20 @@ TYPE：0 普通片段，1 多项式/向量常量，2 固定模表，3 在线 twi
 
 ```asm
 # x10=模表 offset，x11=4；默认可装载 64 个 context
- dload  x10, x11, p40, 2, 0x20
+ dload  x10, x11, p40, 1, 1, 0x20 # MOD=1，CP=1
  psync
  pmodld 0
 
 # x12=本 stage 参数 offset，x13=2；精确占 Bank 5 两条 line
- dload  x12, x13, p63, 3, 0x20
+ dload  x12, x13, p63, 0, 1, 0x20 # 普通参数，CP=1，Bank5
 
 # x14=多项式 offset，x15=128；N=8192
- dload  x14, x15, p39, 1, 0
+ dload  x14, x15, p39, 0, 0, 0    # 一次性输入，CP=0
  pntt   p39, p63, 0, 0, 0
 
 # 当前 stage 完成后，参数可继续复用，或者释放/重新装载
  pfree  p63
- dstore x16, x17, p39, 0  # 保留 p39
+ dstore x16, x17, p39, 0, 0       # REL=0 保留 p39；CP=0
  psync
 ```
 
@@ -251,14 +270,17 @@ DLOAD 的显式 mask 可安排输入 bank；后续结果按第 5 节自动放置
 
 HPU 本地 CSR FAULT_STATUS 的对象号扩展为 `[9:4]`；VALID=[0]，IS_LOAD=[1]，W1C=[0] 不变。SoC 外层还需同步六位对象号，见集成交接。发生 fault 后软件应检查状态并停止依赖失败结果的后续计算，PSYNC 不是成功状态检查的替代品。
 
+
 ## 9. 本项目的接入约定
 
-- 顶层 `ApplicationBuilder`、`Evaluator`、密文/明文句柄 API 不变，应用写法见 [应用编程手册](HPU_SEAL_API_REFERENCE.md)。ISA 更新作用于编译、编码、资源调度与指令模型。
-- 本项目默认 `R=4`；64 个模上下文与 64 个逻辑对象是不同资源。交付包 `memory/abi.json` 声明 `instruction_isa=hpu-objects64-v1.1`、对象数、分配粒度和模表保留长度。旧 ISA 包必须重新生成，不能混用旧 `.inst32/.cmd26`。
+- 顶层 `ApplicationBuilder`、`Evaluator`、密文/明文句柄 API 保持不变，应用写法见 [应用编程手册](HPU_SEAL_API_REFERENCE.md)。ISA 更新作用于编译、编码、资源调度与指令模型。
+- 本项目默认 `R=4`；64 个模上下文与 64 个逻辑对象是不同资源。交付包 `memory/abi.json` 声明 `instruction_isa=hpu-objects64-v1.2`、`dma_format=mod_rel_cp`、`default_cp=0`、对象数、分配粒度和模表保留长度。旧 ISA 包必须重新生成，不能复用 v1.1 或更早的 `.inst32/.cmd26`。
+- C++ 的 `DataType::seg/poly/mod_ctx/twiddle_parameters` 是生成器的数据角色，不再直接编码成 DMA TYPE。只有 `mod_ctx` 产生 MOD=1，其余产生 MOD=0。`twiddle_parameters` 生成器默认显式输出 mask=0x20；原始汇编的 MOD=0、mask=0 则选择普通 bank。
+- stage 参数实际为两条 line，使用 `MOD=0, CP=0, mask=0x20`；pre/post 向量使用 `MOD=0, CP=0, mask=0`。参数对象可以逐 stage 重载，也可以同时保留多个。参数长度在 NTT/INTT 使用时检查，普通 DLOAD 没有专用 twiddle 类型。
+- CP 默认 0，维护底层算子的开发者可在 `resource::read/publish` 或 `hpu::dload/dstore` 中显式指定 `CachePolicy::allocate`。CP 不参与数学结果、SRAM 区间分配或对象生命周期，不继承上次命令；功能指令模型检查其编码，但不模拟 LLC 命中、替换或写回时间。
 - 算子仍采用独立 pre-twist 和 post-untwist/scale PMUL。系数域边界为自然顺序；NTT 域按 HPU 物理排列与 SEAL 转换后对拍。PNTT 的内部 shuffle 由功能模型模拟，不额外向指令流添加输入位反转。
-- stage 参数使用 `TYPE=3, mask=0`，默认放入 Bank 5；pre/post 向量使用 `TYPE=1`。同一参数句柄可以逐 stage 重载，也可以同时保留多个参数对象。
-- 编译器和逐指令模型共用 `runtime::BankAllocator`；采用正常完成顺序预测物理 bank/区间，不模拟 DMA 周期。容量与数学对拍通过不代表周期性能或 CPU/SoC 已验证。
+- 编译器和逐指令模型共用 `runtime::BankAllocator`；按正常完成顺序预测物理 bank/区间，不模拟 DMA 周期。容量与数学对拍通过不代表周期性能或 CPU/SoC 已验证。
 - 本项目生成器仍在完整程序末尾统一发出 PSYNC，避免在内部算子重复通知 CPU；ISA 本身允许等待此前操作完成，PSYNC 不隐式释放对象。
 - 目标侧代码在最终布局完成后生成。DMA offset 逐条装入 x10；x11 首次设置后仅在长度变化时更新。DSTORE 长度来自 OBJ.len，生成代码检查 span 长度一致。
 
-参见 [Bank 分配指南](HPU_BANK_ALLOCATION_GUIDE.md)、[整体架构](../architecture/HPU_ARCHITECTURE.md) 和 [应用包格式](../delivery/HPU_APPLICATION_PACKAGE_V1.md)。
+参见 [底层 DMA 调用示例](HPU_LOW_LEVEL_API_REFERENCE.md#11-dma-参数与可选-llc-分配提示)、[Bank 分配指南](HPU_BANK_ALLOCATION_GUIDE.md)、[整体架构](../architecture/HPU_ARCHITECTURE.md) 和 [应用包格式](../delivery/HPU_APPLICATION_PACKAGE_V1.md)。

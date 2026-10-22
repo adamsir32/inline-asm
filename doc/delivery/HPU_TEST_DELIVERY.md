@@ -1,6 +1,6 @@
 # HPU 指令流与验证数据交付说明
 
-> 64 对象迁移说明：本流水线已随编译器更新 v1.1 编码；下文历史 Nexus-AM/IT 完成记录不能作为新 ISA 的集成证据。旧 ELF、机器码和外部 runtime 需按 [RTL 集成交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 重新适配与验证。
+> 64 对象迁移说明：本流水线已随编译器更新 v1.2 MOD/REL/CP 编码；下文历史 Nexus-AM/IT 完成记录不能作为新 ISA 的集成证据。旧 ELF、机器码和外部 runtime 需按 [RTL 集成交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 重新适配与验证。
 > 状态：Legacy fixed-profile demo。本文描述原仓库由
 > `config/fhe_test.conf` 驱动的 N=4096/Q=4/P=3/dnum=2 交付流水线，保留用于
 > 回归旧算子包，不再作为 N=65536 CKKS/SEAL 集成的参数或数学权威。默认 CTest
@@ -178,13 +178,15 @@ embedding，BGV/BFV 对 `N` 个槽位执行 generator-3 两行 batching；Decode
 Q/Bsk tensor product、FastFloor 和 branchless-SK 生成三分量 Q 密文；同一指令流
 随即从相同 HPU_MEM span 执行 Q/Pks Relinearization，只有最终一个 `psync`，没有
 host copy 或第二次 window commit。随后可独立执行 rounded ModSwitch。完整边界见
-[HPU 编程手册](../reference/HPU_PROGRAMMING_MANUAL.md) 第 8.8 节。
+[项目架构的验证路径](../architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界)。
 
 生成器和 reference 共同检查 `N` 为 2 的幂且 `ceil(N/64) <= 1024`，对应当前普通 bank 的最大可承载次数 `N=65536`。`dnum` 必须整除 `num_q`；BFV 上下文必须满足
 `num_q+num_p+bfv_num_b+2<=64`。BGV/BFV batching 要求 `t` 为 PE 范围内素数、
 `2N | (t-1)`，并与其他模数互素。BFV 还要求所有 Q/Pks/B/m_sk 为互异的
 `1 mod 2N` 32-bit 素数、`m_sk>2*bfv_num_b`，以及 B 总位宽严格超过 no-SMRQ
-误差门限。`dload load_type` 只接受 `0=seg`、`1=poly`、`2=mod_ctx`；编码值 3 为保留值并纳入 RV 负例。
+误差门限。C++ `DataType` 只描述生成器数据角色；原始 DLOAD 使用 MOD=0/1，
+其中 1 标记模表，普通数据与两条 line 参数均为 0。CP 独立为 0/1，参数必须显式
+mask=0x20 才装入 Bank 5；旧 TYPE 编码与旧 DMA 参数数量均作为负例拒绝。
 
 ## 4. 数据格式
 
@@ -230,7 +232,7 @@ Relinearization 输入 span，runtime 只提交一份 HPU_MEM 镜像和一条完
 `{q[31:0], mu[47:0], reserved[47:0]}`，其中
 `mu=floor(2^64/q)`，且 `65537 <= q <= 2^32-1`。按 `uint32` word
 查看时是 `q`、`mu[31:0]`、`{16'b0,mu[47:32]}`、全零保留字。模表通过
-`dload type=2, bank_mask=0x20` 请求分配到 small Bank 5，DMA 与后续访问的
+`dload MOD=1, CP=0, bank_mask=0x20` 请求分配到 small Bank 5，DMA 与后续访问的
 一致性由硬件维护，软件可直接由 `pmodld MOD_ID` 选择表项。Bank 5 固定为
 `0x1400..0x141F` 共 32 line，物理空间相当于 512 条记录，但默认仅前四条 line 保留模表，其余用于参数；
 `MOD_ID` 编码仍为 8 bit，本项目默认 R=4，仅允许 64 个 context，使用

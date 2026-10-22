@@ -146,7 +146,7 @@ public:
     {
         if (id.find("/stage") != std::string::npos) type = hpu::DataType::twiddle_parameters;
         bind(id, words, hpu::Mnemonic::kDload, slot,
-             static_cast<std::uint8_t>(type), static_cast<std::uint8_t>(flag));
+             hpu::dma_mod_bit(type), hpu::dma_bank_mask(type, flag));
     }
 
     void store(int slot, const std::string& id, std::size_t words)
@@ -158,7 +158,7 @@ public:
     {
         const auto& allocation = image_.allocation(binding.allocation_id);
         bind(binding.allocation_id, allocation.word_count, binding.direction,
-             binding.object_slot, binding.type_or_release, binding.flag);
+             binding.object_slot, binding.type_or_release, binding.flag, binding.cp);
     }
 
     std::vector<BgvKeySwitchDmaBinding> finish()
@@ -171,7 +171,7 @@ public:
 
 private:
     void bind(const std::string& id, std::size_t words, hpu::Mnemonic direction,
-              int slot, std::uint8_t type_or_release, std::uint8_t flag)
+              int slot, std::uint8_t type_or_release, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
     {
         const std::size_t index = bindings_.size();
         if (index >= encoded_.size()) {
@@ -180,7 +180,7 @@ private:
         const auto& instruction = encoded_[index];
         const auto& allocation = image_.allocation(id);
         if (instruction.dma_index != index || instruction.direction != direction ||
-            instruction.object_id != slot ||
+            (cp && instruction.cp != *cp) || instruction.object_id != slot ||
             instruction.type_or_release != type_or_release ||
             (direction == hpu::Mnemonic::kDload && instruction.flag != flag) ||
             allocation.word_count != words || allocation.span.line_count == 0 ||
@@ -192,6 +192,7 @@ private:
             index, instruction.instruction_index, instruction.direction,
             instruction.object_id, instruction.type_or_release,
             instruction.flag, id, allocation.span});
+        bindings_.back().cp = instruction.cp;
     }
 
     const hpu::runtime::HpuMemImage& image_;
@@ -771,6 +772,7 @@ BgvKeySwitchRuntimeArtifacts render_bgv_keyswitch_runtime_artifacts(
             binding.object_slot != encoded[index].object_id ||
             binding.type_or_release != encoded[index].type_or_release ||
             binding.flag != encoded[index].flag ||
+            binding.cp != encoded[index].cp ||
             binding.span.line_offset != allocation.span.line_offset ||
             binding.span.line_count != allocation.span.line_count ||
             binding.span.line_offset >= application.image.capacity_lines() ||
@@ -796,7 +798,7 @@ BgvKeySwitchRuntimeArtifacts render_bgv_keyswitch_runtime_artifacts(
 
     std::ostringstream manifest;
     manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,"
-                "direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+                "direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     for (std::size_t index = 0; index < application.dma.size(); ++index) {
         const auto& binding = application.dma[index];
         manifest << binding.instruction_index << ',' << index << ',';
@@ -811,7 +813,7 @@ BgvKeySwitchRuntimeArtifacts render_bgv_keyswitch_runtime_artifacts(
                  << binding.span.line_offset << ',' << binding.span.line_count << ','
                  << hpu::format_word_hex(
                         application.instructions[binding.instruction_index].word) << ','
-                 << csv_field(application.instructions[binding.instruction_index].normalized_asm) << '\n';
+                 << csv_field(application.instructions[binding.instruction_index].normalized_asm) << ',' << unsigned(binding.cp) << '\n';
     }
     result.resolved_dma_manifest = manifest.str();
     return result;

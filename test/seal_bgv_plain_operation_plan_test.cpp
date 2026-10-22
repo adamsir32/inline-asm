@@ -700,7 +700,7 @@ int main()
             multiply_psync += encoded.instruction.mnemonic == hpu::Mnemonic::kPsync;
             multiply_modtable_load +=
                 encoded.instruction.mnemonic == hpu::Mnemonic::kDload &&
-                encoded.instruction.obj_id == 4 && encoded.instruction.type == 2;
+                encoded.instruction.obj_id == 4 && encoded.instruction.type == 1;
         }
         require(multiply_psync == 1 && multiply_modtable_load == 1 &&
                     multiply_package.spans().size() == multiply_package.dma.size(),

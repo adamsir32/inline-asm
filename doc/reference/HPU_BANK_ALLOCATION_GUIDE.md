@@ -1,6 +1,6 @@
 # HPU bank 分配与编译器调度
 
-版本 1.1，2026-10-21。配套 [64 对象软件编程手册](HPU_PROGRAMMING_MANUAL.md)。对应 HPU RTL 的确定性分配规则；**没有 PPLACE 指令**，OPC=9…F 保留。DLOAD mask 仅作用于本次装入。
+软件接入更新至 v1.2，2026-10-22；分配算法沿用 v1.1。配套 [64 对象软件编程手册](HPU_PROGRAMMING_MANUAL.md)。对应 HPU RTL 的确定性分配规则；**没有 PPLACE 指令**，OPC=9…F 保留。DLOAD mask 仅作用于本次装入。
 
 ## 1. 同步规则能解决什么
 
@@ -33,7 +33,7 @@
 
 同一个 bank、甚至同一个逻辑对象作为多个读操作数时，分别计数。例如 `pmac p0,p0,p0` 对 p0 所在 bank 的 cost=3；没有同址广播抵消。这是当前实际 stream 读请求模型。算术只写一条结果流，因此选择最少读次数的 bank 可减少结果写入带来的竞争；不代表能消除所有 SRAM 停顿。
 
-DLOAD TYPE=2 固定模表，mask 仅可 0/0x20。TYPE=3 默认 Bank 5，长度必须 2；TYPE=0/1 默认普通 bank。非零 mask 的 bit b 表示允许 Bank b；兼有 Bank 5 和普通 bank 时，先尝试 Bank 5 中合适的小区间，再尝试允许的普通 bank。结果分配不继承任何 DLOAD mask。
+DLOAD MOD=1 固定模表，mask 仅可 0/0x20；MOD=0 为普通对象，mask=0 默认普通 bank。stage 参数也是 MOD=0，必须显式 mask=0x20 才仅选择 Bank 5，长度在 PNTT/PINTT 使用时检查为 2。CP 是每条 DMA 独立的 LLC 分配提示，不改变本节的 SRAM 分配或释放规则。非零 mask 的 bit b 表示允许 Bank b；兼有 Bank 5 和普通 bank 时，先尝试 Bank 5 中合适的小区间，再尝试允许的普通 bank。结果分配不继承任何 DLOAD mask。
 
 ### 3.2 与 RTL 一致的选择伪代码
 
@@ -46,9 +46,9 @@ if atomic_replacement:        # DLOAD 重装或普通算术长度变化
     search.remove(old_dst)   # 只影响搜索视图，失败时保留旧对象
 
 if request_allows_bank5:
-    # TYPE=2 只能从 line0 开始，长度 <= R，保留区不可被其他对象占用。
+    # MOD=1 只能从 line0 开始，长度 <= R，保留区不可被其他对象占用。
     # 其他小对象只在 [align_up(R,2),32) 取最低偶数起点连续区间。
-    small = first_fit_bank5(search, actual_len, type, R)
+    small = first_fit_bank5(search, actual_len, mod, R)
     if small is not None:
         return commit_allocation_atomically(small)
 
@@ -116,4 +116,6 @@ Bank 5 的参数对象在每 stage 开头只读两条 line；递推状态保存�
 
 本策略降低当前结果写入与读取的竞争，未引入同址读取广播、双口 SRAM 或全程序最优布局求解。编译器仍应以目标 RTL 的仲裁/流水和容量仿真评估吞吐；上述访问数不是端到端周期数保证。
 
-本次控制器小测试覆盖容量、高位 ID、OPC9 非法、PMAC 第二源避让、不同 cost 选择、只有冲突 bank 可用时的回退、既有目的复用、新分配等待 DMA。未验证真实 SRAM/PE 数据吞吐或 CPU/SoC IT；RTL 更新只在 HPU 设计目录生效。
+2026-10-21 提供方记录的控制器小测试覆盖容量、高位 ID、OPC9 非法、PMAC 第二源避让、不同 cost 选择、只有冲突 bank 可用时的回退、既有目的复用、新分配等待 DMA。未验证真实 SRAM/PE 数据吞吐或 CPU/SoC IT；RTL 更新只在 HPU 设计目录生效。
+
+上述局部记录没有覆盖 v1.2 的 CP 属性传递。CPU 命令通路与实际 DMA 的 ARCACHE/AWCACHE 仍须按新版手册单独验收；不能由 allocator 回归推断 LLC 性能。

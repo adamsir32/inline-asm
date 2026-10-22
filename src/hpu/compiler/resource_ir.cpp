@@ -396,7 +396,7 @@ private:
             auto first = std::find(used.begin(), used.end(), false);
             // Preserve the familiar modulus-table name when available; p4 is
             // otherwise an ordinary usable logical object, just like p0..p63.
-            if (program_.objects[id].type == 2 && !used[4]) first = used.begin() + 4;
+            if (program_.objects[id].type == 1 && !used[4]) first = used.begin() + 4;
             if (first != used.end()) {
                 states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
                 resident_.insert(id);
@@ -427,10 +427,10 @@ private:
         const auto& shape = program_.objects[id];
         // Bank 5 has one fixed modulus-table owner, even though its logical ID
         // can be any of the 64 slots. A previously evicted table is reloadable.
-        if (shape.type == 2) {
+        if (shape.type == 1) {
             for (auto it = resident_.begin(); it != resident_.end();) {
                 const auto other = *it++;
-                if (other != id && program_.objects[other].type == 2) evict(other);
+                if (other != id && program_.objects[other].type == 1) evict(other);
             }
         }
         const auto slot = states_[id].slot ? *states_[id].slot : allocate_slot(id);
@@ -477,7 +477,7 @@ private:
         auto instruction = op.instruction;
         place_load(id);
         instruction.obj_id = *state.slot;
-        if (program_.objects[id].type == 2) modulus_ = id;
+        if (program_.objects[id].type == 1) modulus_ = id;
         emit_dma(instruction, *op.memory, *op.origin);
     }
 
@@ -1082,7 +1082,7 @@ hpu::compiler::VirtualProgram bind_program(const OperatorProgram& program,
         const auto& a = program.operations[i].instruction;
         const auto& b = baseline[i].instruction;
         if (a.mnemonic != b.mnemonic || a.imm8 != b.imm8 || a.mod_id != b.mod_id ||
-            a.mode != b.mode || a.flag != b.flag || a.type != b.type || a.dma_flag != b.dma_flag ||
+            a.mode != b.mode || a.flag != b.flag || a.type != b.type || a.dma_flag != b.dma_flag || a.cp != b.cp ||
             ((a.mnemonic == hpu::Mnemonic::kPntt || a.mnemonic == hpu::Mnemonic::kPintt) && a.idx0 != b.idx0))
             throw std::invalid_argument("operator IR disagrees with its compatibility baseline");
     }

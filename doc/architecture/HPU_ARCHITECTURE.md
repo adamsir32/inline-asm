@@ -245,7 +245,8 @@ N8192 最多静态容纳 40 个，但执行还须为新结果预留候选区间�
 
 `runtime::BankAllocator` 维护每个逻辑对象的 bank、base、实际长度和保留容量，
 由编译器与逐指令模型共同使用。默认 Bank 5 前 4 line 永久保留模表，
-其余可容纳 14 个两条 line、TYPE=3 的只读 stage 参数。mask 仅约束 DLOAD。
+其余可容纳 14 个两条 line 的只读 stage 参数。参数通过 MOD=0、显式 mask=0x20
+装入；mask 仅约束 DLOAD。CP 是每条 DMA 独立的 LLC 分配提示，不改变 SRAM 分配。
 
 普通算术有匹配长度目的时复用原区间；新目的按源读取次数最少的可用 bank 分配，
 以 `dst%5` 起的循环次序打破并列。PMAC 与每个 NTT stage 总是先申请新结果，
@@ -259,7 +260,7 @@ stage 调度使用，编译器不分配 PE 内部寄存器。
 
 DSTORE REL=0 保留对象，REL=1 成功完成后释放；spill 需明确释放。
 后端可消除有完整生命周期证明的内部 workspace 写回，必需节点输出仍写回。
-最终代码使用 x10/x11 DMA sideband，并声明 `hpu-objects64-v1.1` ISA。
+最终代码使用 x10/x11 DMA sideband，并声明 `hpu-objects64-v1.2` ISA。
 
 ### 6.5 NoOpt 基准
 
@@ -399,8 +400,8 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 `pack_stage_twiddles` 从完整物理 oracle 表提取 U/V/R 并重构全表校验；逐指令层和
 算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
 raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
-前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数默认 TYPE3
-放入 Bank 5，普通 bank 按 128-line 单元分配。K=8 参数内容继承先前迁移，
+前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数以 MOD=0、
+显式 mask=0x20 放入 Bank 5，CP 默认 0；普通 bank 按 128-line 单元分配。K=8 参数内容继承先前迁移，
 最新 ISA 与放置规则见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
 
 完整公式、stage 表顺序及 raw inverse API 适配见

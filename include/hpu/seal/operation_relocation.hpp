@@ -33,6 +33,7 @@ struct CkksDmaBinding {
     int store_release = 0;
     std::string allocation_id;
     hpu::runtime::HpuMemSpan span;
+    std::uint8_t cp = 0;
 };
 
 // Complex kernels remain visible instead of receiving a guessed relocation.

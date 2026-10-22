@@ -107,7 +107,7 @@ public:
               hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
     {
         bind(id, hpu::Mnemonic::kDload, slot,
-             static_cast<std::uint8_t>(type), static_cast<std::uint8_t>(flag));
+             hpu::dma_mod_bit(type), hpu::dma_bank_mask(type, flag));
     }
 
     void store(int slot, const std::string& id)
@@ -125,7 +125,7 @@ public:
 
 private:
     void bind(const std::string& id, hpu::Mnemonic direction,
-              int slot, std::uint8_t type_or_release, std::uint8_t flag)
+              int slot, std::uint8_t type_or_release, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
     {
         const std::size_t index = bindings_.size();
         if (index >= encoded_.size()) {
@@ -135,7 +135,7 @@ private:
         const auto& allocation = image_.allocation(id);
         if (instruction.dma_index != index ||
             instruction.direction != direction ||
-            instruction.object_id != slot ||
+            (cp && instruction.cp != *cp) || instruction.object_id != slot ||
             instruction.type_or_release != type_or_release ||
             instruction.flag != flag ||
             allocation.span.line_count == 0 ||
@@ -147,6 +147,7 @@ private:
             index, instruction.instruction_index, instruction.direction,
             instruction.object_id, instruction.type_or_release,
             instruction.flag, id, allocation.span});
+        bindings_.back().cp = instruction.cp;
     }
 
     const hpu::runtime::HpuMemImage& image_;

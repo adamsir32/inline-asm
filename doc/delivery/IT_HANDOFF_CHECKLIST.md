@@ -6,9 +6,13 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 
 ## 64 对象版本接收要求
 
-本轮改为 `hpu-objects64-v1.1` ISA。接收时检查 `memory/abi.json` 的
+本轮改为 `hpu-objects64-v1.2` ISA。接收时检查 `memory/abi.json` 的
 `instruction_isa`、`object_slots=64`、`allocation_granule_lines=128`、
-`mod_table_lines=4`，以及 TYPE3 两条 line 参数和 REL0 保留语义。
+`mod_table_lines=4`、`dma_format=mod_rel_cp`、`default_cp=0`、
+`stage_parameter_mod=0`、`stage_parameter_bank_mask=32`。stage 参数为两条 line，
+通过普通 MOD=0 显式选择 Bank 5；DSTORE REL=0 保留对象。
+DMA 清单当前为 15 列，末列 `cp`；`type_or_release` 对读/写分别表示 MOD/REL，
+`flag` 是 DLOAD bank mask。检查 CP 位没有截断完整的 rs2 字段。
 所有旧 `.inst32/.cmd26` 与 ELF 必须重新生成。CPU/SoC 的有效 RTL、六位 fault
 通路及命令 sideband 仍需按 [RTL 交接说明](HPU_64OBJ_INTEGRATION_HANDOFF.md)
 同步；HPU 子模块的局部验证不代表 SoC IT 通过。
@@ -16,7 +20,7 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 升级时保留旧包，以新根目录生成，例如：
 
 ```sh
-cmake -S . -B build-ckks-delivery -DHPU_APPLICATION_OUTPUT_ROOT="$PWD/outputs/isa64"
+cmake -S . -B build-ckks-delivery -DHPU_APPLICATION_OUTPUT_ROOT="$PWD/outputs/isa12"
 cmake --build build-ckks-delivery --target hpu_frontend_delivery -j6
 ```
 
@@ -60,14 +64,14 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 
 当前 NTT 数据 ABI version=2，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
-每个 PNTT/PINTT 的 src2 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
+每个 PNTT/PINTT 的参数 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
 PINTT stage 0；pre/post PMUL 向量仍为 N 个 word。旧完整表镜像不能直接交给
 在线生成 RTL，必须连同 spans、window、manifest 和校验值重新生成。
 物理普通 bank 的分配粒度继续由目标 allocator 决定。
 
-硬件组同时记录了 HpuCmdMerge 背压越序的集成问题：仅更新 twiddle RTL 提交
-不代表未节流 IT 已消除死锁。目标验收需单独确认 Chisel 合流器修复与完整 IT
-结果；本次编译器不新增每 stage 软件等待。详见
+硬件组历史迁移记录提到过 HpuCmdMerge 背压越序问题；这不是当前版本已复现
+或已修复的结论。目标验收仍需确认命令合流在背压下保持程序顺序，并保存完整 IT
+结果；本次编译器不新增每 stage 软件等待。历史背景见
 [迁移说明第 8.1 节](../reference/TWIDDLE_COMPILER_MIGRATION.md#81-已知硬件合流器问题与参数迁移分开验收)。
 
 ## 2. 发布方生成步骤
@@ -170,6 +174,15 @@ python3 test/target_dma_codegen_test.py \
 保存生成的 ELF、反汇编和检查日志，作为所用目标工具链的代码生成证据。
 它不设置包内 RTL/硬件验证状态，也不替代下面的设备验收。
 
+### 3.2 v1.2 DMA 与 LLC 提示验收
+
+- 检查 DLOAD `[14]=MOD`、DSTORE `[14]=REL`，两者 `[13]=CP`，完整 rs2 位段保持 `[24:20]`。
+- 分别覆盖 MOD=0/1、REL=0/1 与 CP=0/1；确认 CP 每条命令锁存，不从旧对象继承。
+- 在外部内存端观察 CP=0 的 ARCACHE/AWCACHE 均为 0x3；CP=1 时分别为 0x7/0xB。内部 SRAM 属性保持 0x3。
+- 需要评估收益时分别记录计算总耗时、随后重载和最终 DDR 写回。CP=1 不保证驻留，DMA 完成/B 响应不等于 DDR 已完成写回。
+
+软件功能模型验证编码、结果和生命周期，不给出 LLC 时序或命中率证据。
+
 ## 4. IT 消费顺序
 
 1. 先解析 `package.json`，使用其中的路径定位文件，不拼接固定子目录。
@@ -178,8 +191,9 @@ python3 test/target_dma_codegen_test.py \
 4. 将 `program/<stem>.c`、`program/<stem>.h` 编入 RISC-V/Nexus-AM testcase，调用
    `hpu_run_<stem>()`。生成 C 在非 RISC-V host 上不会发射 `.word` 指令，因此 host
    返回值不能作为 HPU 执行通过证据。
-5. 执行前完成 cache clean；等待完成 IRQ，记录 `HPU_STATUS` 和
-   `HPU_FAULT_STATUS`；读回前执行 cache invalidate。
+5. 按目标平台的一致性协议完成输入/输出的 cache clean、invalidate 或等效操作；
+   等待完成 IRQ，记录 `HPU_STATUS` 和 `HPU_FAULT_STATUS`。CP 不是 cache clean、
+   invalidate 或 DDR flush，CP=0 也不表示绕过缓存。
 6. 按 `golden/golden_manifest.csv` 逐条读取目标 line span。比较有效 word，并检查
    padding、未使用区域或外部 guard 没有被越界写入。
 7. 先用 golden 条目的 `object_id` 匹配计算图节点的 `golden_object_id`，再用

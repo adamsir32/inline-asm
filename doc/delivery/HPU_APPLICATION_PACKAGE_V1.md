@@ -116,10 +116,13 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   分别设置 `x10/x11`；固定入口在生成前检查 span 范围、bank 容量及对象长度，
   使用一个连续汇编块，每条 DMA 前设置 `x10`，仅首次及长度变化时设置 `x11`。
   汇编块声明 `x10`、`x11` 和 `memory` clobber，HPU 指令次序及 DMA ABI 不变。
-- DMA 清单统一为 14 列：`instruction_index,dma_index,operation_index,operation_id,`
+- DMA 清单统一为 15 列：`instruction_index,dma_index,operation_index,operation_id,`
   `operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,`
-  `line_offset,line_count,word_hex,normalized_asm`。三种方案均保留具体节点的 operation index/ID
+  `line_offset,line_count,word_hex,normalized_asm,cp`。三种方案均保留具体节点的 operation index/ID
   和节点内部 DMA 序号；公共模表加载使用 `$application`，operation index 为空。
+  `type_or_release` 在 DLOAD 表示 MOD（0 普通对象、1 模表），在 DSTORE 表示 REL；
+  `flag` 表示 DLOAD 的六位 bank mask（DSTORE 为 0），末列 `cp` 为每条 DMA 的 LLC 分配提示。
+  接收方应按列名解析，旧 14 列清单不能替代当前清单。
 - `memory/`：uint32 little-endian，每行 64 个 word，即 256 字节。
   镜像大小为 `used_lines * 256`，实际 HPU_MEM window 按 `capacity_lines` 配置。当前示例在布局完成后收紧容量，
   因此 `capacity_lines=used_lines`；构建时的容量上限不会变成目标窗口大小。
@@ -201,7 +204,7 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 当前 PNTT/PINTT 的 PPARAM 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
 第一条 line 是 64-lane 模板 U；第二条 line 保存 7 个 slot 初始化倍率 V、有效
 stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使用这个布局，
-PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word；64 对象指令字段按 v1.1 重新编码。
+PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word；64 对象指令字段按 v1.2 重新编码。
 精确字段与重构公式见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
 
 `memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
@@ -270,7 +273,7 @@ Relinearize，也保留旧接口的融合 Multiply+Relinearize。
 | 单案例参数 | `--emit-dir PATH` | 参数保持不变；PATH 必须尚不存在 |
 | 程序文件 | 直接位于包根目录 | 通过 `package.json` 定位，当前位于 `program/` |
 | 初始镜像 | `test_data/hardware/hpu_mem_image.u32.bin` | `memory/hpu_mem_image.u32.bin` |
-| DMA 映射 | 根目录 CSV，CKKS 专用 | `program/dma_relocation_manifest.csv`，三种方案统一 14 列 |
+| DMA 映射 | 根目录 CSV，CKKS 专用 | `program/dma_relocation_manifest.csv`，三种方案统一 15 列 |
 | 预期输出 | `expected_outputs.csv` 和按 dstore 导出的镜像 | `golden/golden_manifest.csv` 和逐算子、逐 RNS limb 文件 |
 | 完整性检查 | 依赖案例自身检查 | `hpu_validate_package PACKAGE_DIR` 做统一静态校验 |
 | C++ 写包接口 | `write_ckks_delivery_package(...)` | `make_*_application_package(...)` 后调用 `write_application_package(...)` |
@@ -361,12 +364,32 @@ golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不�
 
 ## 64 对象目标 ABI
 
-`memory/abi.json` 的 `instruction_isa` 为 `hpu-objects64-v1.1`，`object_slots=64`，
-`allocation_granule_lines=128`，`mod_table_lines=4`。TYPE=3 stage 参数默认使用 Bank 5；
-默认模表仅保留前四条 line，最大 64 contexts，后续 14 个参数槽按两条 line 对齐。
+`memory/abi.json` 声明下列字段；package schema v1 本身不代表兼容同一 ISA：
+
+| 字段 | 当前默认值 | 含义 |
+| --- | --- | --- |
+| `instruction_isa` | `hpu-objects64-v1.2` | 当前机器指令格式 |
+| `dma_format` | `mod_rel_cp` | DLOAD 为 MOD/CP，DSTORE 为 REL/CP |
+| `object_slots` | 64 | 逻辑对象 p0…p63 |
+| `allocation_granule_lines` | 128 | 普通 SRAM 分配单元 |
+| `mod_table_lines` | 4 | Bank 5 固定模表保留长度 |
+| `stage_parameter_mod` | 0 | stage 参数通过普通 DLOAD 装入 |
+| `stage_parameter_bank_mask` | 32 | 生成器显式选择 Bank 5 |
+| `default_cp` | 0 | 默认不请求 LLC 分配 |
+
+默认模表最多 64 contexts，其余 14 个参数槽按两条 line 对齐。每个参数对象
+实际为两条 line，长度在 PNTT/PINTT 使用时检查；不存在 TYPE3 装入类型。
+MOD=0、mask=0 选择普通 bank；生成器为 stage 参数明确写出 mask=32。
 DLOAD mask 不继承到结果，DSTORE REL=0 保留、REL=1 成功后释放。
 
-v1.1 重排了原始指令字段，旧包必须重新生成。生成器不会把旧包认定为新目标可执行包，
-也不会删除无法通过当前校验的旧目录；升级时请使用新的输出根目录，例如
-`-DHPU_APPLICATION_OUTPUT_ROOT=$PWD/outputs/isa64`，保留旧包便于追溯。
-CPU/SoC 集成与板上执行须按 [RTL 交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 单独验收。
+CP 与 MOD/REL、SRAM 位置独立，按命令选择。CP=0 仍可命中 LLC；CP=1 请求
+读/写分配，不保证驻留。功能报告不模拟 LLC，DSTORE 完成不代表 DDR 写回完成，
+不能由数学对拍或 DMA 完成时间推断缓存收益。性能和一致性要求见
+[编程手册 4.5 节](../reference/HPU_PROGRAMMING_MANUAL.md#45-llc-分配提示-cp)。
+
+v1.2 将 v1.1 的 TYPE 位改为 MOD/REL、CP；旧 TYPE1 位会变成普通对象 CP=1，
+旧 TYPE3 位会变成模表 CP=1，因此旧包必须完整重新生成。生成器不会把旧包认定为
+新目标可执行包，也不会删除无法通过当前校验的旧目录。升级时使用新的输出根目录，
+例如 `-DHPU_APPLICATION_OUTPUT_ROOT=$PWD/outputs/isa12`，保留旧包便于追溯。
+CPU/SoC 集成、实际 ARCACHE/AWCACHE 与板上执行须按
+[RTL 交接](HPU_64OBJ_INTEGRATION_HANDOFF.md) 单独验收。

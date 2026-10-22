@@ -136,25 +136,25 @@ std::uint32_t encode_dma(const Instruction& instruction) {
     ensure_range(instruction.rs1, 0, 31, "rs1");
     ensure_range(instruction.rs2, 0, 31, "rs2");
     ensure_range(instruction.obj_id, 0, 63, "obj_id");
-    ensure_range(instruction.type, 0, instruction.mnemonic == Mnemonic::kDstore ? 1 : 3, "type");
+    ensure_range(instruction.type, 0, 1,
+                 instruction.mnemonic == Mnemonic::kDload ? "mod" : "rel");
+    ensure_range(instruction.cp, 0, 1, "cp");
     ensure_range(instruction.dma_flag, 0, instruction.mnemonic == Mnemonic::kDload ? 63 : 0,
                  "bank_mask");
 
-    if (instruction.mnemonic == Mnemonic::kDload && instruction.type == 2
+    if (instruction.mnemonic == Mnemonic::kDload && instruction.type == 1
         && instruction.dma_flag != 0 && instruction.dma_flag != 0x20) {
         throw std::runtime_error("modulus table bank mask must be 0 or 0x20");
     }
 
     const std::uint32_t dir = instruction.mnemonic == Mnemonic::kDstore ? 1U : 0U;
-    const std::uint32_t operation = dir != 0U
-        ? static_cast<std::uint32_t>(instruction.type) << 1U
-        : static_cast<std::uint32_t>(instruction.type);
 
     std::uint32_t word = 0;
     word |= static_cast<std::uint32_t>(instruction.obj_id) << 26;
     word |= static_cast<std::uint32_t>(instruction.rs2) << 20;
     word |= static_cast<std::uint32_t>(instruction.rs1) << 15;
-    word |= operation << 13;
+    word |= static_cast<std::uint32_t>(instruction.type) << 14;
+    word |= static_cast<std::uint32_t>(instruction.cp) << 13;
     word |= dir << 12;
     word |= static_cast<std::uint32_t>(instruction.dma_flag & 0x1FU) << 7;
     word |= static_cast<std::uint32_t>(instruction.dma_flag >> 5U) << 25;

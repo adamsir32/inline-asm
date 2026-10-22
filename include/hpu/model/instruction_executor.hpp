@@ -74,8 +74,10 @@ struct InstructionExecutionResult {
 // Decodes instruction.word independently of instruction/normalized_asm metadata.
 // Each custom1 consumes the next concrete DDR span, in encoded program order.
 // Arithmetic consumes the actual DMA payload, including supplied twiddle words.
-// DSTORE releases only for REL=1. Physical allocation follows the v1.1 bank
+// DSTORE releases only for REL=1. Physical allocation follows the v1.2 bank
 // contract, including transient NTT/PMAC regions and packed Bank 5 parameters.
+// CP is accepted on either DMA direction; functional replay does not simulate
+// LLC residency, cache hits or DMA timing.
 InstructionExecutionResult execute_instructions(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<hpu::runtime::HpuMemSpan>& ordered_dma_spans,

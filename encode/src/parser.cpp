@@ -246,7 +246,7 @@ Instruction parse_sync(const std::vector<std::string>& operands) {
 }
 
 Instruction parse_dma(Mnemonic mnemonic, const std::vector<std::string>& operands) {
-    expect_operand_count(operands, mnemonic == Mnemonic::kDload ? 5 : 4,
+    expect_operand_count(operands, mnemonic == Mnemonic::kDload ? 6 : 5,
                          to_string(mnemonic));
 
     Instruction instruction {};
@@ -255,10 +255,11 @@ Instruction parse_dma(Mnemonic mnemonic, const std::vector<std::string>& operand
     instruction.rs2 = parse_xreg(operands[1], "rs2");
     instruction.obj_id = static_cast<std::uint8_t>(parse_pobj(operands[2], "obj_id"));
     instruction.type = parse_u8(
-        operands[3], mnemonic == Mnemonic::kDload ? "load_type" : "rel");
+        operands[3], mnemonic == Mnemonic::kDload ? "mod" : "rel");
+    instruction.cp = parse_u8(operands[4], "cp");
     if (mnemonic == Mnemonic::kDload) {
         instruction.dma_flag =
-            parse_u8(operands[4], "bank_mask");
+            parse_u8(operands[5], "bank_mask");
     }
     return instruction;
 }

@@ -19,6 +19,7 @@ struct DmaRelocation {
     std::uint8_t object_id = 0;
     std::uint8_t type_or_release = 0;
     std::uint8_t flag = 0;
+    std::uint8_t cp = 0;
 };
 
 // Resolved CPU-side DMA operands, in instruction order. Wider fields allow the

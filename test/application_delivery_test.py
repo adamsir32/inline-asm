@@ -29,10 +29,10 @@ def main():
         assert descriptor["scheme"] == scheme
         assert descriptor["schema_version"] == 1
         abi = json.loads((package / "memory/abi.json").read_text())
-        assert abi["instruction_isa"] == "hpu-objects64-v1.1"
+        assert abi["instruction_isa"] == "hpu-objects64-v1.2"
         assert abi["object_slots"] == 64 and abi["mod_table_lines"] == 4
         assert abi["allocation_granule_lines"] == 128
-        assert abi["stage_parameter_load_type"] == 3
+        assert abi["stage_parameter_mod"] == 0 and abi["stage_parameter_bank_mask"] == 32
         assert abi["dload_mask_scope"] == "load_only" and abi["dstore_rel0_retains"] is True
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         assert parameters["scheme"] == scheme
@@ -85,7 +85,7 @@ def main():
         assert (package / descriptor["program_source"]).is_file()
         assert (package / descriptor["semantic_report"]).is_file()
         dma = rows(package / descriptor["dma_relocation_manifest"])
-        assert dma and len(dma[0]) == 14
+        assert dma and len(dma[0]) == 15
         config = json.loads((package / descriptor["memory_config"]).read_text())
         assert config["capacity_lines"] == config["used_lines"]
         node_dma_counts = {}

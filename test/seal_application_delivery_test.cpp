@@ -4,7 +4,9 @@
 #include "hpu/seal/software_executor.hpp"
 #include "hpu/seal/bfv_software_executor.hpp"
 
+#include <algorithm>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -19,6 +21,38 @@ void rejects(F action, const std::string& fragment)
         throw;
     }
     throw std::runtime_error("delivery accepted invalid input: " + fragment);
+}
+
+// CP is independent of the relocation recipe: both native declarations and
+// the assembly compatibility path must accept a cached global modulus load.
+template<class Lowered>
+Lowered cached_modulus_program(const Lowered& original, bool native)
+{
+    auto lowered = original;
+    const auto before = hpu::dload(4, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+    const auto after = hpu::dload(4, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank,
+                                 hpu::CachePolicy::allocate);
+    const auto position = lowered.body_asm.find(before);
+    if (position == std::string::npos)
+        throw std::runtime_error("test program has no default global modulus load");
+    lowered.body_asm.replace(position, before.size(), after);
+    if (native) {
+        if (!lowered.operator_program) throw std::runtime_error("test program has no native IR");
+        auto program = std::make_shared<hpu::resource::OperatorProgram>(*lowered.operator_program);
+        const auto load = std::find_if(program->operations.begin(), program->operations.end(),
+            [](const auto& operation) {
+                return operation.instruction.mnemonic == hpu::Mnemonic::kDload
+                    && operation.instruction.type == 1;
+            });
+        if (load == program->operations.end())
+            throw std::runtime_error("native test program has no global modulus load");
+        load->instruction.cp = 1;
+        lowered.operator_program = std::move(program);
+    } else {
+        lowered.operator_program.reset();
+        for (auto& operation : lowered.operations) operation.operator_program.reset();
+    }
+    return lowered;
 }
 
 void test_ckks()
@@ -52,6 +86,20 @@ void test_ckks()
                                              artifacts, image.image(), oracles, words);
     };
     make({oracle}, executor.memory().words());
+    for (const bool native : {true, false}) {
+        const auto cached = cached_modulus_program(lowered, native);
+        const auto relocation = build_ckks_relocation_schedule(cached, image.image(), context);
+        if (relocation.bindings.empty() || relocation.bindings.front().cp != 1)
+            throw std::runtime_error("CKKS global relocation lost CP=1");
+        const auto cached_runtime = lower_ckks_runtime_program(cached, relocation);
+        const auto cached_artifacts = render_ckks_runtime_artifacts("ckks_cached_test", cached_runtime, 256);
+        const auto request = make_ckks_application_package(
+            "ckks_cached_test", context, cached, cached_runtime, cached_artifacts,
+            image.image(), {oracle}, executor.memory().words());
+        if (request.program.instructions.front().instruction.cp != 1
+            || (request.program.instructions.front().word & 0x6000U) != 0x6000U)
+            throw std::runtime_error("CKKS delivery lost the cached modulus load encoding");
+    }
     rejects([&] { make({}, executor.memory().words()); }, "snapshot");
     rejects([&] { make({oracle}, {}); }, "image size");
     auto corrupt = executor.memory().words();
@@ -97,6 +145,20 @@ void test_bfv()
                                             artifacts, image.image(), oracles, words);
     };
     make({oracle}, executor.memory().words());
+    for (const bool native : {true, false}) {
+        const auto cached = cached_modulus_program(lowered, native);
+        const auto relocation = build_bfv_relocation_schedule(cached, image.image(), context);
+        if (relocation.bindings.empty() || relocation.bindings.front().cp != 1)
+            throw std::runtime_error("BFV global relocation lost CP=1");
+        const auto cached_runtime = lower_bfv_runtime_program(cached, relocation);
+        const auto cached_artifacts = render_bfv_runtime_artifacts("bfv_cached_test", cached_runtime, 256);
+        const auto request = make_bfv_application_package(
+            "bfv_cached_test", context, cached, cached_runtime, cached_artifacts,
+            image.image(), {oracle}, executor.memory().words());
+        if (request.program.instructions.front().instruction.cp != 1
+            || (request.program.instructions.front().word & 0x6000U) != 0x6000U)
+            throw std::runtime_error("BFV delivery lost the cached modulus load encoding");
+    }
     auto corrupt = executor.memory().words();
     corrupt[output.components[1].limbs[0].line_offset * 64] ^= 1;
     rejects([&] { make({oracle}, corrupt); }, "output/c1/mod0 word 0");

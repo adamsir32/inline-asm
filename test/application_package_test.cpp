@@ -85,7 +85,7 @@ struct Fixture {
     hpu::runtime::HpuMemImage image;
     hpu::delivery::ApplicationPackageRequest request;
 
-    explicit Fixture(bool legacy_transform = false)
+    explicit Fixture(bool legacy_transform = false, unsigned cp = 0)
         : image(legacy_transform ? 8 : 4)
     {
         std::string assembly;
@@ -100,8 +100,8 @@ struct Fixture {
                 hpu::runtime::AllocationKind::twiddle, true);
             prefix_spans = {data.span, twiddle.span};
             allocation_ids = {"legacy/data", "legacy/twiddle"};
-            assembly = "dload x10, x11, p1, 1, 0\n"
-                       "dload x10, x11, p2, 1, 0\n"
+            assembly = "dload x10, x11, p1, 0, 0, 0\n"
+                       "dload x10, x11, p2, 0, 0, 0\n"
                        "pntt p1, p2, 0, 0, 0\n"
                        "pfree p1\npfree p2\n";
         }
@@ -110,10 +110,9 @@ struct Fixture {
             hpu::runtime::AllocationKind::plaintext, true);
         const auto output = image.reserve(
             "result", 4, hpu::runtime::AllocationKind::output);
-        assembly +=
-            "dload x10, x11, p0, 0, 0\n"
-            "dstore x10, x11, p0, 0\n"
-            "psync\n";
+        assembly += "dload x10, x11, p0, 0, " + std::to_string(cp) + ", 0\n"
+                    "dstore x10, x11, p0, 0, " + std::to_string(cp) + "\n"
+                    "psync\n";
         const auto instructions = hpu::assemble_source(assembly);
 
         request.scheme = hpu::delivery::SchemeKind::ckks;
@@ -136,7 +135,7 @@ struct Fixture {
         std::ostringstream resolved;
         resolved << "instruction_index,dma_index,operation_index,operation_id,"
                     "operation_dma_index,direction,object_slot,type_or_release,flag,"
-                    "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+                    "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
         for (std::size_t index = 0; index < relocations.size(); ++index) {
             const auto& dma = relocations[index];
             const auto& span = request.program.ordered_dma_spans[index];
@@ -149,7 +148,7 @@ struct Fixture {
                      << allocation_ids[index] << ','
                      << span.line_offset << ',' << span.line_count << ','
                      << hpu::format_word_hex(instruction.word) << ",\""
-                     << instruction.normalized_asm << "\"\n";
+                     << instruction.normalized_asm << "\"," << unsigned(dma.cp) << "\n";
         }
         request.program.resolved_dma_manifest = resolved.str();
         request.outputs.push_back({
@@ -382,6 +381,25 @@ void test_happy_path_package()
     hpu::delivery::validate_application_package_on_disk(package);
 }
 
+void test_cp_manifest_roundtrip_and_tampering()
+{
+    ScratchDirectory scratch;
+    Fixture fixture(false, 1);
+    const auto package = hpu::delivery::write_application_package(
+        scratch.path() / "cp_allocating", fixture.request);
+    hpu::delivery::validate_application_package_on_disk(package.root);
+    for (const auto& dma : hpu::collect_dma_relocations(fixture.request.program.instructions))
+        require(dma.cp == 1, "CP=1 was lost by assembly/relocation");
+
+    const std::string relative = "program/dma_relocation_manifest.csv";
+    update_csv_row(package.root / relative, "0", {{14, "0"}});
+    refresh_files_manifest_entry(package.root, relative);
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"DMA", "disagrees with the encoded program"},
+        "validator accepted a re-signed cache policy unlike the instruction");
+}
+
 void test_deterministic_generation()
 {
     ScratchDirectory scratch;
@@ -552,7 +570,7 @@ void test_request_rejects_incorrect_dma_manifest()
     fixture.request.program.resolved_dma_manifest =
         "instruction_index,dma_index,operation_index,operation_id,"
         "operation_dma_index,direction,object_slot,type_or_release,flag,"
-        "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+        "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     require_throws_with_fragments(
         [&] {
             hpu::delivery::validate_application_package_request(fixture.request);
@@ -689,7 +707,7 @@ void test_rejects_incompatible_isa_and_stage_shape()
     const auto package = hpu::delivery::write_application_package(
         scratch.path() / "target_abi", fixture.request);
     auto abi = read_file(package.root / "memory/abi.json");
-    const std::string current = "hpu-objects64-v1.1";
+    const std::string current = "hpu-objects64-v1.2";
     const auto position = abi.find(current);
     require(position != std::string::npos, "package omitted target instruction ISA");
     abi.replace(position, current.size(), "hpu-objects8-legacy");
@@ -1459,6 +1477,7 @@ int main()
         "reject DMA beyond used image",
         test_request_rejects_dma_outside_used_image,
         failures);
+    run_test("CP manifest roundtrip and tampering", test_cp_manifest_roundtrip_and_tampering, failures);
     run_test(
         "reject incorrect DMA manifest at request boundary",
         test_request_rejects_incorrect_dma_manifest,

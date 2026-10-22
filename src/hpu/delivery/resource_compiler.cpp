@@ -68,7 +68,7 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
     program.instructions = resources.instructions;
     std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     std::ostringstream manifest, assembly;
-    manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+    manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     std::map<std::string, std::size_t> operation_indices;
     program.ordered_dma_spans.clear();
     program.resource_dma = resources.dma;
@@ -86,7 +86,7 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
                  << (load ? "dload" : "dstore") << ',' << unsigned(inst.obj_id) << ',' << unsigned(inst.type)
                  << ',' << (load ? unsigned(inst.dma_flag) : 0) << ',' << csv_field(dma.allocation_id)
                  << ',' << dma.span.line_offset << ',' << dma.span.line_count << ','
-                 << hpu::format_word_hex(encoded.word) << ',' << csv_field(encoded.normalized_asm) << '\n';
+                 << hpu::format_word_hex(encoded.word) << ',' << csv_field(encoded.normalized_asm) << ',' << unsigned(inst.cp) << '\n';
         program.ordered_dma_spans.push_back(dma.span);
     }
     program.source = hpu::render_fixed_executable_source(

@@ -20,7 +20,7 @@ inline constexpr int kSmallBankLines = 32;
 inline constexpr int kModTableLines = 4;
 inline constexpr int kObjectSlotCount = 64;
 inline constexpr int kAllocationGranuleLines = 128;
-inline constexpr const char* kInstructionIsa = "hpu-objects64-v1.1";
+inline constexpr const char* kInstructionIsa = "hpu-objects64-v1.2";
 inline constexpr int kModTableBaseLine = 0x1400;
 inline constexpr int kModContextsPerLine = 16;
 inline constexpr int kPhysicalModContexts = kSmallBankLines * kModContextsPerLine;
@@ -59,6 +59,7 @@ inline std::string pobj(int id) {
 // 外部访存类指令 (custom1)
 // ==========================================
 
+// Logical data roles for C++ generators; these are not DMA wire TYPE bits.
 enum class DataType {
     seg = 0,
     poly = 1,
@@ -71,33 +72,51 @@ enum class DloadFlag {
     small_bank = 0x20
 };
 
+// CP is a per-command LLC allocation hint, independent of SRAM placement.
+// no_allocate can still hit existing cache lines; it does not bypass LLC.
+enum class CachePolicy { no_allocate = 0, allocate = 1 };
+
+inline constexpr unsigned dma_mod_bit(DataType role) {
+    return role == DataType::mod_ctx ? 1U : 0U;
+}
+
+inline constexpr unsigned dma_bank_mask(DataType role, DloadFlag flag) {
+    return role == DataType::twiddle_parameters && flag == DloadFlag::regular_bank
+        ? 0x20U : static_cast<unsigned>(flag);
+}
+
 inline std::string dload(
     const std::string& rs1,
     const std::string& rs2,
     int pdst,
     DataType load_type,
-    DloadFlag flag = DloadFlag::regular_bank) {
+    DloadFlag flag = DloadFlag::regular_bank,
+    CachePolicy cp = CachePolicy::no_allocate) {
     std::ostringstream ss;
     ss << "        \"dload " << rs1 << ", " << rs2 << ", " << pobj(pdst) << ", "
-       << static_cast<int>(load_type) << ", " << static_cast<int>(flag) << " \\n\\t\"\n";
+       << dma_mod_bit(load_type) << ", " << static_cast<unsigned>(cp) << ", "
+       << dma_bank_mask(load_type, flag) << " \\n\\t\"\n";
     return ss.str();
 }
 
-inline std::string dstore(const std::string& rs1, const std::string& rs2, int psrc, int rel) {
+inline std::string dstore(const std::string& rs1, const std::string& rs2,
+                         int psrc, int rel, CachePolicy cp = CachePolicy::no_allocate) {
     std::ostringstream ss;
-    ss << "        \"dstore " << rs1 << ", " << rs2 << ", " << pobj(psrc) << ", " << rel << " \\n\\t\"\n";
+    ss << "        \"dstore " << rs1 << ", " << rs2 << ", " << pobj(psrc) << ", "
+       << rel << ", " << static_cast<unsigned>(cp) << " \\n\\t\"\n";
     return ss.str();
 }
 
 inline std::string dload(
     int pdst,
     DataType load_type,
-    DloadFlag flag = DloadFlag::regular_bank) {
-    return dload(kDmaOffsetRegister, kDmaCountRegister, pdst, load_type, flag);
+    DloadFlag flag = DloadFlag::regular_bank,
+    CachePolicy cp = CachePolicy::no_allocate) {
+    return dload(kDmaOffsetRegister, kDmaCountRegister, pdst, load_type, flag, cp);
 }
 
-inline std::string dstore(int psrc, int rel) {
-    return dstore(kDmaOffsetRegister, kDmaCountRegister, psrc, rel);
+inline std::string dstore(int psrc, int rel, CachePolicy cp = CachePolicy::no_allocate) {
+    return dstore(kDmaOffsetRegister, kDmaCountRegister, psrc, rel, cp);
 }
 
 // ==========================================

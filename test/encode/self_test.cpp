@@ -53,14 +53,14 @@ int main()
 {
     try {
         if (hpu::dload(0, hpu::DataType::poly).find(
-                "dload x10, x11, p0, 1, 0") == std::string::npos
+                "dload x10, x11, p0, 0, 0, 0") == std::string::npos
             || hpu::dstore(2, 1).find(
-                "dstore x10, x11, p2, 1") == std::string::npos) {
+                "dstore x10, x11, p2, 1, 0") == std::string::npos) {
             throw std::runtime_error("runtime DMA register ABI mismatch");
         }
         const std::string smoke =
-            "dload x10, x11, p0, 0, 0\n"
-            "dload x10, x11, p4, 2, 32\n"
+            "dload x10, x11, p0, 0, 0, 0\n"
+            "dload x10, x11, p4, 1, 0, 32\n"
             "pmodld 255\n"
             "padd p2, p0, p1\n"
             "psub p2, p0, p1\n"
@@ -69,7 +69,7 @@ int main()
             "pntt p0, p3, 15, 3, 1\n"
             "pintt p0, p3, 15, 3, 1\n"
             "pfree p5\n"
-            "dstore x10, x11, p2, 1\n"
+            "dstore x10, x11, p2, 1, 0\n"
             "psync\n";
         const auto encoded = hpu::assemble_source(smoke);
         if (encoded.size() != 12) {
@@ -110,57 +110,74 @@ int main()
         expect_encoded("psync", 0x7000005BU);
         expect_precoded("padd p2, p0, p1", 0x0080015BU, 0x0010002U);
         expect_precoded("pmodld 255", 0x6000FF5BU, 0x0C001FEU);
-        expect_precoded("dload x10, x11, p0, 0, 0", 0x00B5002BU, 0x2016A00U);
-        expect_precoded("dload x1, x2, p0, 0, 0", 0x0020802BU, 0x2004100U);
-        expect_precoded("dload x10, x11, p4, 2, 32", 0x12B5402BU, 0x2256A80U);
-        expect_precoded("dstore x10, x11, p2, 1", 0x08B5502BU, 0x2116AA0U);
-        expect_encoded("dstore x10, x11, p2, 1", 0x08B5502BU);
+        expect_precoded("dload x10, x11, p0, 0, 0, 0", 0x00B5002BU, 0x2016A00U);
+        expect_precoded("dload x1, x2, p0, 0, 0, 0", 0x0020802BU, 0x2004100U);
+        expect_precoded("dload x10, x11, p4, 1, 0, 32", 0x12B5402BU, 0x2256A80U);
+        expect_precoded("dstore x10, x11, p2, 1, 0", 0x08B5502BU, 0x2116AA0U);
+        expect_encoded("dstore x10, x11, p2, 1, 0", 0x08B5502BU);
         expect_encoded("pmul p2, p0, 255", 0x2080FFDBU);
         expect_encoded("pmac p2, p0, 255", 0x3080FFDBU);
 
-        // Frozen vectors from the v1.1 bit-layout tables cover all six object
-        // bits, both halves of the DMA mask, and the largest GPR identifiers.
+        // Frozen vectors from the v1.2 tables cover independent MOD/REL and
+        // CP bits, six object/mask bits, and all five bits of rs2.
         expect_precoded("padd p63, p62, p61", 0x0FFE3D5BU, 0x01FFC7AU);
         expect_precoded("pntt p63, p62, 15, 3, 1", 0x4FFEFE5BU, 0x09FFDFCU);
         expect_encoded("pfree p63", 0x803F005BU);
-        expect_precoded("dload x30, x31, p63, 3, 63", 0xFFFF6FABU, 0x3FFFEDFU);
-        expect_precoded("dstore x30, x31, p63, 1", 0xFDFF502BU, 0x3FBFEA0U);
-        expect_encoded("dload x10, x11, p4, 2, 0", 0x10B5402BU);
+        expect_precoded("dload x30, x31, p63, 0, 0, 63", 0xFFFF0FABU, 0x3FFFE1FU);
+        expect_precoded("dload x30, x31, p63, 0, 1, 63", 0xFFFF2FABU, 0x3FFFE5FU);
+        expect_precoded("dload x30, x31, p63, 1, 0, 32", 0xFFFF402BU, 0x3FFFE80U);
+        expect_precoded("dload x30, x31, p63, 1, 1, 32", 0xFFFF602BU, 0x3FFFEC0U);
+        expect_precoded("dstore x30, x31, p63, 0, 0", 0xFDFF102BU, 0x3FBFE20U);
+        expect_precoded("dstore x30, x31, p63, 0, 1", 0xFDFF302BU, 0x3FBFE60U);
+        expect_precoded("dstore x30, x31, p63, 1, 0", 0xFDFF502BU, 0x3FBFEA0U);
+        expect_precoded("dstore x30, x31, p63, 1, 1", 0xFDFF702BU, 0x3FBFEE0U);
+        expect_encoded("dload x10, x11, p4, 1, 0, 0", 0x10B5402BU);
+
+        const auto cached = hpu::assemble_source(
+            "dload x10, x11, p63, 0, 1, 32\n"
+            "dstore x10, x11, p63, 1, 1\npsync\n");
+        const auto cached_dma = hpu::collect_dma_relocations(cached);
+        if (cached_dma.size() != 2 || cached_dma[0].cp != 1 || cached_dma[1].cp != 1
+            || cached_dma[0].flag != 32 || cached_dma[1].type_or_release != 1)
+            throw std::runtime_error("DMA relocation lost independent CP/MOD/REL/mask");
+        if (hpu::render_dma_manifest(cached).find("normalized_asm,cp\n") == std::string::npos
+            || cached[0].normalized_asm != "dload x10, x11, p63, 0, 1, 32")
+            throw std::runtime_error("DMA manifest or normalized assembly lost CP");
 
         const auto executable_encoded = hpu::assemble_source(
-            "dload x10, x11, p4, 2, 32\n"
+            "dload x10, x11, p4, 1, 0, 32\n"
             "pmodld 0\n"
-            "dload x10, x11, p0, 1, 0\n"
-            "dload x10, x11, p1, 1, 0\n"
+            "dload x10, x11, p0, 0, 0, 0\n"
+            "dload x10, x11, p1, 0, 0, 0\n"
             "pmul p2, p0, p1\n"
             "pfree p0\n"
             "pfree p1\n"
-            "dstore x10, x11, p2, 1\n"
+            "dstore x10, x11, p2, 1, 0\n"
             "pfree p4\n"
             "psync\n");
         hpu::validate_executable_program(executable_encoded);
         hpu::validate_executable_program(hpu::assemble_source(
-            "dload x10, x11, p0, 1, 0\n"
-            "dload x10, x11, p0, 1, 0\n"
+            "dload x10, x11, p0, 0, 0, 0\n"
+            "dload x10, x11, p0, 0, 0, 0\n"
             "psync\n"));
         expect_program_rejected(
-            "dload x10, x11, p0, 1, 0\n"
+            "dload x10, x11, p0, 0, 0, 0\n"
             "psync\n"
             "pfree p0\n");
         hpu::validate_executable_program(hpu::assemble_source(
-            "dload x10, x11, p63, 1, 0\n"
-            "dstore x10, x11, p63, 0\n"
+            "dload x10, x11, p63, 0, 0, 0\n"
+            "dstore x10, x11, p63, 0, 0\n"
             "psync\n"
             "pfree p63\n"
             "psync\n"));
         expect_program_rejected(
-            "dload x10, x11, p63, 1, 0\n"
-            "dstore x10, x11, p63, 1\n"
+            "dload x10, x11, p63, 0, 0, 0\n"
+            "dstore x10, x11, p63, 1, 0\n"
             "pfree p63\n"
             "psync\n");
         expect_program_rejected(
-            "dload x10, x11, p40, 2, 0\n"
-            "dload x10, x11, p41, 2, 32\n"
+            "dload x10, x11, p40, 1, 0, 0\n"
+            "dload x10, x11, p41, 1, 0, 32\n"
             "psync\n");
         const std::string executable =
             hpu::render_executable_source("smoke", executable_encoded, 65536);
@@ -217,18 +234,26 @@ int main()
             "pseed 0",
             "psample p0, p1, 0, 0, 0",
             "psync 0, 0",
-            "dload x32, x0, p0, 0, 0",
-            "dload x0, x0, p0, 4, 0",
+            "dload x32, x0, p0, 0, 0, 0",
+            "dload x0, x0, p0, 2, 0, 0",
+            "dload x0, x0, p0, 3, 0, 32",
+            "dload x0, x0, p0, 0, 2, 0",
+            "dload x0, x0, p0, 0, 256, 0",
+            "dload x0, x0, p0, 0, -1, 0",
+            "dload x0, x0, p0, 0, 0",
             "dload x0, x0, p0, 0",
-            "dload x0, x0, p0, 2, 2",
-            "dload x0, x0, p0, 0, 64",
-            "dload x0, x0, p0, 0, 256",
-            "dload x0, x0, p0, 256, 0",
+            "dload x0, x0, p0, 1, 0, 2",
+            "dload x0, x0, p0, 0, 0, 64",
+            "dload x0, x0, p0, 0, 0, 256",
+            "dload x0, x0, p0, 256, 0, 0",
             "dload x0, x0, p0, -1, 0",
             "pntt p0, p1, 0, 256, 0",
             "pplace p0, 1",
-            "dstore x0, x0, p0, 2",
-            "dstore x0, x0, p0, 1, 1",
+            "dstore x0, x0, p0, 2, 0",
+            "dstore x0, x0, p0, 1, 2",
+            "dstore x0, x0, p0, 1, 256",
+            "dstore x0, x0, p0, 1, -1",
+            "dstore x0, x0, p0, 1",
         };
         for (const std::string& source : invalid) {
             expect_rejected(source);

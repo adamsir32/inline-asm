@@ -4,7 +4,7 @@
 
 应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，快速运行见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)，完整程序、接口约束和自定义用例构建见 [HPU 应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
 
-当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.1 编码，stage 参数默认放入 Bank 5。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
+当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.2 编码，stage 参数以 MOD=0、显式 mask=0x20 放入 Bank 5，DMA 的 CP 提示默认 0。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
 
 ## 1. 项目结构
 
@@ -416,7 +416,7 @@ MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearizat
 - `N` 为 2 的幂且 `128 <= N <= 65536`；下界来自 NTT 的 128-register batch，上界来自普通 bank 的 1024 line
 - ISA 提供 64 个逻辑对象号 `p0..p63`；按 128-line 对齐区间共享五个普通 bank，stage 参数默认使用 Bank 5，详见 [Bank 分配指南](doc/reference/HPU_BANK_ALLOCATION_GUIDE.md)
 - 复杂硬件算子（CKKS Rescale、BGV/BFV ModSwitch、BFV BEHZ、PMULT/CMULT/MODUP/MODDOWN）使用 `dload/dstore` 流式搬运，不在本地长期保留多基对象；CKKS/BGV/BFV Encode/Decode 是纯 host API
-- `dload type=2, bank_mask=0x20` 将模表逻辑对象分配到 small Bank 5；DMA 与后续指令的一致性由硬件维护，可直接使用 `pmodld MOD_ID` 激活表项
+- `dload MOD=1, CP=0, bank_mask=0x20` 将模表逻辑对象分配到 small Bank 5；DMA 与后续指令的一致性由硬件维护，可直接使用 `pmodld MOD_ID` 激活表项
 - 每个可编码算子同时生成 `.inst32` 和 `.cmd26`；`cmd26[25]` 区分计算类 custom0 和 DMA 类 custom1，两类指令都直接携带 `inst[31:7]`；custom1 payload 按新六位对象号、拆分的 bank mask、RS2/RS1、TYPE_OR_REL 和 DIR 位段原样传输，寄存器值提供 offset/count
 - 本项目生成器统一在完整程序末尾发一次 `psync`，内部算子由硬件维护依赖；ISA 允许中途等待，`psync` 不释放对象
 - 所有 custom1 指令固定编码 `x10/x11`。可执行 runtime 在每条 DMA 前装入 span 的 HPU_MEM line offset/count；DLOAD 使用两者，DSTORE 的实际长度来自硬件对象表的 `OBJ.len`，软件会校验 span count 与之相等；`auto` 也进入统一编码链路。
@@ -439,7 +439,9 @@ RTL/板级执行后的逐字比对、FAULT/IRQ 状态和外部 monitor 记录为
 
 ### 64 对象 ISA 迁移
 
-当前目标为 [HPU ISA v1.1](doc/reference/HPU_PROGRAMMING_MANUAL.md)。顶层 Evaluator
+当前目标为 [HPU ISA v1.2](doc/reference/HPU_PROGRAMMING_MANUAL.md)。顶层 Evaluator
 API 不变；旧 `.inst32/.cmd26` 与新硬件不兼容，须重新生成交付包。新包通过
-`memory/abi.json` 标识 ISA、64 个对象与默认 4-line 模表配置。
+`memory/abi.json` 标识 ISA、`dma_format=mod_rel_cp`、64 个对象与默认 4-line 模表配置。
+v1.1 的 TYPE 字段已改为独立 MOD/REL、CP；CP 是 LLC 分配提示，默认 0。
+CP=0 仍可命中缓存，CP=1 不保证驻留；数学计算和顶层 Evaluator API 保持不变。
 [RTL 集成交接](doc/delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md) 说明 CPU/SoC 尚需同步的部分。

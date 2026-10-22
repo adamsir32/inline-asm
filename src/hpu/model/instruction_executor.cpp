@@ -33,8 +33,8 @@ hpu::Instruction decode_word(std::uint32_t word)
         result.obj_id = static_cast<std::uint8_t>((word >> 26U) & 63U);
         result.rs1 = static_cast<int>((word >> 15U) & 31U);
         result.rs2 = static_cast<int>((word >> 20U) & 31U);
-        const auto operation = static_cast<std::uint8_t>((word >> 13U) & 3U);
-        result.type = store ? operation >> 1U : operation;
+        result.type = static_cast<std::uint8_t>((word >> 14U) & 1U); // MOD / REL
+        result.cp = static_cast<std::uint8_t>((word >> 13U) & 1U);
         result.dma_flag = store ? 0 : static_cast<std::uint8_t>(
             ((word >> 20U) & 32U) | ((word >> 7U) & 31U));
     } else if (opcode == 0x5bU) {
@@ -111,7 +111,8 @@ void require_canonical(const std::vector<std::uint32_t>& words, std::uint32_t mo
 
 struct ResidentObject {
     std::vector<std::uint32_t> words;
-    std::uint8_t type = 1;
+    // MOD bit only; CP is not object metadata.
+    std::uint8_t type = 0;
 };
 
 } // namespace
@@ -191,6 +192,8 @@ InstructionExecutionResult execute_instructions(
                 const auto offset = span_offset(span, result.words.size());
                 const auto length = static_cast<std::size_t>(span.line_count) * kLineWords;
                 const auto id = instruction.obj_id;
+                // CP is an LLC allocation hint for this command. It neither
+                // changes payload arithmetic nor persists in the SRAM object.
                 if (instruction.mnemonic == Mnemonic::kDload) {
                     banks->load(id, static_cast<std::size_t>(span.line_count),
                                 instruction.type, instruction.dma_flag);
@@ -201,7 +204,7 @@ InstructionExecutionResult execute_instructions(
                         std::vector<std::uint32_t>(result.words.begin() + offset,
                                                   result.words.begin() + offset + length),
                         instruction.type};
-                    if (instruction.type == 2) modulus_object = id;
+                    if (instruction.type == 1) modulus_object = id;
                     report.loaded_words += length;
                     account_banks();
                 } else {
@@ -275,7 +278,7 @@ InstructionExecutionResult execute_instructions(
                     static_cast<std::uint8_t>(instruction.psrc1),
                     right ? std::optional<std::uint8_t>(instruction.psrc2) : std::nullopt,
                     mac);
-                objects[instruction.pdst] = ResidentObject{std::move(output), 1};
+                objects[instruction.pdst] = ResidentObject{std::move(output), 0};
                 account_banks();
                 break;
             }
@@ -286,7 +289,7 @@ InstructionExecutionResult execute_instructions(
                     throw UnsupportedContract("transform mode/flag is not modeled");
                 const auto& data = require_object(instruction.pdst);
                 const auto& twiddle = require_object(instruction.psrc1);
-                if (twiddle.type == 2 || twiddle.words.size() != kStageTwiddleParameterWords)
+                if (twiddle.type == 1 || twiddle.words.size() != kStageTwiddleParameterWords)
                     throw std::invalid_argument("transform requires a two-line K=8 twiddle parameter object");
                 const auto degree = data.words.size();
                 if (degree < 128 || degree > 65536 || (degree & (degree - 1)) != 0)

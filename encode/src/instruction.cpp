@@ -102,7 +102,8 @@ std::string to_string(const Instruction& instruction) {
             oss << ' ' << format_xreg(instruction.rs1)
                 << ", " << format_xreg(instruction.rs2)
                 << ", " << format_pobj(instruction.obj_id)
-                << ", " << static_cast<int>(instruction.type);
+                << ", " << static_cast<int>(instruction.type)
+                << ", " << static_cast<int>(instruction.cp);
             if (instruction.mnemonic == Mnemonic::kDload) {
                 oss << ", " << static_cast<int>(instruction.dma_flag);
             }

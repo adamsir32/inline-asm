@@ -130,14 +130,14 @@ void test_scratch_reuse()
     image.add("scratch/initial", std::vector<std::uint32_t>(128, 9), AllocationKind::workspace, false);
     image.reserve("output/initial", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
-        "padd p2, p0, p1\ndstore x10, x11, p2, 0\npfree p0\npfree p1\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
-        "padd p2, p0, p1\ndstore x10, x11, p2, 0\npfree p0\npfree p1\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 0\n"
+        "padd p2, p0, p1\ndstore x10, x11, p2, 0, 0\npfree p0\npfree p1\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 0\n"
+        "padd p2, p0, p1\ndstore x10, x11, p2, 0, 0\npfree p0\npfree p1\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0, 0\n"
         "pfree p4\npsync\n");
     const auto dma = bindings(instructions, image,
         {"moduli", "a", "b_alias", "scratch/a", "scratch/a", "output/a",
@@ -210,14 +210,14 @@ void test_dirty_spill()
     }
     image.reserve("output", 65536, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\n"
-        "dload x10, x11, p1, 1, 0\ndload x10, x11, p2, 1, 0\n"
-        "dload x10, x11, p3, 1, 0\ndload x10, x11, p5, 1, 0\n"
-        "dload x10, x11, p6, 1, 0\n"
+        "dload x10, x11, p4, 1, 1, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 1, 0\npmul p0, p0, 2\n"
+        "dload x10, x11, p1, 0, 1, 0\ndload x10, x11, p2, 0, 1, 0\n"
+        "dload x10, x11, p3, 0, 1, 0\ndload x10, x11, p5, 0, 1, 0\n"
+        "dload x10, x11, p6, 0, 1, 0\n"
         "padd p1, p1, p2\npfree p2\npadd p3, p3, p5\npfree p5\n"
         "padd p6, p6, p1\npfree p1\npadd p0, p0, p3\npfree p3\n"
-        "padd p0, p0, p6\npfree p6\ndstore x10, x11, p0, 0\npfree p4\npsync\n");
+        "padd p0, p0, p6\npfree p6\ndstore x10, x11, p0, 0, 1\npfree p4\npsync\n");
     const auto dma = bindings(instructions, image,
         {"moduli", "input/0", "input/1", "input/2", "input/3", "input/4", "input/5", "output"});
     const auto optimized = hpu::compiler::optimize_resources(instructions, dma, image);
@@ -229,6 +229,13 @@ void test_dirty_spill()
         require(entry.operation_id == "node" && entry.operation_index.has_value(),
                 "spill/reload changed graph operation provenance");
     }
+    std::size_t default_policy_dma = 0;
+    for (const auto& entry : optimized.dma) {
+        const auto& op = optimized.instructions[entry.instruction_index].instruction;
+        if (op.cp == 0) ++default_policy_dma;
+    }
+    require(default_policy_dma == optimized.report.spills + optimized.report.reloads,
+            "inserted spill/reload inherited the original DMA cache policy");
     const auto original = replay(instructions, dma, image);
     const auto actual = replay(optimized.instructions, optimized.dma, optimized.image);
     require(allocation_words(original, image, "output")
@@ -256,22 +263,22 @@ void test_stage_bank_and_multiple_readers()
     image.reserve("output/1", 65536, AllocationKind::output);
     image.reserve("output/2", 65536, AllocationKind::output);
     const auto stages = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 3, 0\n"
-        "dload x10, x11, p2, 1, 0\ndload x10, x11, p3, 1, 0\n"
-        "dload x10, x11, p5, 1, 0\ndload x10, x11, p6, 1, 0\npntt p0, p1, 0, 0, 0\n"
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 32\n"
+        "dload x10, x11, p2, 0, 0, 0\ndload x10, x11, p3, 0, 0, 0\n"
+        "dload x10, x11, p5, 0, 0, 0\ndload x10, x11, p6, 0, 0, 0\npntt p0, p1, 0, 0, 0\n"
         "pfree p1\npmul p2, p2, p3\npfree p3\npmul p2, p2, p5\npfree p5\n"
-        "pmul p2, p2, p6\npfree p6\npmul p0, p0, p2\npfree p2\ndstore x10, x11, p0, 0\npfree p4\npsync\n");
+        "pmul p2, p2, p6\npfree p6\npmul p0, p0, p2\npfree p2\ndstore x10, x11, p0, 0, 0\npfree p4\npsync\n");
     const auto stage_dma = bindings(stages, image,
         {"moduli", "input/0", "input/1", "input/2", "input/3", "input/4", "input/5", "output/1"});
     const auto staged = hpu::compiler::optimize_resources(stages, stage_dma, image);
     require(staged.report.peak_regular_banks <= 5 && staged.report.reloads >= 1,
             "NTT out-of-place output bank was not reserved");
     const auto multiple = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0\n"
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0, 0\n"
         "pfree p4\npsync\n");
     const auto multi_dma = bindings(multiple, image,
         {"moduli", "input/0", "scratch", "scratch", "output/1", "scratch", "output/2"});
@@ -300,10 +307,10 @@ void test_destination_shape_change()
     image.add("old_destination", std::vector<std::uint32_t>(64, 7), AllocationKind::constant);
     image.reserve("output", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
-        "dload x10, x11, p2, 0, 0\npadd p2, p0, p1\n"
-        "pfree p0\npfree p1\ndstore x10, x11, p2, 0\npfree p4\npsync\n");
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 0\n"
+        "dload x10, x11, p2, 0, 0, 0\npadd p2, p0, p1\n"
+        "pfree p0\npfree p1\ndstore x10, x11, p2, 0, 0\npfree p4\npsync\n");
     const auto dma = bindings(instructions, image,
         {"moduli", "a", "b", "old_destination", "output"});
     const auto optimized = hpu::compiler::optimize_resources(instructions, dma, image);
@@ -326,14 +333,14 @@ void test_partial_initialization_and_overlapping_lifetimes()
     image.reserve("output/b", 128, AllocationKind::output);
     image.reserve("output/partial", 128, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
-        "padd p2, p0, p1\npfree p0\npfree p1\ndstore x10, x11, p2, 0\n"
-        "dload x10, x11, p0, 1, 0\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\ndstore x10, x11, p0, 0\n"
-        "dload x10, x11, p0, 1, 0\ndstore x10, x11, p0, 0\npfree p4\npsync\n");
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 2\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\npmul p0, p0, 3\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 0\n"
+        "padd p2, p0, p1\npfree p0\npfree p1\ndstore x10, x11, p2, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndstore x10, x11, p0, 0, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\ndstore x10, x11, p0, 0, 0\npfree p4\npsync\n");
     auto dma = bindings(instructions, image,
         {"moduli", "input", "scratch/a", "input", "scratch/b", "scratch/a", "scratch/b",
          "output/a", "scratch/a", "output/b", "input", "scratch/partial", "scratch/partial", "output/partial"});
@@ -548,18 +555,18 @@ void test_full_64_object_bank_layout()
     // catches both the obsolete eight-slot limit and one-object-per-bank model.
     hpu::runtime::HpuMemImage image(8192);
     image.add("moduli", {65537}, AllocationKind::modulus_table);
-    std::string assembly = "dload x10, x11, p63, 2, 32\npmodld 0\n";
+    std::string assembly = "dload x10, x11, p63, 1, 0, 32\npmodld 0\n";
     std::vector<std::string> names{"moduli"};
     for (int id = 0; id < 40; ++id) {
         const auto name = "data/" + std::to_string(id);
         image.add(name, std::vector<std::uint32_t>(8192, id), AllocationKind::ciphertext);
-        assembly += "dload x10, x11, p" + std::to_string(id) + ", 1, 0\n";
+        assembly += "dload x10, x11, p" + std::to_string(id) + ", 0, 0, 0\n";
         names.push_back(name);
     }
     for (int id = 40; id < 54; ++id) {
         const auto name = "parameters/" + std::to_string(id);
         image.add(name, std::vector<std::uint32_t>(128, 1), AllocationKind::twiddle);
-        assembly += "dload x10, x11, p" + std::to_string(id) + ", 3, 0\n";
+        assembly += "dload x10, x11, p" + std::to_string(id) + ", 0, 0, 32\n";
         names.push_back(name);
     }
     for (int id = 0; id < 54; ++id) assembly += "pfree p" + std::to_string(id) + "\n";
@@ -590,10 +597,10 @@ void test_store_retention_and_pmac_capacity()
     image.reserve("before", 65536, AllocationKind::output);
     image.reserve("after", 65536, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p63, 2, 32\npmodld 0\n"
-        "dload x10, x11, p32, 1, 1\ndload x10, x11, p33, 1, 2\n"
-        "pmul p34, p32, p33\npsync\ndstore x10, x11, p34, 0\npsync\n"
-        "pmac p34, p32, p33\ndstore x10, x11, p34, 1\n"
+        "dload x10, x11, p63, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p32, 0, 0, 1\ndload x10, x11, p33, 0, 0, 2\n"
+        "pmul p34, p32, p33\npsync\ndstore x10, x11, p34, 0, 0\npsync\n"
+        "pmac p34, p32, p33\ndstore x10, x11, p34, 1, 0\n"
         "pfree p32\npfree p33\npfree p63\npsync\n");
     const auto dma = bindings(instructions, image, {"moduli", "a", "b", "before", "after"});
     for (const auto mode : {hpu::compiler::OptimizationMode::no_opt,
@@ -702,6 +709,68 @@ void test_deferred_reload_storage_lifetime()
     }
 }
 
+void test_per_command_cache_policy()
+{
+    namespace r = hpu::resource;
+    hpu::runtime::HpuMemImage image(32);
+    image.add("moduli", {65537}, AllocationKind::modulus_table);
+    image.add("input", std::vector<std::uint32_t>(128, 3), AllocationKind::ciphertext);
+    image.reserve("before", 128, AllocationKind::output);
+    image.reserve("after", 128, AllocationKind::output);
+    r::Recording recording;
+    auto assembly = r::read(r::modulus_table, hpu::DataType::mod_ctx,
+                           hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
+    assembly += r::select_modulus(0);
+    assembly += r::read(r::value, hpu::DataType::poly,
+                        hpu::DloadFlag::regular_bank, hpu::CachePolicy::allocate);
+    assembly += r::multiply_immediate(r::value, r::value, 2);
+    assembly += r::publish(r::value, 0);
+    assembly += r::publish(r::value, 1, hpu::CachePolicy::allocate);
+    assembly += r::discard(r::modulus_table);
+    assembly += r::finish_program();
+    const auto source = recording.finish();
+    const auto instructions = hpu::assemble_source(assembly);
+    const auto dma = bindings(instructions, image, {"moduli", "input", "before", "after"});
+    const auto ir = r::bind_program(source, instructions, dma, image);
+    for (const auto mode : {hpu::compiler::OptimizationMode::optimized,
+                            hpu::compiler::OptimizationMode::no_opt}) {
+        hpu::compiler::CompileOptions options; options.optimization = mode;
+        const auto compiled = hpu::compiler::compile_resources(ir, instructions, dma, image, options);
+        const std::array<std::uint8_t, 4> policies{1, 1, 0, 1};
+        require(compiled.dma.size() == policies.size(), "cache-policy test lost a required transfer");
+        for (std::size_t i = 0; i < policies.size(); ++i) {
+            const auto& op = compiled.instructions[compiled.dma[i].instruction_index].instruction;
+            require(op.cp == policies[i], "native lowering changed a per-command cache policy");
+            if (op.mnemonic == hpu::Mnemonic::kDload)
+                require(op.type == (i == 0 ? 1 : 0), "logical payload type leaked into MOD encoding");
+        }
+        const auto actual = replay(compiled.instructions, compiled.dma, compiled.image);
+        require(allocation_words(actual, compiled.image, "before") == std::vector<std::uint32_t>(128, 6)
+                && allocation_words(actual, compiled.image, "after") == std::vector<std::uint32_t>(128, 6),
+                "cache hints changed object retention or arithmetic");
+    }
+    auto mismatched = source;
+    mismatched.operations[2].instruction.cp = 0;
+    require_throws([&] { r::bind_program(mismatched, instructions, dma, image); },
+                   "compatibility baseline ignored a mismatched cache hint");
+    const auto rendered = r::render_operator_ir(source);
+    require(rendered.find("mod=1 cp=1 bank_mask=32") != std::string::npos
+            && rendered.find("release=0 cp=0") != std::string::npos,
+            "operator IR omitted the independent MOD/REL and CP fields");
+    {
+        r::Recording seeds;
+        const auto seed_assembly = r::read(r::transform_table, hpu::DataType::twiddle_parameters);
+        const auto native = seeds.finish();
+        const auto wire = hpu::assemble_source(seed_assembly);
+        require(native.operations.front().instruction.type == 0
+                && native.operations.front().instruction.cp == 0
+                && native.operations.front().instruction.dma_flag == 32
+                && wire.front().instruction.type == 0
+                && wire.front().instruction.dma_flag == 32,
+                "twiddle logical type did not lower to ordinary MOD=0 with explicit Bank 5 mask");
+    }
+}
+
 void test_nested_recording()
 {
     namespace r = hpu::resource;
@@ -760,6 +829,7 @@ void test_fragment_ssa_renaming()
 int main()
 {
     try {
+        test_per_command_cache_policy();
         test_use_index();
         test_ssa_versions_and_ports();
         test_unbounded_operand_ids();

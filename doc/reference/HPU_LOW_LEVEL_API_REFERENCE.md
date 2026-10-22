@@ -25,8 +25,8 @@
 
 | 指令 | 类型 | 语义 |
 | --- | --- | --- |
-| `dload` | custom1 | 从 HPU_MEM 搬运到对象槽位；六位 mask=0x20 选择 Bank 5；TYPE2/3 在 mask=0 时也默认 Bank 5 |
-| `dstore` | custom1 | 对象槽位写回 HPU_MEM；REL=0 保留对象，REL=1 成功完成后释放，传输长度取 `OBJ.len` |
+| `dload` | custom1 | 从 HPU_MEM 搬运到对象槽位；MOD=1 为模表，MOD=0 为普通对象；mask=0x20 选择 Bank 5，CP 请求 LLC 读分配 |
+| `dstore` | custom1 | 对象槽位写回 HPU_MEM；REL=0 保留对象，REL=1 成功完成后释放，CP 请求 LLC 写分配，传输长度取 `OBJ.len` |
 | `padd` | custom0 | 对象级逐点模加 |
 | `psub` | custom0 | 对象级逐点模减 |
 | `pmul` | custom0 | 对象级逐点模乘（或 `pmul imm` 整数乘） |
@@ -36,6 +36,52 @@
 | `pmodld` | custom0 | 激活 small-bank 模上下文表项 |
 | `pfree` | custom0 | 释放对象槽位 |
 | `psync` | custom0 | 等待此前操作完成并通知 CPU；本项目生成器统一在程序末尾发出一次 |
+
+### 1.1 DMA 参数与可选 LLC 分配提示
+
+当前汇编必须显式给出全部参数：
+
+```asm
+dload  x10, x11, p40, 1, 0, 32  # MOD=1，CP=0，模表放 Bank 5
+dload  x10, x11, p63, 0, 1, 32  # MOD=0，CP=1，两条 line 的 stage 参数
+dload  x10, x11, p39, 0, 0, 0   # 普通多项式，默认普通 bank
+dstore x10, x11, p39, 1, 1      # 成功后释放，并请求 LLC 写分配
+```
+
+旧五参数 DLOAD、四参数 DSTORE 会被解析器拒绝。生成器的 C++ 数据角色
+`DataType::seg/poly/mod_ctx/twiddle_parameters` 仍可使用；其中只有 `mod_ctx`
+编码为 MOD=1，其他均为 MOD=0。`twiddle_parameters` 的默认 helper 会显式输出
+mask=0x20，原始指令本身没有 twiddle 专用装载类型。
+
+维护算子的代码可以选择 CP，默认不需要更改调用。以下片段生成读写资源操作；
+实际外存地址由调用者为 data port 绑定：
+
+```cpp
+#include "hpu/compiler/operator_resources.hpp"
+
+const auto parameter = hpu::resource::make_operand("stage_parameter");
+const auto output = hpu::resource::make_operand("output");
+// 参数复用较多时，可请求 LLC 读分配。它仍然是普通 MOD=0 对象。
+const auto parameter_load = hpu::resource::read(
+    parameter, hpu::DataType::twiddle_parameters,
+    hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
+// output 必须已由前面的计算定义；准备随后重载时可请求 LLC 写分配。
+const auto output_store = hpu::resource::publish(
+    output, 1, hpu::CachePolicy::allocate);
+```
+
+`hpu::dload` 与 `hpu::dstore` 的最后一个 C++ 参数也可传入同一枚举；省略时为
+`CachePolicy::no_allocate`（CP=0）。CP 与 SRAM bank mask、MOD、REL 独立，
+每条命令重新选择，不保存到对象表；顶层应用 `Evaluator` API 保持不变。
+
+| CP | 外部内存端 DLOAD ARCACHE | 外部内存端 DSTORE AWCACHE |
+| --- | --- | --- |
+| 0：`no_allocate` | 0x3 | 0x3 |
+| 1：`allocate` | 0x7 | 0xB |
+
+CP=0 仍可命中已有 LLC 行；CP=1 只请求分配，不保证驻留或命中。内部 SRAM 属性
+维持 0x3。功能软件模型不模拟缓存容量或时序；DSTORE 完成/B 响应也不代表 DDR
+已写回，因此 CP 的性能收益需要在目标平台上测量。CP 没有安全隔离或擦除语义。
 
 ---
 

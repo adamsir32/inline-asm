@@ -58,17 +58,17 @@ void arithmetic_and_dma()
     const auto b = image.add("right", right, AllocationKind::ciphertext);
     const auto output = image.reserve("output", 64, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\n"
+        "dload x10, x11, p4, 1, 0, 32\n"
         "pmodld 0\n"
-        "dload x10, x11, p0, 1, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
         "pmul p0, p0, 1\n"
-        "dload x10, x11, p1, 1, 0\n"
+        "dload x10, x11, p1, 0, 0, 0\n"
         "pmul p1, p1, 1\n"
         "padd p2, p0, p1\n"
         "psub p2, p2, p1\n"
         "pmac p2, p0, p1\n"
         "pmul p2, p2, 7\n"
-        "dstore x10, x11, p2, 0\n"
+        "dstore x10, x11, p2, 0, 0\n"
         "pfree p0\npfree p1\npfree p4\npsync\n");
     const std::vector<HpuMemSpan> spans{table.span, a.span, b.span, output.span};
     const auto result = hpu::model::execute_instructions(instructions, spans, image);
@@ -82,6 +82,21 @@ void arithmetic_and_dma()
     const std::vector<hpu::model::InstructionMemoryExpectation> expectations{{"output", output.span, expected}};
     require(hpu::model::compare_instruction_memory(result, expectations).verified,
             "encoded arithmetic differs from independent oracle");
+
+    // CP is command-local and independent of MOD/REL. Toggle the actual raw
+    // instruction bit on both DMA directions; payload and SRAM placement must
+    // be identical, without claiming that the model predicts LLC performance.
+    auto cache_hinted = instructions;
+    for (auto& item : cache_hinted)
+        if ((item.word & 0x7fU) == 0x2bU) item.word ^= 1U << 13U;
+    const auto hinted = hpu::model::execute_instructions(cache_hinted, spans, image);
+    require(hpu::model::compare_instruction_memory(hinted, expectations).verified
+                && hinted.words == result.words
+                && hinted.report.peak_regular_lines == result.report.peak_regular_lines
+                && hinted.report.peak_small_lines == result.report.peak_small_lines
+                && hinted.report.loaded_words == result.report.loaded_words
+                && hinted.report.stored_words == result.report.stored_words,
+            "CP changed functional execution, ownership or physical allocation");
 
     // Semantic metadata is not the executable: replacing it must not affect
     // decoding, lifetime validation, DMA binding, or numerical execution.
@@ -123,7 +138,7 @@ void arithmetic_and_dma()
     const auto release_result = hpu::model::execute_instructions(released_use, spans, image);
     require(release_result.report.completed(), "DSTORE REL=0 failed to retain its source");
     auto released = instructions;
-    released[10] = hpu::assemble_source("dstore x10, x11, p2, 1\n").front();
+    released[10] = hpu::assemble_source("dstore x10, x11, p2, 1, 1\n").front();
     released[11] = hpu::assemble_source("pmul p0, p2, 1\n").front();
     const auto released_result = hpu::model::execute_instructions(released, spans, image);
     require(!released_result.report.completed() && released_result.report.instruction_index == 11,
@@ -169,15 +184,15 @@ void supplied_stages(std::size_t degree)
     const auto data = image.add("input", input, AllocationKind::ciphertext);
     std::vector<HpuMemSpan> spans{table.span, data.span};
     std::ostringstream body;
-    body << "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\n";
+    body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n";
     for (std::size_t stage = 0; stage < forward_tables.size(); ++stage) {
         const auto twiddle = image.add("forward/" + std::to_string(stage), hpu::model::pack_stage_twiddles(forward_tables[stage], kModulus, degree), AllocationKind::twiddle);
         spans.push_back(twiddle.span);
-        body << "dload x10, x11, p1, 3, 0\npntt p0, p1, " << stage << ", 0, 0\npfree p1\n";
+        body << "dload x10, x11, p1, 0, 0, 32\npntt p0, p1, " << stage << ", 0, 0\npfree p1\n";
     }
     const auto output = image.reserve("output", degree, AllocationKind::output);
     spans.push_back(output.span);
-    body << "dstore x10, x11, p0, 1\npfree p4\npsync\n";
+    body << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     const auto instructions = hpu::assemble_source(body.str());
     const auto execution = hpu::model::execute_instructions(instructions, spans, image);
     require(execution.report.completed(), "supplied forward instruction chain failed");
@@ -218,17 +233,17 @@ void supplied_stages(std::size_t degree)
     const auto inverse_input = image.add("inverse/input", expected_forward, AllocationKind::ciphertext);
     std::vector<HpuMemSpan> inverse_spans{table.span, inverse_input.span};
     std::ostringstream inverse_body;
-    inverse_body << "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\n";
+    inverse_body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n";
     for (std::size_t stage = 0; stage < inverse_tables.stages.size(); ++stage) {
         const auto twiddle = image.add("inverse/" + std::to_string(stage), hpu::model::pack_stage_twiddles(inverse_tables.stages[stage], kModulus, degree), AllocationKind::twiddle);
         inverse_spans.push_back(twiddle.span);
-        inverse_body << "dload x10, x11, p1, 3, 0\npintt p0, p1, " << stage << ", 0, 0\npfree p1\n";
+        inverse_body << "dload x10, x11, p1, 0, 0, 32\npintt p0, p1, " << stage << ", 0, 0\npfree p1\n";
     }
     const auto post = image.add("inverse/post", inverse_tables.post_scale, AllocationKind::twiddle);
     inverse_spans.push_back(post.span);
     inverse_spans.push_back(output.span);
-    inverse_body << "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n"
-                 << "dstore x10, x11, p0, 1\npfree p4\npsync\n";
+    inverse_body << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+                 << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     hpu::model::InstructionExecutionOptions raw_options;
     raw_options.ntt_contract = InstructionNttContract::legacy_raw_stage;
     const auto inverse_execution = hpu::model::execute_instructions(
@@ -255,9 +270,9 @@ void pre_twist_is_pointwise()
     const auto pre = image.add("existing/pre_twist", twist, AllocationKind::twiddle);
     const auto output = image.reserve("output", degree, AllocationKind::output);
     const auto instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\n"
-        "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n"
-        "dstore x10, x11, p0, 1\npfree p4\npsync\n");
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+        "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n");
     const auto execution = hpu::model::execute_instructions(instructions, {table.span, data.span, pre.span, output.span}, image);
     require(hpu::model::compare_instruction_memory(execution, {{"output", output.span, expected}}).verified,
             "pointwise PMUL secretly reindexed the supplied pre_twist table");
@@ -291,16 +306,16 @@ void forward_twist_layout_contract()
         const auto pre = image.add("pre", twist, AllocationKind::twiddle);
         std::vector<HpuMemSpan> spans{table.span, input.span, pre.span};
         std::ostringstream body;
-        body << "dload x10, x11, p4, 2, 32\npmodld 0\n"
-             << "dload x10, x11, p0, 1, 0\ndload x10, x11, p1, 1, 0\n"
+        body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\n"
+             << "dload x10, x11, p0, 0, 0, 0\ndload x10, x11, p1, 0, 0, 0\n"
              << "pmul p0, p0, p1\npfree p1\n";
         for (std::size_t s = 0; s < stages.size(); ++s) {
             spans.push_back(image.add("stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(stages[s], q, degree), AllocationKind::twiddle).span);
-            body << "dload x10, x11, p1, 3, 0\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
+            body << "dload x10, x11, p1, 0, 0, 32\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
         }
         const auto output = image.reserve("output", degree, AllocationKind::output);
         spans.push_back(output.span);
-        body << "dstore x10, x11, p0, 1\npfree p4\npsync\n";
+        body << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
         hpu::model::InstructionExecutionOptions options;
         options.ntt_contract = contract;
         const auto result = hpu::model::execute_instructions(hpu::assemble_source(body.str()), spans, image, options);
@@ -360,16 +375,16 @@ void inverse_boundary_contract()
     const auto input = image.add("input", spectrum, AllocationKind::ciphertext);
     std::vector<HpuMemSpan> spans{moduli.span, input.span};
     std::ostringstream body;
-    body << "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\n";
+    body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n";
     for (std::size_t s = 0; s < tables.stages.size(); ++s) {
         spans.push_back(image.add("inverse/" + std::to_string(s), hpu::model::pack_stage_twiddles(tables.stages[s], q, degree), AllocationKind::twiddle).span);
-        body << "dload x10, x11, p1, 3, 0\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
+        body << "dload x10, x11, p1, 0, 0, 32\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
     const auto output = image.reserve("output", degree, AllocationKind::output);
     spans.push_back(output.span);
-    body << "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n"
-         << "dstore x10, x11, p0, 1\npfree p4\npsync\n";
+    body << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+         << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     const auto instructions = hpu::assemble_source(body.str());
     hpu::model::InstructionExecutionOptions options;
     options.ntt_contract = InstructionNttContract::legacy_raw_stage;
@@ -429,23 +444,23 @@ void natural_negacyclic_convolution(std::size_t degree)
     const auto output = image.reserve("square/output", degree, AllocationKind::output);
     std::vector<HpuMemSpan> spans{moduli.span, data.span, pre_factor.span};
     std::ostringstream body;
-    body << "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\n"
-         << "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n";
+    body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n"
+         << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n";
     for (std::size_t s = 0; s < forward.size(); ++s) {
         spans.push_back(image.add("ntt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(forward[s], q, degree), AllocationKind::twiddle).span);
-        body << "dload x10, x11, p1, 3, 0\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
+        body << "dload x10, x11, p1, 0, 0, 32\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(ntt_output.span);
     spans.push_back(ntt_output.span);
-    body << "dstore x10, x11, p0, 1\ndload x10, x11, p0, 1, 0\npmul p0, p0, p0\n";
+    body << "dstore x10, x11, p0, 1, 0\ndload x10, x11, p0, 0, 0, 0\npmul p0, p0, p0\n";
     for (std::size_t s = 0; s < inverse.stages.size(); ++s) {
         spans.push_back(image.add("intt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(inverse.stages[s], q, degree), AllocationKind::twiddle).span);
-        body << "dload x10, x11, p1, 3, 0\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
+        body << "dload x10, x11, p1, 0, 0, 32\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
     spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
     spans.push_back(output.span);
-    body << "dload x10, x11, p1, 1, 0\npmul p0, p0, p1\npfree p1\n"
-         << "dstore x10, x11, p0, 1\npfree p4\npsync\n";
+    body << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+         << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     const auto program = hpu::assemble_source(body.str());
     const auto execution = hpu::model::execute_instructions(program, spans, image);
     require(hpu::model::compare_instruction_memory(execution,
@@ -497,7 +512,7 @@ void stage_parameter_context_switches()
     std::vector<HpuMemSpan> spans{table.span};
     std::vector<hpu::model::InstructionMemoryExpectation> expected;
     std::ostringstream body;
-    body << "dload x10, x11, p4, 2, 32\n";
+    body << "dload x10, x11, p4, 1, 0, 32\n";
     for (std::size_t index = 0; index < cases.size(); ++index) {
         const auto& item = cases[index];
         std::uint32_t omega = 0;
@@ -525,10 +540,10 @@ void stage_parameter_context_switches()
         spans.insert(spans.end(), {data.span, parameters.span, output.span});
         expected.push_back({prefix, output.span,
             hpu::model::execute_ntt_stage(input, full, item.modulus, item.stage, item.inverse)});
-        body << "pmodld " << item.modulus_id << "\ndload x10, x11, p0, 1, 0\n"
-             << "dload x10, x11, p1, 3, 0\n"
+        body << "pmodld " << item.modulus_id << "\ndload x10, x11, p0, 0, 0, 0\n"
+             << "dload x10, x11, p1, 0, 0, 32\n"
              << (item.inverse ? "pintt" : "pntt") << " p0, p1, " << item.stage << ", 0, 0\n"
-             << "pfree p1\ndstore x10, x11, p0, 1\n";
+             << "pfree p1\ndstore x10, x11, p0, 1, 0\n";
     }
     body << "pfree p4\npsync\n";
     hpu::model::InstructionExecutionOptions options;
@@ -539,7 +554,7 @@ void stage_parameter_context_switches()
 
     // Even all-one inverse stage 0 requires a real, resident src2 object.
     const auto missing = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 32\npmodld 0\ndload x10, x11, p0, 1, 0\npintt p0, p1, 0, 0, 0\npsync\n");
+        "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\npintt p0, p1, 0, 0, 0\npsync\n");
     require(!hpu::model::execute_instructions(missing, {table.span, spans[1]}, image, options).report.completed(),
             "PINTT stage 0 bypassed its parameter object dependency");
 }
@@ -555,13 +570,13 @@ void packed_64_object_capacity()
         AllocationKind::twiddle);
     std::vector<HpuMemSpan> spans{table.span};
     std::ostringstream body;
-    body << "dload x10, x11, p63, 2, 32\npmodld 0\n";
+    body << "dload x10, x11, p63, 1, 0, 32\npmodld 0\n";
     for (unsigned id = 0; id < 40; ++id) {
-        body << "dload x10, x11, p" << id << ", 1, 0\n";
+        body << "dload x10, x11, p" << id << ", 0, 0, 0\n";
         spans.push_back(data.span);
     }
     for (unsigned id = 40; id < 54; ++id) {
-        body << "dload x10, x11, p" << id << ", 3, 0\n";
+        body << "dload x10, x11, p" << id << ", 0, 0, 32\n";
         spans.push_back(parameters.span);
     }
     const auto resident = hpu::model::execute_instructions(
@@ -578,6 +593,31 @@ void packed_64_object_capacity()
             "full packed banks executed an NTT without a separate result region");
 }
 
+void ordinary_twiddle_load_contract()
+{
+    HpuMemImage image(16);
+    const auto table = image.add("ordinary/moduli", modulus_record(kModulus),
+                                 AllocationKind::modulus_table);
+    const auto data = image.add("ordinary/data", std::vector<std::uint32_t>(128, 1),
+                                AllocationKind::ciphertext);
+    const auto fragment = image.add("ordinary/fragment", std::vector<std::uint32_t>(64, 1),
+                                    AllocationKind::twiddle);
+    const std::string loads =
+        "dload x10, x11, p63, 1, 1, 0\npmodld 0\n"
+        "dload x10, x11, p61, 0, 0, 0\n"
+        "dload x10, x11, p62, 0, 1, 32\n";
+    const std::vector<HpuMemSpan> spans{table.span, data.span, fragment.span};
+    const auto loaded = hpu::model::execute_instructions(
+        hpu::assemble_source(loads + "psync\n"), spans, image);
+    require(loaded.report.completed(),
+            "ordinary Bank5 load incorrectly enforced a removed TYPE3 length");
+    const auto consumed = hpu::model::execute_instructions(
+        hpu::assemble_source(loads + "pntt p61, p62, 0, 0, 0\npsync\n"), spans, image);
+    require(!consumed.report.completed()
+                && consumed.report.message.find("two-line") != std::string::npos,
+            "PNTT failed to validate ordinary parameter length at use");
+}
+
 void configured_modulus_capacity()
 {
     constexpr std::uint32_t q = 65537;
@@ -592,10 +632,10 @@ void configured_modulus_capacity()
     const auto data = image.add("expanded/input", input, AllocationKind::ciphertext);
     const auto output = image.reserve("expanded/output", 64, AllocationKind::output);
     const auto program = hpu::assemble_source(
-        "dload x10, x11, p63, 2, 0\npsync\npmodld 255\n"
-        "dload x10, x11, p62, 1, 1\npmul p62, p62, 1\n"
-        "dstore x10, x11, p62, 0\npmul p62, p62, 1\n"
-        "dstore x10, x11, p62, 1\npsync\n");
+        "dload x10, x11, p63, 1, 0, 0\npsync\npmodld 255\n"
+        "dload x10, x11, p62, 0, 0, 1\npmul p62, p62, 1\n"
+        "dstore x10, x11, p62, 0, 0\npmul p62, p62, 1\n"
+        "dstore x10, x11, p62, 1, 0\npsync\n");
     const std::vector<HpuMemSpan> spans{table.span, data.span, output.span, output.span};
     hpu::model::InstructionExecutionOptions options;
     options.mod_table_lines = 16;
@@ -622,6 +662,7 @@ int main()
         natural_negacyclic_convolution(256);
         stage_parameter_context_switches();
         packed_64_object_capacity();
+        ordinary_twiddle_load_contract();
         configured_modulus_capacity();
         std::cout << "Instruction execution tests passed\n";
         return 0;

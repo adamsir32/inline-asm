@@ -62,7 +62,7 @@ void check_small(const seal::SEALContext& context, seal::Evaluator& evaluator,
         psync_count += encoded.instruction.mnemonic == hpu::Mnemonic::kPsync;
         modulus_load_count += encoded.instruction.mnemonic == hpu::Mnemonic::kDload &&
                               encoded.instruction.obj_id == 4 &&
-                              encoded.instruction.type == 2;
+                              encoded.instruction.type == 1;
     }
     require(psync_count == 1 && modulus_load_count == 1 &&
                 package.instructions.back().instruction.mnemonic == hpu::Mnemonic::kPsync,

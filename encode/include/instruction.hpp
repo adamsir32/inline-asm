@@ -50,8 +50,11 @@ struct Instruction {
     int rs1 = -1;
     int rs2 = -1;
     std::uint8_t obj_id = 0;
+    // DMA MOD (DLOAD) or REL (DSTORE), encoded in bit 14.
     std::uint8_t type = 0;
-    // DLOAD bank mask (0 means TYPE-dependent default); DSTORE must be zero.
+    // Per-command LLC allocation hint, independent of MOD/REL and bank mask.
+    std::uint8_t cp = 0;
+    // DLOAD bank mask (0 means MOD-dependent default); DSTORE must be zero.
     std::uint8_t dma_flag = 0;
 };
 

@@ -82,8 +82,10 @@ private:
 // External data ports and value lifetime hints. The compiler owns the actual
 // DLOAD/DSTORE/PFREE and may retain a value, spill it, or reuse its DDR backing.
 std::string read(Operand object, hpu::DataType type,
-                 hpu::DloadFlag flag = hpu::DloadFlag::regular_bank);
-std::string publish(Operand object, int release = 1);
+                 hpu::DloadFlag flag = hpu::DloadFlag::regular_bank,
+                 hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string publish(Operand object, int release = 1,
+                    hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
 std::string discard(Operand object);
 std::string add(Operand destination, Operand left, Operand right);
 std::string subtract(Operand destination, Operand left, Operand right);

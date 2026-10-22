@@ -37,12 +37,12 @@ void validate_encoded_binding(
     const CkksDmaBinding& binding)
 {
     const bool load = encoded.direction == hpu::Mnemonic::kDload;
-    if (encoded.dma_index != binding.program_dma_index
+    if (encoded.cp != binding.cp || encoded.dma_index != binding.program_dma_index
         || encoded.object_id != binding.object_slot
         || load != (binding.direction == CkksDmaDirection::load)
         || (load
             && (encoded.type_or_release
-                    != static_cast<std::uint8_t>(binding.load_type)
+                    != hpu::dma_mod_bit(binding.load_type)
                 || encoded.flag
                     != static_cast<std::uint8_t>(binding.load_flag)))
         || (!load
@@ -59,7 +59,7 @@ std::string render_resolved_manifest(const CkksRuntimeProgram& program)
     output
         << "instruction_index,dma_index,operation_index,operation_id,"
            "operation_dma_index,direction,object_slot,type_or_release,flag,"
-           "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+           "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     for (const auto& dma : program.dma) {
         const auto& binding = dma.binding;
         const auto& instruction = program.instructions[dma.instruction_index];
@@ -73,7 +73,7 @@ std::string render_resolved_manifest(const CkksRuntimeProgram& program)
                << direction_name(binding.direction) << ','
                << binding.object_slot << ','
                << (binding.direction == CkksDmaDirection::load
-                    ? static_cast<int>(binding.load_type)
+                    ? hpu::dma_mod_bit(binding.load_type)
                     : binding.store_release)
                << ','
                << (binding.direction == CkksDmaDirection::load
@@ -82,7 +82,7 @@ std::string render_resolved_manifest(const CkksRuntimeProgram& program)
                << binding.span.line_offset << ','
                << binding.span.line_count << ','
                << hpu::format_word_hex(instruction.word) << ','
-               << csv_field(instruction.normalized_asm) << '\n';
+               << csv_field(instruction.normalized_asm) << ',' << unsigned(binding.cp) << '\n';
     }
     return output.str();
 }

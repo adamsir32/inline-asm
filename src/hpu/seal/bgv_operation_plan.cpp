@@ -129,14 +129,14 @@ public:
     void load(int slot, const std::string& id,
               hpu::DataType type = hpu::DataType::poly,
               hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
-    { bind(id, hpu::Mnemonic::kDload, slot, static_cast<std::uint8_t>(type),
-           static_cast<std::uint8_t>(flag)); }
+    { bind(id, hpu::Mnemonic::kDload, slot, hpu::dma_mod_bit(type),
+           hpu::dma_bank_mask(type, flag)); }
     void store(int slot, const std::string& id)
     { bind(id, hpu::Mnemonic::kDstore, slot, 1, 0); }
     template<class Binding>
     void replay(const Binding& binding, const std::string& id)
     { bind(id, binding.direction, binding.object_slot,
-           binding.type_or_release, binding.flag); }
+           binding.type_or_release, binding.flag, binding.cp); }
     std::vector<BgvKeySwitchDmaBinding> finish()
     {
         if (bindings_.size() != encoded_.size())
@@ -145,7 +145,7 @@ public:
     }
 private:
     void bind(const std::string& id, hpu::Mnemonic direction, int slot,
-              std::uint8_t type, std::uint8_t flag)
+              std::uint8_t type, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
     {
         const auto index = bindings_.size();
         if (index >= encoded_.size())
@@ -153,7 +153,7 @@ private:
         const auto& instruction = encoded_[index];
         const auto& allocation = image_.allocation(id);
         if (instruction.dma_index != index || instruction.direction != direction ||
-            instruction.object_id != slot || instruction.type_or_release != type ||
+            (cp && instruction.cp != *cp) || instruction.object_id != slot || instruction.type_or_release != type ||
             instruction.flag != flag ||
             (direction == hpu::Mnemonic::kDstore && allocation.read_only))
             throw std::logic_error("BGV DMA binding disagrees with instruction: " + id);
@@ -162,6 +162,7 @@ private:
         binding.operation_index = operation_index_;
         binding.operation_id = operation_id_;
         binding.operation_dma_index = index;
+        binding.cp = instruction.cp;
         bindings_.push_back(std::move(binding));
     }
     const Image& image_;

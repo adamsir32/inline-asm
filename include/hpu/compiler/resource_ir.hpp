@@ -69,8 +69,10 @@ struct VirtualBuffer {
 
 struct VirtualObject {
     std::uint64_t line_count = 0;
+    // MOD only: 0 ordinary object, 1 fixed Bank 5 modulus table.
     std::uint8_t type = 0;
     std::uint8_t dma_flag = 0;
+    // CP belongs to each VirtualInstruction, never to resident storage.
 };
 
 struct VirtualInstruction {

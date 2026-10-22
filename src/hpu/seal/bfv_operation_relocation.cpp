@@ -23,49 +23,23 @@ struct DmaInstruction {
     hpu::DataType load_type = hpu::DataType::poly;
     hpu::DloadFlag load_flag = hpu::DloadFlag::regular_bank;
     int store_release = 0;
+    std::uint8_t cp = 0;
 };
 
 std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
 {
-    static const std::regex pattern(
-        "\\\"d(load|store) x10, x11, p([0-9]+), ([0-9]+)(?:, ([0-9]+))?");
     std::vector<DmaInstruction> result;
-    for (std::sregex_iterator it(body.begin(), body.end(), pattern), end; it != end; ++it) {
+    for (const auto& encoded : hpu::collect_dma_relocations(hpu::assemble_source(body))) {
         DmaInstruction instruction;
-        instruction.direction =
-            (*it)[1].str() == "load" ? BfvDmaDirection::load : BfvDmaDirection::store;
-        instruction.object_slot = std::stoi((*it)[2].str());
-        const int operand = std::stoi((*it)[3].str());
-        if (instruction.direction == BfvDmaDirection::load) {
-            if (!(*it)[4].matched || operand < static_cast<int>(hpu::DataType::seg) ||
-                operand > static_cast<int>(hpu::DataType::twiddle_parameters)) {
-                throw std::logic_error("generated BFV dload has an invalid operand");
-            }
-            instruction.load_type = static_cast<hpu::DataType>(operand);
-            const int flag = std::stoi((*it)[4].str());
-            if (flag < static_cast<int>(hpu::DloadFlag::regular_bank) ||
-                flag > 63) {
-                throw std::logic_error("generated BFV dload has an invalid bank flag");
-            }
-            instruction.load_flag = static_cast<hpu::DloadFlag>(flag);
-        } else {
-            if ((*it)[4].matched) {
-                throw std::logic_error("generated BFV dstore has too many operands");
-            }
-            instruction.store_release = operand;
-        }
+        instruction.direction = encoded.direction == hpu::Mnemonic::kDload
+            ? BfvDmaDirection::load : BfvDmaDirection::store;
+        instruction.object_slot = encoded.object_id;
+        instruction.load_type = encoded.type_or_release == 1
+            ? hpu::DataType::mod_ctx : hpu::DataType::poly;
+        instruction.load_flag = static_cast<hpu::DloadFlag>(encoded.flag);
+        instruction.store_release = encoded.type_or_release;
+        instruction.cp = encoded.cp;
         result.push_back(instruction);
-    }
-    std::size_t dma_token_count = 0;
-    for (const char* token : {"\"dload ", "\"dstore "}) {
-        std::size_t position = 0;
-        while ((position = body.find(token, position)) != std::string::npos) {
-            ++dma_token_count;
-            position += std::char_traits<char>::length(token);
-        }
-    }
-    if (dma_token_count != result.size()) {
-        throw std::logic_error("generated BFV DMA instruction does not use the frozen x10/x11 ABI");
     }
     return result;
 }
@@ -82,9 +56,10 @@ std::vector<DmaInstruction> declared_dma_instructions(
         dma.direction = port.load ? BfvDmaDirection::load : BfvDmaDirection::store;
         const auto id = port.load ? node.outputs.at(0) : node.inputs.at(0);
         dma.object_slot = program->values.at(id).variable.compatibility_slot;
-        dma.load_type = static_cast<hpu::DataType>(node.instruction.type);
+        dma.load_type = node.instruction.type == 1 ? hpu::DataType::mod_ctx : hpu::DataType::poly;
         dma.load_flag = static_cast<hpu::DloadFlag>(node.instruction.dma_flag);
         dma.store_release = node.instruction.type;
+        dma.cp = node.instruction.cp;
         result.push_back(dma);
     }
     const auto encoded = hpu::collect_dma_relocations(hpu::assemble_source(compatibility_body));
@@ -92,9 +67,9 @@ std::vector<DmaInstruction> declared_dma_instructions(
     for (std::size_t i = 0; i < encoded.size(); ++i) {
         const auto& actual = encoded[i];
         const auto& expected = result[i];
-        if (actual.object_id != expected.object_slot ||
+        if (actual.cp != expected.cp || actual.object_id != expected.object_slot ||
             actual.direction != (expected.direction == BfvDmaDirection::load ? hpu::Mnemonic::kDload : hpu::Mnemonic::kDstore) ||
-            actual.type_or_release != (expected.direction == BfvDmaDirection::load ? static_cast<int>(expected.load_type) : expected.store_release) ||
+            actual.type_or_release != (expected.direction == BfvDmaDirection::load ? hpu::dma_mod_bit(expected.load_type) : expected.store_release) ||
             (expected.direction == BfvDmaDirection::load && actual.flag != static_cast<int>(expected.load_flag)))
             throw std::invalid_argument("native DMA declaration differs from compatibility instruction");
     }
@@ -103,7 +78,7 @@ std::vector<DmaInstruction> declared_dma_instructions(
 
 bool same_instruction(const DmaInstruction& left, const DmaInstruction& right)
 {
-    return left.direction == right.direction && left.object_slot == right.object_slot &&
+    return left.cp == right.cp && left.direction == right.direction && left.object_slot == right.object_slot &&
            (left.direction == BfvDmaDirection::load
                 ? left.load_type == right.load_type && left.load_flag == right.load_flag
                 : left.store_release == right.store_release);
@@ -136,7 +111,7 @@ public:
         const bool stage = allocation_id.find("/stage") != std::string::npos;
         append(BfvDmaDirection::load, slot, allocation_id,
                stage ? hpu::DataType::twiddle_parameters : hpu::DataType::poly,
-               hpu::DloadFlag::regular_bank, 0, expected_words);
+               stage ? hpu::DloadFlag::small_bank : hpu::DloadFlag::regular_bank, 0, expected_words);
     }
 
     void store(int slot, const std::string& allocation_id)
@@ -166,7 +141,7 @@ private:
         const auto& instruction = instructions_[cursor_];
         if (instruction.direction != direction || instruction.object_slot != slot ||
             (direction == BfvDmaDirection::load &&
-             (instruction.load_type != load_type || instruction.load_flag != load_flag)) ||
+             (hpu::dma_mod_bit(instruction.load_type) != hpu::dma_mod_bit(load_type) || instruction.load_flag != load_flag)) ||
             (direction == BfvDmaDirection::store && instruction.store_release != store_release)) {
             throw std::logic_error("BFV relocation recipe disagrees with generated DMA ABI for " +
                                    operation_.operation.id);
@@ -190,6 +165,7 @@ private:
         binding.direction = direction;
         binding.object_slot = slot;
         binding.load_type = instruction.load_type;
+        binding.cp = instruction.cp;
         binding.load_flag = instruction.load_flag;
         binding.store_release = instruction.store_release;
         binding.allocation_id = allocation.id;
@@ -841,8 +817,9 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
     BfvRelocationSchedule result;
     result.expected_dma_count = program_instructions.size();
     if (global_dma_count == 1) {
-        const DmaInstruction expected{BfvDmaDirection::load, kModulusTableObject,
+        DmaInstruction expected{BfvDmaDirection::load, kModulusTableObject,
                                       hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank, 0};
+        expected.cp = program_instructions.front().cp;
         if (!same_instruction(program_instructions.front(), expected)) {
             throw std::invalid_argument("lowered BFV global DMA is not the modulus-table load");
         }
@@ -859,6 +836,7 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
         binding.direction = BfvDmaDirection::load;
         binding.object_slot = kModulusTableObject;
         binding.load_type = hpu::DataType::mod_ctx;
+        binding.cp = program_instructions.front().cp;
         binding.load_flag = hpu::DloadFlag::small_bank;
         binding.allocation_id = allocation.id;
         binding.span = allocation.span;

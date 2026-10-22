@@ -46,6 +46,11 @@ HPU `Evaluator` 的调用记录图，`compile()` 执行 host 验证与编译；�
 执行由 IT/Nexus-AM 接入。C++ 中的普通循环和条件判断在构图时执行，当前生成
 静态图与静态指令序列。
 
+当前底层使用 [HPU ISA v1.2](HPU_PROGRAMMING_MANUAL.md)。本轮 DMA MOD/REL/CP
+更新不改变本手册的顶层 API；默认 CP=0。已有应用重新编译并导出完整包即可，
+旧 `.inst32/.cmd26` 与 ELF 不能复用。CP 的显式选择属于底层算子接口，见
+[DMA 参数与 LLC 提示](HPU_LOW_LEVEL_API_REFERENCE.md#11-dma-参数与可选-llc-分配提示)。
+
 ## 2. 完整示例：CKKS 计算 x²+1
 
 将下面代码保存为 `examples/my_ckks_application.cpp`。程序使用 N=128 的功能

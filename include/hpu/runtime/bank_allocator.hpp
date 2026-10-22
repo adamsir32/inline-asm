@@ -8,7 +8,7 @@
 
 namespace hpu::runtime {
 
-// The v1.1 target has 64 logical objects and six independently allocated banks.
+// The v1.2 target has 64 logical objects and six independently allocated banks.
 // Copying this value type gives the compiler an atomic speculative layout.
 struct BankAllocatorOptions {
     std::size_t regular_bank_count = 5;
@@ -23,7 +23,8 @@ struct BankAllocation {
     std::size_t base_line = 0;
     std::size_t capacity_lines = 0;
     std::size_t actual_lines = 0;
-    std::uint8_t type = 1;
+    // DMA MOD bit: 0 ordinary object, 1 fixed modulus table.
+    std::uint8_t type = 0;
 };
 
 struct BankAllocatorStats {
@@ -46,10 +47,11 @@ class BankAllocator {
 public:
     explicit BankAllocator(BankAllocatorOptions options = {});
 
-    // Mask zero selects banks 0..4 for TYPE 0/1 and Bank 5 for TYPE 2/3.
+    // Mask zero selects banks 0..4 for MOD=0 and Bank 5 for MOD=1.
+    // CP is a per-command cache hint and never affects physical allocation.
     // A mask constrains this load only. Failed replacement preserves the object.
     BankAllocation load(std::uint8_t id, std::size_t lines,
-                        std::uint8_t type, std::uint8_t bank_mask = 0);
+                        std::uint8_t mod, std::uint8_t bank_mask = 0);
     // No rhs means an immediate PMUL/PMAC operand. Matching ordinary
     // destinations reuse their region; PMAC reserves a separate result first.
     BankAllocation arithmetic(std::uint8_t dst, std::uint8_t lhs,

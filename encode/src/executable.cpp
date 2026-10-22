@@ -62,16 +62,16 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
                 throw std::invalid_argument("fixed executable DMA span is zero or outside the memory window");
             if (op.mnemonic == Mnemonic::kDload) {
                 const auto allowed = op.dma_flag != 0 ? op.dma_flag
-                    : (op.type >= 2 ? 0x20 : 0x1f);
+                    : (op.type == 1 ? 0x20 : 0x1f);
                 const auto small_limit = kSmallBankLineCount - ((mod_table_lines + 1) & ~1U);
-                const auto limit = op.type == 2 ? mod_table_lines
+                const auto limit = op.type == 1 ? mod_table_lines
                     : ((allowed & 0x1f) != 0 ? 1024 : small_limit);
-                if (span.line_count > limit || (op.type == 3 && span.line_count != 2))
-                    throw std::invalid_argument("fixed executable DMA exceeds its TYPE/bank capacity");
+                if (span.line_count > limit)
+                    throw std::invalid_argument("fixed executable DMA exceeds its MOD/bank capacity");
                 if (modulus_table_object == op.obj_id) modulus_table_object = -1;
                 lengths.at(op.obj_id) = span.line_count;
                 types.at(op.obj_id) = op.type;
-                if (op.type == 2) modulus_table_object = op.obj_id;
+                if (op.type == 1) modulus_table_object = op.obj_id;
             } else {
                 if (span.line_count != lengths.at(op.obj_id))
                     throw std::invalid_argument("fixed executable DSTORE length differs from its object");
@@ -89,7 +89,7 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
                     (op.mnemonic == Mnemonic::kPmac && lengths.at(op.pdst) != length))
                     throw std::invalid_argument("fixed executable arithmetic operand lengths differ");
                 lengths.at(op.pdst) = length;
-                types.at(op.pdst) = 1;
+                types.at(op.pdst) = 0;
                 break;
             }
             case Mnemonic::kPntt: case Mnemonic::kPintt: {
@@ -100,7 +100,7 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
                 if (data_lines < kMinNttPolynomialLines ||
                     data_lines > kMaxNttPolynomialLines ||
                     (data_lines & (data_lines - 1)) != 0 ||
-                    !valid_twiddle || types.at(op.pdst) == 2 || types.at(op.psrc1) == 2 ||
+                    !valid_twiddle || types.at(op.pdst) == 1 || types.at(op.psrc1) == 1 ||
                     (std::uint64_t{1} << op.idx0) >= data_lines * 64)
                     throw std::invalid_argument(
                         "fixed executable transform requires a power-of-two polynomial "
@@ -159,6 +159,7 @@ std::vector<DmaRelocation> collect_dma_relocations(
             instruction.obj_id,
             instruction.type,
             instruction.dma_flag,
+            instruction.cp,
         });
     }
     return relocations;
@@ -181,12 +182,12 @@ void validate_executable_program(
         const auto& instruction = encoded[index].instruction;
         switch (instruction.mnemonic) {
         case Mnemonic::kDload:
-            if (instruction.type == 2 && modulus_table_object >= 0 &&
+            if (instruction.type == 1 && modulus_table_object >= 0 &&
                 modulus_table_object != instruction.obj_id)
                 throw std::runtime_error("only one modulus-table object may be live");
             if (modulus_table_object == instruction.obj_id) modulus_table_object = -1;
             live.at(instruction.obj_id) = true;
-            if (instruction.type == 2) modulus_table_object = instruction.obj_id;
+            if (instruction.type == 1) modulus_table_object = instruction.obj_id;
             break;
         case Mnemonic::kDstore:
             require_live(instruction.obj_id, index, "dstore source");
@@ -310,20 +311,17 @@ std::string render_executable_source(
         if (instruction_format(instruction.mnemonic) == Format::kDMA) {
             if (instruction.mnemonic == Mnemonic::kDload) {
                 const auto allowed = instruction.dma_flag != 0 ? instruction.dma_flag
-                    : (instruction.type >= 2 ? 0x20 : 0x1f);
-                const auto limit = instruction.type == 2 ? mod_table_lines
+                    : (instruction.type == 1 ? 0x20 : 0x1f);
+                const auto limit = instruction.type == 1 ? mod_table_lines
                     : ((allowed & 0x1f) != 0 ? 1024
                        : kSmallBankLineCount - ((mod_table_lines + 1) & ~1U));
                 output << "    if (spans[" << dma_index
                        << "].line_count > " << limit << ") return -3;\n";
-                if (instruction.type == 3)
-                    output << "    if (spans[" << dma_index
-                           << "].line_count != 2) return -3;\n";
             }
             if (instruction.mnemonic == Mnemonic::kDload) {
                 object_types.at(instruction.obj_id) = instruction.type;
                 if (modulus_table_object == instruction.obj_id) modulus_table_object = -1;
-                if (instruction.type == 2) modulus_table_object = instruction.obj_id;
+                if (instruction.type == 1) modulus_table_object = instruction.obj_id;
                 output << "    hpu_obj_len[" << static_cast<unsigned>(instruction.obj_id)
                        << "] = spans[" << dma_index << "].line_count;\n";
             } else {
@@ -364,7 +362,7 @@ std::string render_executable_source(
                     output << " || hpu_obj_len[" << instruction.pdst
                            << "] != hpu_obj_len[" << instruction.psrc1 << "]";
                 output << ") return -6;\n";
-                object_types.at(instruction.pdst) = 1;
+                object_types.at(instruction.pdst) = 0;
                 output << "    hpu_obj_len["
                        << static_cast<unsigned>(instruction.pdst)
                        << "] = hpu_obj_len["
@@ -377,7 +375,7 @@ std::string render_executable_source(
                        << instruction.psrc1 << "] != 2 || UINT32_C("
                        << (std::uint32_t{1} << instruction.idx0) << ") >= " << data
                        << " * 64) return -7;\n";
-                if (object_types.at(instruction.pdst) == 2 || object_types.at(instruction.psrc1) == 2)
+                if (object_types.at(instruction.pdst) == 1 || object_types.at(instruction.psrc1) == 1)
                     output << "    return -7; /* modulus table is not transform data/parameters */\n";
             } else if (instruction.mnemonic == Mnemonic::kPmodld) {
                 output << "    if (UINT32_C(" << (static_cast<unsigned>(instruction.mod_id) >> 4)
@@ -454,7 +452,7 @@ std::string render_dma_manifest(
     const auto relocations = collect_dma_relocations(encoded);
     std::ostringstream output;
     output << "instruction_index,dma_index,direction,obj_id,type_or_release,flag,"
-              "rs1,rs2,word_hex,normalized_asm\n";
+              "rs1,rs2,word_hex,normalized_asm,cp\n";
     for (const auto& relocation : relocations) {
         const auto& item = encoded[relocation.instruction_index];
         output << relocation.instruction_index << ',' << relocation.dma_index << ','
@@ -462,7 +460,8 @@ std::string render_dma_manifest(
                << static_cast<unsigned>(relocation.object_id) << ','
                << static_cast<unsigned>(relocation.type_or_release) << ','
                << static_cast<unsigned>(relocation.flag) << ",x10,x11,"
-               << hex_word(item.word) << ',' << csv_field(item.normalized_asm) << '\n';
+               << hex_word(item.word) << ',' << csv_field(item.normalized_asm) << ','
+               << static_cast<unsigned>(relocation.cp) << '\n';
     }
     return output.str();
 }

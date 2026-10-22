@@ -1,5 +1,59 @@
 # HPU 64 对象：集成与编译器交接
 
+更新日期：2026-10-22。当前规范为 [HPU 编程手册 v1.2](../reference/HPU_PROGRAMMING_MANUAL.md)，
+对应提供方 `Nsnhuv_5.0_integra/main` 的单套 `hpu/rtl/`。Chisel 重新生成、核侧接入
+与 SoC 验收由集成同事完成；本文不将历史目录结构或局部 PASS 记录当作新版本集成结果。
+
+## 1. 当前编译器与包接口
+
+- 64 个逻辑对象 p0…p63；计算 opcode 0x5B，DMA 0x2B。命令统一为
+  `cmd26={kind,inst[31:7]}`，custom1 不重排；rs1/rs2 保持 `[19:15]`/`[24:20]`。
+- v1.2 DLOAD 为 `dload rs1,rs2,pdst,mod,cp,mask`，DSTORE 为
+  `dstore rs1,rs2,psrc,rel,cp`。MOD/REL 在 bit14，CP 在 bit13；旧 TYPE3
+  会被解释为模表 CP=1，必须重新生成旧机器码，不能仅修改包标识。
+- MOD=1 为固定模表，mask 只接受 0/0x20。MOD=0 为普通对象，mask=0 默认
+  Bank 0…4；stage 参数以 MOD=0、显式 mask=0x20 放入 Bank 5，使用时检查两条 line。
+- CP=0 默认仍可命中 LLC；CP=1 请求读/写分配，分别对应外部 ARCACHE=0x7、
+  AWCACHE=0xB；CP=0 二者为 0x3。内部 SRAM 属性不变。CP 不保存到对象表，
+  不保证驻留，也不代替一致性操作或 DDR flush。
+- Bank 分配算法沿用 v1.1：普通对象按 128-line 单元向上取二次幂并对齐；Bank 5
+  默认 4-line 模表与 14 个两条 line 参数槽；NTT/PMAC 异址结果完成后才回收旧区间。
+  mask 只约束当前 DLOAD，没有 PPLACE。完整算法见 [分配指南](../reference/HPU_BANK_ALLOCATION_GUIDE.md)。
+- DSTORE REL=0 保留对象，REL=1 成功完成后释放；PFREE 显式释放；PSYNC 等待，
+  不释放对象。fault 后不得继续使用失败结果。
+- 当前应用包声明 `instruction_isa=hpu-objects64-v1.2`、`dma_format=mod_rel_cp`、
+  `stage_parameter_mod=0`、`stage_parameter_bank_mask=32`、`default_cp=0`；
+  resolved DMA CSV 为 15 列，最后一列为 `cp`。顶层 Evaluator API 保持不变。
+
+## 2. CPU/SoC 接入验收
+
+以下为接入要求，不表示外部工程已完成或未完成某项修改：
+
+1. 以提供方 v1.2 的单套 `hpu/rtl/` 为实际输入，确认 Chisel 配置、生成 RTL、
+   filelist 与目标构建一致。不要继续按历史 `RTL/latest/`/`hpu/rtl/` 双份文件假设接入。
+2. 核侧识别 0x5B/0x2B；custom1 固定读取两个完整 GPR 操作数，不将 mask 的
+   `[11:7]` 当作 GPR rd。命令与 offset/count sideband 配对，背压时保持程序顺序。
+3. 对象、完成事件、fault、CDC 与 CSR 通路均保留六位对象号。HPU 本地
+   FAULT_STATUS 对象号为 `[9:4]`、VALID0、IS_LOAD1、W1C0；SoC 外层布局
+   应核对实际实现。历史提出的 fault-code 位段迁移建议不是已确认的新 ABI。
+4. 覆盖 MOD/REL 与 CP 的全部组合，确认 DMA 各分块沿用本条锁存的 CP，外部
+   AXI 属性匹配手册。不得借用 rs2 高位传 CP，内部 SRAM 属性维持 0x3。
+5. 用重新生成的 v1.2 ELF/指令/镜像验收高位对象号、参数长度、bank 容量、失败
+   replacement 的原子性、REL 保留/释放、NTT/PMAC 新旧区间共存与数学结果。
+6. 保存实际 RTL commit、工具链、指令/DMA monitor、fault/status、golden 比对
+   及必要波形。软件模型通过不代表真实 SRAM、DMA/PE、LLC 或 CPU IT 通过。
+
+具体接收字段、包校验与签字项见 [IT 交接清单](IT_HANDOFF_CHECKLIST.md)。
+
+## 3. 历史记录：2026-10-21 交接稿
+
+下文保留上一版提供方交接与局部测试证据，其中 TYPE、目录范围和工具状态仅描述
+当时的版本。当前编码与集成入口以本文前两节及 v1.2 手册为准；历史局部 PASS
+不作为 v1.2 的 CP 属性、CPU/SoC 或真实数学运算验收证据。
+
+<details>
+<summary>展开上一版交接记录</summary>
+
 > 同步说明：本项目以 2026-10-21 v1.1 手册与分配指南为准，已纠正原交接稿中的 PPLACE 和持久 mask 两处过时描述。下文 RTL 测试记录是提供方的历史记录，不代表本项目或 CPU/SoC 集成已通过。
 日期：2026-10-21。按用户要求，只修改 `rtl/cpu/SCPU_RTL/RTL/hpu/rtl/` 设计。未修改 CPU、SoC、`RTL/latest/`、全系统 filelist 或外部编译器/Spike。
 
@@ -60,3 +114,5 @@ bash ver/it/core/Difftest/tests/objects64/run.sh
 PASS：`HPU_OBJECTS64_PASS normal=40 seeds=14 high_id=63 faults=3`。这不等于真实 DMA REL、NTT 数学结果、真实 SRAM 仲裁或 CPU IT 已通过；后续需在集成目录同步后完成这些验证。
 
 PE 控制/生成器/真实算术 RTL 的 Verilator 语法与展开检查通过。HPU top 的结构检查在将两个 foundry SRAM 宏替换为临时接口黑盒后通过；真实宏行为模型含 Verilator 不支持的语法，未完成真实 SRAM 展开/仿真。这些检查不替代 VCS。
+
+</details>

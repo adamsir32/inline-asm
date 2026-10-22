@@ -35,7 +35,7 @@ void require_common_shape(
     if (count(program, arithmetic) != static_cast<std::size_t>(arithmetic_count)) {
         throw std::runtime_error("unexpected pointwise arithmetic instruction count");
     }
-    if (count(program, "dload x10, x11, p4, 2, 32") != 1
+    if (count(program, "dload x10, x11, p4, 1, 0, 32") != 1
         || count(program, "pfree p4") != 1
         || count(program, "psync") != 1) {
         throw std::runtime_error("modulus-table or terminal synchronization lifecycle failed");
@@ -102,7 +102,7 @@ int main()
                 num_q, false, false),
         };
         for (const auto& nested : nested_programs) {
-            if (nested.find("dload x10, x11, p4, 2, 32") != std::string::npos
+            if (nested.find("dload x10, x11, p4, 1, 0, 32") != std::string::npos
                 || nested.find("pfree p4") != std::string::npos
                 || nested.find("psync") != std::string::npos) {
                 throw std::runtime_error(

@@ -346,11 +346,14 @@ std::string render_abi_json()
         "{\n"
         "  \"schema\": \"hpu-dma-abi\",\n"
         "  \"schema_version\": 1,\n"
-        "  \"instruction_isa\": \"hpu-objects64-v1.1\",\n"
+        "  \"instruction_isa\": \"hpu-objects64-v1.2\",\n"
         "  \"object_slots\": 64,\n"
         "  \"allocation_granule_lines\": 128,\n"
         "  \"mod_table_lines\": 4,\n"
-        "  \"stage_parameter_load_type\": 3,\n"
+        "  \"stage_parameter_mod\": 0,\n"
+        "  \"stage_parameter_bank_mask\": 32,\n"
+        "  \"default_cp\": 0,\n"
+        "  \"dma_format\": \"mod_rel_cp\",\n"
         "  \"dload_mask_scope\": \"load_only\",\n"
         "  \"dstore_rel0_retains\": true,\n"
         "  \"rs1\": \"x10\",\n"
@@ -1343,10 +1346,10 @@ std::vector<std::string> split_resolved_dma_csv(
         if (position == line.size()) break;
         ++position;
     }
-    if (fields.size() != 14) {
+    if (fields.size() != 15) {
         throw std::runtime_error(
             "application package DMA manifest '" + path.string()
-            + "' row must have exactly 14 fields");
+            + "' row must have exactly 15 fields");
     }
     return fields;
 }
@@ -1362,7 +1365,7 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
     static constexpr const char* kHeader =
         "instruction_index,dma_index,operation_index,operation_id,"
         "operation_dma_index,direction,object_slot,type_or_release,flag,"
-        "allocation_id,line_offset,line_count,word_hex,normalized_asm";
+        "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp";
     const auto relocations = hpu::collect_dma_relocations(instructions);
     std::istringstream input(contents);
     input.imbue(std::locale::classic());
@@ -1398,6 +1401,7 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
             || number(6, "object_slot") != relocation.object_id
             || number(7, "type_or_release") != relocation.type_or_release
             || number(8, "flag") != relocation.flag
+            || number(14, "cp") != relocation.cp
             || fields[12] != hpu::format_word_hex(instruction.word)
             || fields[13] != instruction.normalized_asm) {
             throw std::runtime_error(
@@ -1615,16 +1619,19 @@ void validate_physical_artifacts(const std::filesystem::path& root)
     const auto target_abi_path = root / "memory/abi.json";
     const auto target_abi = read_file(target_abi_path);
     if (extract_json_string(target_abi, "instruction_isa", target_abi_path, false)
-            != "hpu-objects64-v1.1"
+            != "hpu-objects64-v1.2"
         || extract_json_u64(target_abi, "object_slots", target_abi_path) != 64
         || extract_json_u64(target_abi, "allocation_granule_lines", target_abi_path) != 128
         || extract_json_u64(target_abi, "mod_table_lines", target_abi_path) != 4
-        || extract_json_u64(target_abi, "stage_parameter_load_type", target_abi_path) != 3
+        || extract_json_u64(target_abi, "stage_parameter_mod", target_abi_path) != 0
+        || extract_json_u64(target_abi, "stage_parameter_bank_mask", target_abi_path) != 32
+        || extract_json_u64(target_abi, "default_cp", target_abi_path) != 0
+        || extract_json_string(target_abi, "dma_format", target_abi_path, false) != "mod_rel_cp"
         || extract_json_string(target_abi, "dload_mask_scope", target_abi_path, false) != "load_only"
         || !extract_json_bool(target_abi, "dstore_rel0_retains", target_abi_path)) {
         throw std::runtime_error(
             "application package targets an incompatible instruction ISA or bank configuration; "
-            "regenerate for hpu-objects64-v1.1 in a new output directory");
+            "regenerate for hpu-objects64-v1.2 in a new output directory");
     }
     const std::string asm_path = extract_json_string(
         descriptor, "program_asm", descriptor_path, true);
