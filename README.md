@@ -1,450 +1,134 @@
-# HPU Inline Assembly Codegen
+# HPU FHE 图编译器
 
-本项目用于为全同态加密在自研 HPU（Homomorphic Processing Unit）硬件上，提供 C++ 内联汇编（Inline Assembly）的生成器。项目基于 HPU 的 6-bit 逻辑对象、确定性 bank 分配和流水线执行语义进行抽象，支持从底层通用计算直至高层复杂 FHE 算子的自动代码生成，并可将生成后的 ASM 继续转译为 32 位指令编码文本。
+本项目提供 CKKS、BFV、BGV 共用的 SEAL 风格 C++ 前端，将应用计算图编译为 HPU
+指令、DMA 清单、初始数据镜像及目标侧 C 入口。Nexus-AM 或目标工具链继续负责把
+C 入口与平台代码编译成可执行二进制，IT 负责 RTL/板端执行和结果读回。
 
-应用开发可使用三个方案共用的 `ApplicationBuilder` / `Evaluator` 前端，以 SEAL 风格接口构图并自动准备资源，快速运行见 [Evaluator 前端入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)，完整程序、接口约束和自定义用例构建见 [HPU 应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md)。整体分层、编译流程、runtime 和资源管理见 [HPU 项目架构](doc/architecture/HPU_ARCHITECTURE.md)。公共资源编译器支持 workspace 复用、对象槽位与 bank 调度，以及独立的最终指令 host 验证。新应用统一自然系数边界和自然索引的 pre/post 表，默认严格编译要求 SEAL、算子软件执行器和最终指令回放通过。三方案复合前端示例已在 N=128 和 N=65536 通过严格软件验证；实际 RTL/HPU 验收单独记录。
+程序员使用 `ApplicationBuilder`、`Evaluator` 和密文句柄描述计算。编译器通过
+SSA 识别数据复用，安排片上对象和 bank，自动生成加载、释放、写回及 spill/reload。
+顶层 API 不要求程序员填写物理对象号或决定释放时机。
 
-当前目标使用 K=8 的 stage 内在线 twiddle：每条 PNTT/PINTT 加载固定 512 B 参数，硬件生成该 stage 的因子；显式 pre/post PMUL 向量仍保持原长度。应用前端保持不变；当前采用 64 对象 v1.2 编码，stage 参数以 MOD=0、显式 mask=0x20 放入 Bank 5。应用交付编译仅为 twiddle DLOAD 设置 CP=1，覆盖 stage 参数、pre/post 向量和编译器重载；其他 DMA 为 CP=0，NoOpt 同样执行。旧机器码与完整 stage 表镜像均需重新生成。硬件格式及集成要求见 [HPU 编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)。
+## 1. 从这里开始
 
-## 1. 项目结构
+| 任务 | 文档 |
+| --- | --- |
+| 编写应用和 ST 用例 | [Evaluator 入门](doc/getting-started/HPU_EVALUATOR_FRONTEND.md)、[应用编程手册](doc/reference/HPU_SEAL_API_REFERENCE.md) |
+| 理解 IR、调度、内存和 runtime | [项目架构](doc/architecture/HPU_ARCHITECTURE.md) |
+| 消费数据、指令和 golden | [应用包 V1](doc/delivery/HPU_APPLICATION_PACKAGE_V1.md)、[IT 交接清单](doc/delivery/IT_HANDOFF_CHECKLIST.md) |
+| 维护算子和适配层 | [底层 API](doc/reference/HPU_LOW_LEVEL_API_REFERENCE.md)、[SEAL 集成](doc/architecture/HPU_SEAL_INTEGRATION.md) |
+| 对接 RTL | [编程手册](doc/reference/HPU_PROGRAMMING_MANUAL.md)、[Bank 分配指南](doc/reference/HPU_BANK_ALLOCATION_GUIDE.md) |
 
-代码按照功能依赖分层，并分别维护在 `include` 及 `src` 目录下，包含四层生成模块，以及独立的编码、reference 与测试辅助模块：
+完整文档目录见 [doc/README.md](doc/README.md)。
 
-### 1) 基础工具层 (`util`)
-- **`util/hpu_asm.hpp/cpp`**：基础 HPU 汇编助记符封装和生成接口，遵循 `doc/reference/HPU_PROGRAMMING_MANUAL.md`。
-- **`util/validation.hpp`**：共享参数校验，包括 2 的幂、NTT 对象容量、模上下文容量、RNS digit 配置和素数检查。
-- **`util/ntt.hpp/cpp`**：按 stage 推进的基于对象槽位语义的 NTT / INTT 汇编生成。
-- **`util/mm.hpp/cpp`**：对象槽位级别的四则运算，特别是逐点向量乘法、乘加积累等（`pmul` / `pmac`）。
-- **`util/bconv.hpp/cpp`**：对象槽位上带参数 `q_offset` 支持分组扩展的基础 Basis Conversion 两阶段汇编生成。
+## 2. 构建与生成
 
-### 2) 多项式级操作层 (`poly`)
-调用并复用 `util` 层的基础算子，组合出同态相关的复杂多项式算子：
-- **`poly/pmult.hpp/cpp`**：明密文相乘 (Plaintext-Ciphertext Multiplication)。
-- **`poly/cmult.hpp/cpp`**：密文乘法的张量积阶段，将二元密文 $(a_0,a_1)$ 与 $(b_0,b_1)$ 乘成三元中间结果 $(t_0,t_1,t_2)$。
-- **`poly/modup.hpp/cpp`**：模提升 (ModUp) 操作，负责保留当前 Q digit 并通过 BConv 补齐其他 Q/P limbs，最终扩展到完整 $Q \cup P$。
-- **`poly/moddown.hpp/cpp`**：模回缩 (ModDown) 操作，负责将中间结果缩放回 $Q$ 基，纠正缩放因子。
-
-### 3) 高级算子层 (`operator`)
-拼装多项式级与基础工具算子，完整实现核心同态运算：
-- **`operator/keyswitch.hpp/cpp`**：完整密钥切换 (KeySwitch) 逻辑生成，语义为 `KeySwitch(base, switching_component, evk) -> (base + ks0, ks1)`。
-- **`operator/relinearization.hpp/cpp`**：重线性化算子，以 `t0` 为 KeySwitch 的 base、切换 `t2`，再计算 `t1 + ks1`，输出标准二分量密文。
-- **`operator/ciphertext_multiply.hpp/cpp`**：完整密文乘法生成，执行输入分量 NTT、`cmult` 三分量张量积、INTT，并复用 `relinearization` 完成最终合成。
-
-### 4) FHE 方案算子层 (`scheme`)
-位于公共算子层之上，负责方案特有的组合顺序和软件元数据：
-- **`scheme/ckks/encode.hpp/cpp`**：纯 host 实现；以 SEAL generator-3 共轭槽位布局执行自包含复数 FFT 编解码，支持 `N/2` 个复数槽位。
-- **`scheme/ckks/rescale.hpp/cpp`**：CKKS 系数域带舍入降层，复用 `ModDown(Q', {q_last})`，并提供 scale 更新接口。
-- **`scheme/ckks/ciphertext_multiply.hpp/cpp`**：正式 SEAL/HPU 路径直接消费 canonical HPU NTT 密文，不再重复转换四个输入分量；张量积、重线形化、独立 Rescale 后输出 NTT 域 `Q_without_last`。
-- **`scheme/ckks/rotate.hpp/cpp`**：使用 modified-root INTT 把 `NTT_psi(a) -> sigma_k(a)` 融合为一次变换，随后执行 SEAL Galois KeySwitch 并返回 canonical HPU NTT；同时提供 SEAL-compatible slot-step Rotate 与 Conjugate 映射，不再依赖 CPU 系数置换。
-- **`scheme/ckks/relinearize.hpp/cpp`** 与 **`rescale_ntt`**：提供独立的 SEAL-facing NTT 输入/输出 kernel；原有 coefficient-domain Relinearization/Rescale 继续作为复合应用内部核心。
-- **`scheme/ckks/basic_arithmetic.hpp/cpp`**：提供 canonical HPU NTT 域的 Add、Subtract、MultiplyPlain、AddPlain、SubtractPlain 与 Negate；全程逐点运算，不生成 NTT/INTT。
-- **`scheme/bgv/encode.hpp/cpp`**：纯 host 实现；提供 signed coefficient encoding 和 generator-3 两行 batching；要求 `t` 为素数且 `2N | (t-1)`。
-- **`scheme/bgv/ciphertext_multiply.hpp/cpp`**：保留 legacy 公共乘法；SEAL-facing 新路径直接在 canonical HPU NTT 上做 tensor product，接 BGV 专用 KeySwitch，且只更新 host 的 `correction_factor_a * correction_factor_b mod t` 元数据。
-- **`scheme/bgv/modswitch.hpp/cpp`**：保留 legacy 系数域 ModSwitch，并新增独立的 SEAL-facing NTT 域 body 生成器、常量计算和 correction-factor 更新；单次操作的 HPU_MEM 镜像与 resolved runtime 包见 `hpu/seal/bgv_modswitch_application.hpp/cpp`。
-- **`scheme/bgv/keyswitch.hpp/cpp`**：SEAL-facing NTT 域 KeySwitch 指令体；逐个 active Q digit 累加两分量 evaluation key，并使用 `t` 修正的特殊素数 `P` ModDown。单次三分量产品的重线性化镜像、DMA 绑定与 RV runtime 包见 `hpu/seal/bgv_keyswitch_application.hpp/cpp`。
-- **`scheme/bgv/basic_arithmetic.hpp/cpp`**：canonical HPU NTT 的 Add/Sub/Negate；Add/Sub 按 modified-SEAL 规则在 host 求 correction-factor 平衡标量，两个密文的逐 limb 标量乘和加减仍由 HPU 执行。单次镜像与 runtime 入口见 `hpu/seal/bgv_arithmetic_application.hpp/cpp`，其中还提供预制明文的 AddPlain/SubPlain/MultiplyPlain。
-- **`scheme/bfv/encode.hpp/cpp`**：纯 host 实现；提供 BFV signed coefficient encoding、Decode 与 generator-3 两行 batching。
-- **`scheme/bfv/ciphertext_multiply.hpp/cpp`**：在单个 kernel 中连续生成 comparison-free `NO_SMRQ + BRANCHLESS_SK` BEHZ 与 Q/Pks Relinearization。
-- **`scheme/bfv/modswitch.hpp/cpp`**：复用公共 rounded drop-last 后端计算 `round(c/q_last)`，输出 `Q_without_last`。
-
-公共层不声明自己属于 CKKS、BGV 或 BFV。三种方案的 Encode/Decode 全部在 host 方案层执行，不生成 HPU 指令；后续 Encrypt 或同态算子若需要 RNS/NTT 表示，应在其自身边界内完成转换。
-
-| 方案 | Encode/Decode | 乘法后处理 | 当前范围 |
-| --- | --- | --- | --- |
-| CKKS | host-only，`N/2` 复数槽位、generator-3 共轭嵌入 | Relinearization + Rescale | 确定性功能通路 |
-| BGV | host-only，signed coefficients、`N` 槽两行 batching | Relinearization + ModSwitch | 确定性功能通路 |
-| BFV | host-only，signed coefficients、`N` 槽两行 batching | 单 kernel BEHZ + Relinearization；独立 ModSwitch | comparison-free 功能通路 |
-
-### 5) 指令编码模块 (`encode`)
-将生成出的 HPU 汇编进一步转译为 32 位机器码文本：
-- **`encode/include/*.hpp`**：定义指令数据结构、解析、编码及组装接口。
-- **`encode/src/*.cpp`**：实现 ASM / C++ 内联汇编解析、格式归一化以及 `custom0` / `custom1` 指令编码。
-- **`hpu_encode`**：由 `encode/CMakeLists.txt` 生成的静态库，供后续测试或上层流程复用。
-
-### 6) 编码测试辅助模块 (`test/encode`)
-用于把主生成流程输出的 ASM 继续转换为 `.inst32` 和 `.cmd26` 文件：
-- **`test/encode/main.cpp`**：读取主流程生成的 `output/<case>.cpp` 与 `output/<case>.asm`，归档到 `outputs/<case>/`，再调用 `hpu_encode` 生成 32-bit 指令和 26-bit precode 文本。
-- **`inline_asm_encode_outputs`**：构建后生成的测试编码工具。
-
-### 7) 软件 Reference (`test/reference`)
-- **`test/reference/main.cpp`**：独立的软件算法入口，生成确定性的 RNS/RLWE 输入、重线性化密钥、完整密文乘法 golden、中间检查点和各算子 UT 数据，并执行解密一致性校验。
-- **`hpu_reference_vectors`**：构建后生成的 reference 数据工具；它不生成 HPU 指令，也不替代 `src/main.cpp`。
-
-### 8) 项目文档 (`doc`)
-
-- **[`doc/README.md`](doc/README.md)**：按应用开发、IT 测试、runtime 对接和维护任务提供文档入口。
-- **`doc/getting-started/`、`doc/examples/`**：入门流程和可运行的 CKKS/BFV 应用示例。
-- **`doc/reference/`、`doc/architecture/`**：当前 API、HPU 指令规范和 SEAL 集成设计。
-- **`doc/delivery/`**：通用应用包规范及旧固定参数交付流程。
-- **`doc/audits/`**：按日期保存的规范符合性审计快照。
-
-### 9) 三个 Legacy 程序入口
-
-| 可执行文件 | 源入口 | 职责 | 主要输出 |
-| --- | --- | --- | --- |
-| `inline_asm_codegen` | `src/main.cpp` | 调用各级 codegen，生成 HPU C++ 内联汇编和 ASM body | `output/*.cpp`、`output/*.asm` |
-| `inline_asm_encode_outputs` | `test/encode/main.cpp` | 归档生成结果、编码 `.inst32/.cmd26`、生成 RV 接口冒烟流 | `outputs/<case>/*`、`outputs/rv_interface_smoke/*` |
-| `hpu_reference_vectors` | `test/reference/main.cpp` | 计算软件 golden、解密校验并拆分 UT/IT 数据包 | `outputs/<case>/test_data/*` |
-
-上述入口用于旧固定参数算子流水线，`hpu_delivery` 目标按顺序编排三个程序并运行交付检查。新应用通过 `examples/*_evaluator_application.cpp` 使用统一前端构图和编译，`hpu_frontend_delivery` 目标生成三方案前端应用包；两条路径见 [项目架构](doc/architecture/HPU_ARCHITECTURE.md)。
-
----
-
-## 2. 一键构建与运行
-
-```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build . -j
-```
-构建完成后，生成的可执行文件 `inline_asm_codegen` 支持通过命令行参数控制输出内容：
-```bash
-# 只输出 .asm 文件
-./build/inline_asm_codegen asm
-
-# 只输出 .cpp 文件
-./build/inline_asm_codegen cpp
-
-# 两者皆输出 (默认行为，等价于不传参)
-./build/inline_asm_codegen both
-```
-
-若需要继续将可编码的 ASM 转成 32 位指令文本，可在生成 ASM 后执行：
-
-```bash
-./build/test/encode/inline_asm_encode_outputs
-```
-
-推荐使用统一交付目标，一次完成指令生成、编码、FHE reference 数据生成和交付门禁检查：
-
-```bash
-cmake --build build -j --target hpu_delivery
+```sh
+cmake -S . -B build -DHPU_ENABLE_SEAL_INTEGRATION=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
 ctest --test-dir build --output-on-failure
+
+# 三个 Evaluator 复合示例，默认 N=128
+cmake --build build --target hpu_frontend_delivery -j8
+# 显式 Plan 示例，使用相同编译后端及应用包格式
+cmake --build build --target hpu_fhe_delivery -j8
 ```
 
-`hpu_delivery`、`hpu_reference_vectors` 及 `config/fhe_test.conf` 属于原仓库的
-固定参数 legacy demo，不再作为默认测试或 N=65536 CKKS 的参数权威。默认 CTest
-不会注册其三个 reference 测试；若需要回归旧交付包，显式配置：
+编译器仍可在不启用 SEAL 集成时构建、运行核心与 ISA 测试；生成三方案应用需要
+`HPU_ENABLE_SEAL_INTEGRATION=ON`。CMake 默认输出根为 `outputs/`，可通过
+`-DHPU_APPLICATION_OUTPUT_ROOT=/absolute/path` 选择新目录。
 
-```bash
-cmake -S . -B build -DHPU_ENABLE_LEGACY_FIXED_PROFILE_TESTS=ON
-ctest --test-dir build -L legacy-fixed-profile --output-on-failure
+### N=8192、Q=4、P=1 的 IO 对照
+
+```sh
+python3 tools/benchmark_io.py --build-dir build --output-root outputs/io_baseline --no-opt
+python3 tools/benchmark_io.py --build-dir build --output-root outputs/io_optimized \
+  --baseline-json outputs/io_baseline/io_summary.json
 ```
 
-代码生成 kernel 的单元测试、HPU NTT 数学模型、runtime，以及 SEAL/HPU CKKS
-集成测试仍保持默认启用。测试源码中用于覆盖 shape 的固定数字只是局部测试向量，
-不构成应用 profile。
+runner 默认使用 N8192、Q4、P1、seed=0，依次安全生成和验证三个方案的应用包，
+把实际 DMA 字节、候选调度、spill/reload 和输出集合写入 `io_summary.json`。
+`--baseline-json` 只比较参数、fixture 和导出输出完全一致的报告；不提供时只汇总
+本次测量。`--degree 65536` 可改做容量压力测试。完整命令和字段说明见
+[IO 基准说明](doc/getting-started/HPU_EVALUATOR_FRONTEND.md#n8192q4p1-的可重复-io-对照)。
+本轮实测和分类收益见 [SSA 与 IO 优化记录](doc/delivery/IO_OPTIMIZATION_RESULTS.md)。
 
-启用 SEAL integration 后，可以统一生成 CKKS、BFV、BGV 应用交付包：
+单独运行示例时也支持 `--degree 8192 --data-moduli 4 --seed 0`；`--data-moduli`
+指实际数据 Q 的个数，另生成一个 special P，示例默认仍为 Q3。seed 仅用于可重复
+测试 fixture。CP 提示的真实缓存收益需要 RTL/硬件测量。
 
-```bash
-cmake -S . -B build -DHPU_ENABLE_SEAL_INTEGRATION=ON
-cmake --build build -j --target hpu_fhe_delivery
-# 单独生成一个方案：hpu_ckks_delivery / hpu_bfv_delivery / hpu_bgv_delivery
-./build/hpu_validate_package outputs/bfv_rotation_application
+直接写包要求目标目录不存在。需要安全重复发布时使用
+`tools/generate_application_package.py`，具体命令见编程手册。
+
+底层 CMULT、NTT、INTT 的固定 N8192 环算术用例使用
+`hpu_native_kernel_application_example --case cmult|ntt|intt --emit-dir PATH`，同样输出
+应用包；这些是未加密的数学与 IO fixture，使用方式见
+[底层 API 的用例入口](doc/reference/HPU_LOW_LEVEL_API_REFERENCE.md#原生算子用例应用包)。
+
+## 3. 编程与输出
+
+```cpp
+hpu::seal_adapter::ApplicationBuilder app(context);
+auto evaluator = app.evaluator();
+const auto x = app.import_ciphertext("input/x", encrypted_input);
+hpu::seal_adapter::Ciphertext y;
+evaluator.multiply(x, x, y);
+evaluator.relinearize_inplace(y, relin_keys);
+app.mark_output("y", y);
+const auto compiled = app.compile("my_application");
+compiled.write("outputs/my_application");
 ```
 
-七个应用包写入 `outputs/<case>/`。每个包提供 `package.json`、指令和 C wrapper、
-初始 HPU_MEM 镜像、DMA 映射、逐算子输出 golden、参数、计算图和校验清单。
-CKKS、BFV、BGV 都会运行各自的 host 软件执行器，并把每个 plan 输出与独立
-modified-SEAL oracle 逐 word 比较；任一比较失败都不会发布交付包。
-重复构建会先生成并校验新包，再替换同名的有效应用包。
-IT 编写样例及 Nexus AM 消费格式见 [通用应用交付说明](doc/delivery/HPU_APPLICATION_PACKAGE_V1.md)。
-这一步产出的是指令、数据和 C 源码；机器可执行 ELF/BIN 由 Nexus AM 侧编译生成。
+context、密钥、编码、加密、解密仍使用 native SEAL。重线性化、rescale、mod switch
+由应用显式调用，遵循各方案的 level、scale 和 correction-factor 规则。
 
-SEAL v4.4.4 源码以普通目录 `third_party/modified-SEAL` 固定在本仓库中，不再使用
-submodule。HPU 对 SEAL 的后续修改直接由 Inline-asm 的提交历史维护，因此普通
-`git clone`/`git pull` 已包含完整依赖。
+**默认只导出全部 `mark_output()` 指定的结果；没有标记时导出最后一个计算结果。**
+内部结果由编译器管理，不再为逐节点目标读回强制写回 DDR。多个标签和 metadata
+view 可引用同一物理结果，golden 不重复。需要 IT 检查中间值时显式标记输出。
+主机仍检查方案 SoftwareExecutor 与各节点 SEAL oracle，`oracle_result(value)`
+仍可查询编译快照中的参考结果。
 
-该目录不是原版 SEAL 的简单镜像：它包含面向 BFV 的 comparison-free
-`NO_SMRQ + BRANCHLESS_SK` 改造。启用 `HPU_ENABLE_SEAL_INTEGRATION` 时，顶层
-CMake 会固定开启 `SEAL_EXPERIMENTAL_BFV_NO_SMRQ` 和
-`SEAL_EXPERIMENTAL_BFV_BRANCHLESS_SK`；具体改动清单、算法边界和独立验证命令见
-`third_party/modified-SEAL/HPU_MODIFICATIONS.md` 与其 `docs/` 目录。
+## 4. 编译流程与代码组织
 
-CKKS/HPU 集成层默认关闭。可单独验证 `N=65536` 和 32 位 q/P 的 SEALContext：
-
-```bash
-cmake -S . -B build-seal -DHPU_ENABLE_SEAL_INTEGRATION=ON
-cmake --build build-seal -j --target hpu_seal_ckks_context_test
-ctest --test-dir build-seal -R hpu_seal_ckks_context_test --output-on-failure
+```text
+Evaluator / Plan
+  → OperatorProgram SSA：逻辑输入、计算、输出、模数上下文
+  → 内存身份与版本、重复读取合并、写读转发、死值消除
+  → 有依赖约束的调度候选
+  → VirtualProgram：对象、bank、backing、按需 DMA 和生命周期
+  → DDR 布局、DMA 重定位、ISA 编码与目标侧 C
+  → application package v1
 ```
 
-具体边界、硬件 NTT 模型、runtime 语义及完整命令见
-`doc/architecture/HPU_SEAL_INTEGRATION.md`。
+| 目录 | 职责 |
+| --- | --- |
+| `include/hpu/seal/`、`src/hpu/seal/` | 统一前端、方案适配、Plan、数据准备及软件执行器 |
+| `include/hpu/compiler/`、`src/hpu/compiler/` | SSA 优化、调度、片上资源与 DDR 分配 |
+| `scheme/`、`operator/`、`poly/`、`util/` 对应 include/src | 数学算法和原生算子资源表达 |
+| `include/hpu/runtime/`、`src/hpu/runtime/` | 内存镜像、生命周期与共享 BankAllocator |
+| `include/hpu/delivery/`、`src/hpu/delivery/` | 统一交付编译、包写入及落盘校验 |
+| `encode/` | ISA 定义、编码/解析和 C wrapper 生成 |
+| `test/` | 编译器、方案对拍、ISA、应用包和目标包装代码回归 |
 
-从工程搭建开始的简明介绍，以及 `f(x)=x^2+1` 的可运行 CKKS/HPU 示例见
-`doc/getting-started/CKKS_HPU_GETTING_STARTED.md`。
+原序、读取复用和重排候选按最终 **DMA 字节数、DMA 次数、指令数** 依次比较。
+分配器考虑实际 bank 区间、瞬时结果空间、写回代价和后续读取；`spill=0` 不表示没有
+重复加载，应同时看 `dload_bytes`、`dstore_bytes` 和 `io_by_allocation`。
 
-面向顶层应用开发者的多分支 planner 示例见
-`doc/examples/CKKS_COMPOSED_APPLICATION_EXAMPLE.md`。它实现
-`x*(RotateLeft(x,1)+Conjugate(x))+1`，覆盖 Galois key/workspace、分支合并、
-Multiply→Relinearize→Rescale、完整 DMA relocation 和 runtime artifacts。
+旧 `inline_asm_codegen → inline_asm_encode_outputs → hpu_delivery` 直接汇编交付链
+已移除。应用和底层算子用例统一通过原生 SSA、公共编译后端和 application package
+写入器。`hpu_reference_vectors` 仅保留为可选数学差分 fixture，不是目标交付入口；
+`config/fhe_test.conf` 只控制这些历史数学测试，应用参数在测试 C++ 中指定。
 
-BFV 顶层示例见 `doc/examples/BFV_APPLICATION_EXAMPLE.md`。它实现
-`ModSwitch(left*right)+3`，演示预制目标 level plaintext、融合
-Multiply/Relinearize、显式 ModSwitch，以及 `.asm/.inst32/.cmd26`、运行包装、
-resolved DMA manifest 和 HPU_MEM 镜像的生成。示例还通过 `BfvSoftwareExecutor`
-执行同一镜像，并将最终密文与 modified-SEAL 逐系数比较。
-BFV 软件执行器也覆盖 Add/Subtract/Negate、AddPlain/SubtractPlain 和
-canonical-NTT 往返的 MultiplyPlain，全部与 modified-SEAL 逐系数对拍。
-BFV application image 可按预定 RotateRows 步长或 RotateColumns 准备对应的
-level-specific GaloisKey 与 modified-root INTT twiddle。BFV planner 已支持
-RotateRows 与 RotateColumns，并完成汇编、DMA relocation、runtime 编码与软件执行；
-正向/负向行旋转和换列均与 modified-SEAL 逐系数对拍。
-可运行的 rotation 应用见 `doc/examples/BFV_ROTATION_APPLICATION_EXAMPLE.md`，计算
-`RotateRows(x,2)+RotateColumns(x)`，展示两条 Galois 分支合并、编码与 DMA 产物生成。
+## 5. 交付边界
 
-当前 HPU_MEM 软件执行器已经对 CKKS Add/Subtract/MultiplyPlain/AddPlain/
-SubtractPlain、Negate、通用密文 Multiply、Square、KeySwitch、Relinearize、Rescale、
-raw/slot-step Rotate 和 Conjugate
-完成 SEAL NTT 逐字差分，
-并能消费预加载 twiddle 完成 canonical HPU NTT/INTT。KeySwitch 按当前 level
-逐个流式处理 active-Q singleton digit，在 `Q|P` 上乘加后执行与 SEAL 等价的
-带舍入 ModDown；当前明确支持冻结 SEAL 的单 special-prime 形式。多 P 不属于当前
-SEAL 4.4.4 兼容目标，保留为远期独立扩展。P、P/2 和各 `P^-1 mod q_i` 作为 level 专属常量在应用初始化时
-写入 HPU_MEM，执行阶段只读取并校验，不临时推导硬件常量。
-Rescale 同样从 HPU_MEM 取得 `q_last/2` 与 `q_last^-1 mod q_i`，并迁移到相邻
-`parms_id`。host 侧通过 `CkksValueMetadata` 集中推导和校验操作的
-`parms_id + chain_index + scale`：保持型操作不改元数据，Add/Sub 要求同层同
-scale，Multiply 计算 scale 乘积，Rescale 只走 `CkksLevelChain::next` 并除以
-`q_last`。image builder 与软件执行器消费同一套规则，但不会自动插入 Rescale。
-`CkksOperationPlan` 在同一个 application image 上显式串联 Add/Subtract、
-Multiply/MultiplyPlain、AddPlain/SubtractPlain、Negate、Square、Relinearize、Rescale、
-Rotate 和 Conjugate，
-校验对象归属及 level 专属 key/constant，并记录后续
-codegen/runtime lowering 所需的有序 metadata 与资源清单。当前
-`lower_ckks_operation_plan` 已能按每步 level 选择上述 pointwise kernel、通用
-Multiply/Square 共用的 CMULT tensor kernel，以及
-standalone Relinearize/Rescale 和 fused Galois body，保留 relocation manifest，并在整条程序外层
-只管理一次模表与 `psync`。`build_ckks_relocation_schedule` 进一步逐条校验生成的
-DMA ABI，并已把模表及全部已规划算子精确绑定到 image span。
-KeySwitch 的 ModUp/ModDown 多项式级常量和复用 workspace 由 image builder 在应用
-初始化阶段准备；Rescale 的 half、单源 BConv、`q_last^-1` 和 rounded/correction
-workspace 也已展开。当前 `x^2+1` 全计划的每条 DMA 都有精确 span，schedule 为
-complete。`lower_ckks_runtime_program` 再把 body 编码为固定 instruction words，
-逐条核对 custom1 与 schedule，并可生成带固定 span 表的 `hpu_run_*` 入口和 resolved
-CSV manifest。跨 step 的变换和 DDR 融合留作后续优化。
-`x^2+1` 示例的 Square→Relinearize→Rescale→AddPlain 已由该执行器
-真正执行，SEAL Evaluator 只提供独立逐字 oracle。
+包内包括 `program/`、`memory/`、`golden/`、`metadata/`、`oracle/` 和 `provenance/`。
+IT 应先读取 `package.json`，加载初始镜像、执行目标程序，再按 golden manifest
+读回指定输出。golden 不得预加载到目标内存。
 
-多层执行回归使用 Q4|P1 image，完整运行 Q4
-Multiply→Relinearize→Rescale、Q3 fused Rotate、Q3
-Multiply→Relinearize→Rescale，并对最终 Q2 输出逐字比较。Q 逐层缩短时，P 始终
-保持应用全局 MOD_ID 4；Q3 的 evaluation key 只包含 `{0,1,2,4}`，不会读取已丢弃的
-Q limb。
+目标 ISA 为 `hpu-objects64-v1.2`：64 个逻辑对象、普通 bank 以 128 line 分配；
+stage 参数为 K=8 的 512 B 参数对象，pre/post PMUL 向量保持独立。交付编译仅为
+`kind=twiddle` 的 DLOAD 设置 CP=1，其余 DLOAD 与全部 DSTORE 为 0，包括编译器
+重载和 NoOpt。ISA、参数格式与应用包 schema 分别版本化。
 
-Rotate 软件路径直接消费 modified-root fused INTT 表，把 canonical NTT 输入变成
-`{domain=coefficient,key_domain=k}`，随后从该状态进入 Galois KeySwitch；不会插入
-canonical NTT→INTT 的抵消变换。若跨 kernel，只有这份带 key-domain 的系数 workspace
-需要保留，application/runtime 注册过程会保留其 representation metadata。
-
-应用层无需手算 Galois element：正数 step 表示左旋、负数表示右旋，按 SEAL 的
-generator-3 规则映射；Conjugate 使用 `2N-1`。每个 element 都需要匹配的 Galois key
-和 modified-root 表在应用启动时预加载。Negate 不使用变换或零多项式，硬件流以
-`(c-c)-c` 合成 `-c mod q`，只需要两个活跃对象。
-
-可选 SEAL 三方案 fixture oracle 默认关闭；它仍依赖 legacy reference 产物，并不
-代表 HPU 指令执行。启用后
-使用同一批 reference fixture 验证 BFV/BGV/CKKS 的 Encode、乘法、重线形化、
-ModSwitch/Rescale 和旋转：
-
-```bash
-cmake -S . -B build-seal -DHPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE=ON \
-  -DHPU_SEAL_SOURCE_DIR="$PWD/third_party/modified-SEAL"
-cmake --build build-seal -j --target hpu_delivery_with_seal
-ctest --test-dir build-seal -R hpu_seal --output-on-failure
-```
-
-`hpu_delivery_with_seal` 先完成普通交付门禁，再运行 oracle；结果位于
-`build-seal/seal_oracle/{report.csv,metadata.txt}`。旧开关
-`HPU_ENABLE_SEAL_BFV_ORACLE` 仅作为弃用兼容别名保留。
-
-主生成程序仍保持主分支的输出方式，先在根目录生成扁平的 `output/` 文件夹；编码辅助工具随后会把 `.cpp` 与 `.asm` 归档到 `outputs/<case>/`，并将可直接编码的结果写回同一目录。仍含符号寄存器占位符的文件会被显式跳过。
-
-执行 `inline_asm_codegen` 后会先得到主分支约定的扁平输出：
-- `output/ntt.cpp`
-- `output/ntt.asm`
-- `output/intt.cpp`
-- `output/intt.asm`
-- `...`
-
-执行 `inline_asm_encode_outputs` 后，会进一步整理出根目录下的 `outputs/` 文件夹。执行 `hpu_reference_vectors` 后，各算子目录会补充输入、期望结果和可读 golden：
-- `outputs/ntt/`
-- `outputs/intt/`
-- `outputs/ckks_encode/`
-- `outputs/bgv_encode/`
-- `outputs/ckks_rescale/`
-- `outputs/ckks_ciphertext_multiply/`
-- `outputs/ckks_{add,subtract,multiply_plain,add_plain,subtract_plain}/`
-- `outputs/bgv_ciphertext_multiply/`
-- `outputs/bgv_modswitch/`
-- `outputs/bfv_encode/`
-- `outputs/bfv_ciphertext_multiply/`
-- `outputs/bfv_modswitch/`
-- `outputs/mm/`
-- `outputs/bconv/`
-- `outputs/pmult/`
-- `outputs/cmult/`
-- `outputs/modup/`
-- `outputs/moddown/`
-- `outputs/auto/`
-- `outputs/keyswitch/`
-- `outputs/relinearization/`
-- `outputs/ciphertext_multiply/`
-- `outputs/rv_interface_smoke/`
-- `outputs/seal_oracle/`（三方案 oracle 的统一参数快照）
-
-其中 `outputs/{ckks_encode,bgv_encode,bfv_encode}/` 是纯 host 验证包，只包含
-`params.json`、可读 CSV、round-trip 结果和 `host_manifest.csv`；这些目录刻意不含
-`.asm/.inst32/.cmd26`、DMA plan、twiddle 或 HPU_MEM 镜像。
-
-例如 `outputs/ntt/` 下会包含：
-
-- `ntt.cpp`
-- `ntt.asm`
-- `ntt.inst32`（运行编码工具后生成）
-- `ntt.cmd26`（与 `.inst32` 逐条对应）
-- `test_data/input.bin`、`test_data/input.dec.txt`
-- `test_data/expected.bin`、`test_data/expected.dec.txt`
-- `test_data/params.json`、`test_data/artifact_manifest.csv`
-- `test_data/hardware/hpu_mem_image.u32.bin`、`line_map.csv`、`hpu_mem_config.json`
-- `test_data/hardware/mod_ctx_map.csv`、`twiddle_map.csv`、`abi.json`
-
-`outputs/` 是 `hpu_delivery` 生成的交付产物，当前被 `.gitignore` 忽略；仅向测试
-同学发送 Git commit 或让其重新 clone 本仓库不会包含这些数据。正式交付应在同一
-次 `hpu_delivery` 成功后整体归档 `outputs/`，同时记录源码 commit、归档
-SHA-256 和 `outputs/DELIVERY_REPORT.txt`。不得混合不同生成批次的指令、
-relocation manifest、line map 与 HPU_MEM 镜像。
-
----
-
-## 3. 入口与参数
-
-当前完整流程由三个阶段组成：
-
-1. `inline_asm_codegen` 从 `src/main.cpp` 进入，向 `output/` 生成 `.cpp` 与 `.asm`。
-2. `inline_asm_encode_outputs` 从 `test/encode/main.cpp` 进入，归档结果并把可编码 ASM 转成 `.inst32/.cmd26`。
-3. `hpu_reference_vectors` 从 `test/reference/main.cpp` 进入，计算并验证 test data，然后写入 `outputs/<case>/test_data/`。
-
-legacy 流程的唯一输入配置为 `config/fhe_test.conf`。`inline_asm_codegen` 和
-`hpu_reference_vectors` 都通过共享解析库读取其中的 `N`、`num_q`、`num_p`、
-`bfv_num_b`、`hpu_mem_max_lines`、`dnum`、`auto_index`、`plaintext_modulus` 和
-`seed`；未知、重复、缺失或非法字段
-会使生成立即失败。`outputs/*/test_data/params.json` 仍是生成结果，不能作为配置
-入口，直接修改后会在下一次生成时被覆盖。
-
-两个程序都支持 `--config <path>`。顶层 CMake 的 `HPU_TEST_CONFIG` cache 变量默认
-指向仓库配置，`hpu_delivery` 会把同一路径显式传给指令生成器和 reference；使用
-另一份配置时可执行 `cmake -S . -B build -DHPU_TEST_CONFIG=/abs/path/fhe_test.conf`。
-
-配置必须满足 `N` 为不小于 128 的 2 次幂、`ceil(N/64) <= 1024`（即
-`128 <= N <= 65536`）、`num_q >= 2`；旧式连续等宽 digit 配置还要求
-`num_q % dnum == 0`，SEAL-facing CKKS 则从每个 `parms_id` 的 level descriptor
-取得活动 Q digit，不再把顶层 `dnum` 固定沿用到低层。
-`num_q + num_p + bfv_num_b + 2 <= 64`，且当前 Auto 仅支持 `auto_index=1`。
-BGV 固定 MOD_ID 顺序为 `Q|P|t`；BFV 固定为 `Q|Pks|B|m_sk|t`。`plaintext_modulus`
-必须是硬件可加载的奇数并满足 `65537 <= t <= 2^32-1`；legacy demo 默认值为
-`N=4096, Q=4, Pks=3, B=6, dnum=2, t=65537, hpu_mem_max_lines=65536`。
-`hpu_mem_max_lines` 必须适配 33-bit `HPU_MEM_SIZE_LINES` CSR；它是软件验收上限，
-每个包仍按自身真实镜像大小配置 window。BFV reference 还检查
-`log2(B) > 33 + bitlen(t) + bitlen(Q) + ceil(log2(num_q^2))`。small Bank 5 为 32 line，固定范围
-`0x1400..0x141F`，物理可放 512 个 context；`MOD_ID` 编码仍为 8 bit，但当前
-应用软件 ABI 要求 `MOD_ID[7:6]=0`，只使用 0..63。它与 64 个并发逻辑对象槽位是两个独立资源。
-
-`hpu_delivery` 会根据该配置生成输入、评估密钥、阶段 golden、最终输出、明文校验
-和 artifact checksum。它同时生成独立的 `uint32` HPU_MEM 镜像、q/Barrett
-上下文、256B line offset/count，并只为实际包含 `pntt/pintt` 的算子包生成逐
-stage twiddle；MM、BConv、ModUp/ModDown、PMult/CMult、CKKS Rescale 和 BGV
-ModSwitch 的最小硬件镜像不携带 twiddle。数据从同一 reference 拆分出
-NTT、INTT、CKKS Rescale、CKKS/BGV CiphertextMultiply、BGV ModSwitch、
-BFV CiphertextMultiply、BFV ModSwitch、
-MM、BConv、ModUp、PMULT、CMULT、ModDown、Auto、KeySwitch 和 Relinearization
-的独立 UT 数据包。
-
-
-## 4. 关键设计实现说明
-
-- **基于 HPU 对象槽的 NTT/INTT：**
-  底层不再关注向量的大块切片 `l`。针对 `stage=0~log2(N)-1` 的蝶形运算，`pntt/pintt` 以**第一个对象槽位作为稳定的逻辑数据对象**，**第二个对象槽位作为 twiddle 对象**。控制器按物理 out-of-place 执行并在 stage 完成时提交新的 base；调用方保持逻辑对象号。Negacyclic NTT 在 stage 0 前显式 `PMUL psi^i`，INTT 在最终 stage 后显式 `PMUL (N^-1*psi^-i)`。
-  
-- **切片感知的模提升运算：**
-  为了支持分解字（Digit Decomposition），`modup` 接口显式接收完整 `num_q`、处理宽度 `num_q_digit` 和 `q_offset`。它保留当前 digit，并对 `Q\digit ∪ P` 执行 BConv，从而为后续 KeySwitch 产生完整 $Q \cup P$ 表示。单纯 Q→P 的基转换仍由独立 `bconv` 原语提供。
-
-- **SEAL CKKS 多 level MOD_ID：**
-  `CkksLevelDescriptor` 从 `SEALContext` 的整个 data chain 建立活动 Q、固定 P 和 evaluation-key digit 映射。完整应用模表保持 `Qmax|P`：例如顶层为 `Q0,Q1,Q2,Q3,P0` 时，Q3 level 使用 `{0,1,2,4}`，不会把已丢弃的 `mod_id=3` 误当作 P。KeySwitch/ModUp/ModDown 的显式 layout API 支持不连续的全局 MOD_ID；旧 demo API 继续生成连续等宽 digit。
-  
-- **流水线的统一复用：**
-  复杂的算子不需要从头生成具体的 `hpu::pmul` 等语句。`relinearization` 复用完整 `keyswitch`，`ciphertext_multiply` 再复用 `relinearization`；全部由 `generate_hpu_*_body_asm` 函数段拼接。Body Generator 的 `append_psync` 默认关闭，只有形成独立完整程序时才开启；完整 `generate_hpu_*_asm` 接口默认在末尾追加通知。
-
-- **完整密文乘法语义：**
-  `cmult` 只负责 FHE 密文乘法中的张量积阶段，即 $t_0=a_0b_0$、$t_1=a_0b_1+a_1b_0$、$t_2=a_1b_1$。`relinearization` 调用 `KeySwitch(base=t0, switching_component=t2, evk=rlk)` 得到 $(t_0+ks_0,ks_1)$，再生成 $t_1+ks_1$；`ciphertext_multiply` 直接复用该算子。
-
-- **方案 Encode/Decode 的 host 边界：**
-  CKKS host API 把最多 `N/2` 个复数槽位映射为带 scale 的 signed 系数并执行逆向 Decode；BGV/BFV host API 支持 signed coefficient encoding、`N` 槽两行 batching 和对应 Decode。实现与本地修改版 SEAL 的 generator-3 布局对齐。三种方案均不生成 HPU Encode/Decode 指令；RNS lift 和 NTT 属于未来 Encrypt/runtime 或具体同态算子的内部表示转换。
-
-- **CKKS Rescale 舍入语义：**
-  对 `Q={q_0,...,q_last}` 上的每个密文分量，先在每个 limb 加入 `floor(q_last/2)`，再把最后一个 context 当作单元素 P 基复用 ModDown。输出基为 `Q'={q_0,...,q_{last-1}}`，计算的是 `round(x/q_last) mod Q'`；指令流只处理系数域数据，方案层的 `rescale_scale` 负责计算软件元数据 `scale/q_last`。
-
-- **方案元数据与 BGV ModSwitch：**
-  CKKS 的 `scale` 和 BGV 的 `correction_factor` 不编码进 HPU 指令，由方案层 API 与未来 runtime/compiler 保存。BGV 使用 `Q|P|t` context 顺序；降层时先计算 `u=-c_last*q_last^-1 mod t`，再对每个保留 limb 计算 `(c_i-c_last-q_last*u)*q_last^-1 mod q_i`。默认 `t=65537` 可由 PE 直接加载。
-  SEAL-facing BGV ModSwitch 另外提供 NTT 域生成器：只逆变换被丢弃的 limb，系数域修正经规范化和 NTT 后与保留 limb 相减。单次操作已具备预制 HPU_MEM、逐条 resolved DMA span 和可渲染的 RV runtime 包，并与 modified-SEAL 做两级逐 limb 差分；现已可接入 BGV 图 planner 的跨 level 链，但仍无逐指令软件执行或实体 HPU 验证。
-  BGV NTT KeySwitch 已覆盖 singleton-Q digit 累加及 `u=-c_P*P^-1 mod t` 修正；输入、输出保持 canonical HPU NTT。单次重线性化已把 evaluation key、常量和工作区绑定成 HPU_MEM 运行包，并在顶层/降一级使用镜像内容与 modified-SEAL 做逐 limb 对照；现已接入通用 BGV 图 planner 和 `BgvSoftwareExecutor`，仍无逐指令软件执行或实体 HPU 验证。
-  单次 BGV NTT Multiply+Relinearize 现在把 `CMULT -> KeySwitch` 接在同一指令流中：三分量 tensor 由 HPU 写入同一镜像 span，随后直接被 KeySwitch 读取；中间没有 CPU 乘法、host copy 或 `psync`。`N=65536,Q=3,P=1` 的软件镜像需 83201 line，平台须提供相应 window；实体 DMA/window 仍待验证。
-  BGV Add/Sub/Negate 与预制明文的 AddPlain/SubPlain/MultiplyPlain 已有单次 HPU_MEM 包；不同 `correction_factor` 的 Add/Sub 会把平衡标量以预制对象加载，再在 PE 以 `PMUL` 缩放密文 limb。AddPlain/SubPlain 在准备镜像时按 factor 缩放明文，密文运算仍由 HPU 执行。行旋转与列交换也已有“改根 INTT → canonical NTT → Galois KeySwitch”的不中断单次包；元数据由 host 记录，顶层和降一级已与 modified-SEAL 差分。`BgvOperationPlan` 支持预制明文算术、密文 Add/Sub、独立 Multiply/Relinearize、融合乘法、旋转与 ModSwitch 的分支计算图，按节点输入推导 level/factor，并共享重复只读资源。`BgvLinearOperationPlan` 是兼容别名，原尾节点调用保持可用；`BgvSoftwareExecutor` 从同一镜像执行整图并逐步与 SEAL 对比。新示例为 `hpu_bgv_composed_application_example`，原三个 chain 示例继续可用。所有应用示例支持 `--degree 65536`；`hpu_fhe_deployment_delivery` 生成部署规模包，窗口按实际使用收紧，运行流程见 [交付包规范](doc/delivery/HPU_APPLICATION_PACKAGE_V1.md)。实体 HPU 验证仍由 IT 完成。
-
-- **BFV comparison-free 单 kernel 乘法：**
-  BFV 固定使用 `Q|Pks|B|m_sk|t`。输入先执行不带 `m_tilde/SmMRq` 的 `Q -> Bsk` FastBConv，再在 Q/Bsk 下做 tensor product、FastFloor 和 branchless-SK；校正为 `out=y+alpha*(-B) mod Q`。三分量 Q 结果写回统一 HPU_MEM 后立即由同一指令流执行 Q/Pks Relinearization，中间没有 `psync`、host copy 或 window 切换，完整流只有末尾一个 `psync`。默认统一镜像为 20833 line，低于配置的 65536-line 上限。BFV ModSwitch 仍是独立算子，复用 `round(c/q_last)`。
-
-- **生成与编码分层解耦：**
-  `inline-asm` 仍负责汇编生成，`encode` 模块则负责解析、归一化和 32 位编码。两者保留独立边界，但通过同一 CMake 工程统一构建，从而降低汇编语义更新后生成器与编码器失配的风险。
-
-- **11 条指令与对象生命周期：**
-  当前体系结构指令固定为 `padd/psub/pmul/pmac/pntt/pintt/pmodld/pfree/psync/dload/dstore`。旧的 `pshcfg/pshuf/pseed/psample` 已从枚举和编码表移除。临时输入、twiddle 和 small-bank 模表对象会在最后一次使用后生成 `pfree`；`dstore rel=0` 保留对象，`rel=1` 在 DMA 成功后释放，后者不再重复 `pfree`。
-
-- **双输入形式兼容：**
-  编码器既可处理纯 ASM body，也可处理带有 `__asm__ volatile(...)` 包装的 C++ 内联汇编文本。对于 `void hpu_xxx(void) {`、`: "memory"`、`);` 等生成边界，解析器会做定向忽略；但非法汇编指令本身仍会被保留为错误。
-
-
----
-
-## 5. 对象槽位与参数注意事项
-
-调用方需要保证：
-
-- `N` 为 2 的幂且 `128 <= N <= 65536`；下界来自 NTT 的 128-register batch，上界来自普通 bank 的 1024 line
-- ISA 提供 64 个逻辑对象号 `p0..p63`；按 128-line 对齐区间共享五个普通 bank，stage 参数默认使用 Bank 5，详见 [Bank 分配指南](doc/reference/HPU_BANK_ALLOCATION_GUIDE.md)
-- 复杂硬件算子（CKKS Rescale、BGV/BFV ModSwitch、BFV BEHZ、PMULT/CMULT/MODUP/MODDOWN）使用 `dload/dstore` 流式搬运，不在本地长期保留多基对象；CKKS/BGV/BFV Encode/Decode 是纯 host API
-- `dload MOD=1, CP=0, bank_mask=0x20` 将模表逻辑对象分配到 small Bank 5；DMA 与后续指令的一致性由硬件维护，可直接使用 `pmodld MOD_ID` 激活表项
-- 每个可编码算子同时生成 `.inst32` 和 `.cmd26`；`cmd26[25]` 区分计算类 custom0 和 DMA 类 custom1，两类指令都直接携带 `inst[31:7]`；custom1 payload 按新六位对象号、拆分的 bank mask、RS2/RS1、TYPE_OR_REL 和 DIR 位段原样传输，寄存器值提供 offset/count
-- 本项目生成器统一在完整程序末尾发一次 `psync`，内部算子由硬件维护依赖；ISA 允许中途等待，`psync` 不释放对象
-- 所有 custom1 指令固定编码 `x10/x11`。可执行 runtime 在每条 DMA 前装入 span 的 HPU_MEM line offset/count；DLOAD 使用两者，DSTORE 的实际长度来自硬件对象表的 `OBJ.len`，软件会校验 span count 与之相等；`auto` 也进入统一编码链路。
-- `cmult`、`keyswitch`、`relinearization`、公共/CKKS/BGV `ciphertext_multiply`、BGV `modswitch` 和两个 BFV hardware kernel 均已进入统一 `.asm -> .inst32/.cmd26` 生成链路。BFV 额外要求 `Q|Pks|B|m_sk|t` 总 context 不超过 64，并满足 B 位宽门禁。
-- `ciphertext_multiply/test_data` 已由软件 reference 自动生成；二进制格式、shape 和校验值见其中的 `params.json` 与 `artifact_manifest.csv`
-- 顶层 `.bin` 是 `uint64` 数学 golden；真正面向 HPU 加载的是 `test_data/hardware/` 下按 256B line 补齐的 `.u32.bin`
-- `hardware/line_map.csv` 给出每个对象的 byte address、line offset 和 line count；custom1 固定编码 `x10/x11`。DLOAD 使用 offset/count，DSTORE 使用 offset 和 `OBJ.len`，span count 用于软件一致性与边界检查。`hpu_mem_config.json` 给出 HPU_MEM window 值和 `0x00..0x18` CSR 编程顺序
-- 生成的 `hpu_program_*` 入口接收与 DMA 指令等长的 `hpu_dma_span_t[]`；每条 DLOAD/DSTORE custom1 发射前都把非零 line offset/count 装入 `x10/x11`，且 DSTORE 校验 count 等于软件跟踪的对象长度。`nexus-am/tests/hpu-it` 根据硬件布局生成逐行可审计的 resolved relocation manifest。
-
----
-
-## 6. 当前交付边界
-
-软件侧已完成纯 host 的 CKKS/BGV/BFV Encode/Decode，以及公共算子、CKKS Rescale/Multiply、BGV Multiply/ModSwitch、BFV comparison-free 单 kernel Multiply/Relinearization 和 ModSwitch 的指令生成、编码、reference golden、独立 `uint32` 硬件镜像、`q32+mu48+reserved48` 模上下文、物理 twiddle、256B line 映射、生命周期门禁和 RV 可执行后端。BFV 主硬件包使用零噪声精确功能 key，另有非零误差 host smoke；两者都标记为 `FUNCTIONAL_TEST_ONLY`。硬件 qualification 仍需目标 RTL/板级运行和外部 monitor 证据。详细签字项见 `doc/delivery/HPU_TEST_DELIVERY.md`。
-
-当前 golden 使用确定性零噪声和 P 可整除的功能测试评估密钥，适合 UT/IT 的
-逐字定位，不是安全性或噪声预算测试向量。Nexus-AM 的 host 模式只验证 testcase、
-oracle、relocation 和内存边界自洽；目标算术是否通过必须以 RISC-V 路径在目标
-RTL/板级执行后的逐字比对、FAULT/IRQ 状态和外部 monitor 记录为准。
-
-### 64 对象 ISA 迁移
-
-当前目标为 [HPU ISA v1.2](doc/reference/HPU_PROGRAMMING_MANUAL.md)。顶层 Evaluator
-API 不变；旧 `.inst32/.cmd26` 与新硬件不兼容，须重新生成交付包。新包通过
-`memory/abi.json` 标识 ISA、`dma_format=mod_rel_cp`、64 个对象与默认 4-line 模表配置。
-v1.1 的 TYPE 字段已改为独立 MOD/REL、CP；CP 是 LLC 分配提示。底层 API 默认
-CP=0；应用包采用 `dma_cache_policy=twiddle_loads_only`，仅 twiddle DLOAD 为
-CP=1，其他 DMA 为 CP=0，NoOpt 同样执行。判断依据是最终内存分配的
-`kind=twiddle`，而不是 bank 或对象编号；底层 `preserve` 策略仍支持手工 CP 实验。
-CP=0 仍可命中缓存，CP=1 不保证驻留；数学计算和顶层 Evaluator API 保持不变。
-[RTL 集成交接](doc/delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md) 说明 CPU/SoC 尚需同步的部分。
+默认编译要求 SEAL、方案软件执行器及最终指令 host 模型通过。host 模型提供功能
+证据，不能代替 CPU/SoC、RTL 或板端验收；包内硬件验证字段保持 false，实际目标
+执行按 IT 清单单独记录。旧机器码或旧数据布局需要完整重新生成。

@@ -1,8 +1,14 @@
 # HPU 应用包 IT 交接清单
 
 本文用于交接 `hpu_fhe_delivery` 生成的 CKKS、BFV、BGV application package v1。
-包内已经包含指令、resolved DMA、初始 HPU_MEM 镜像、逐算子 golden 和软件验证报告；
+包内已经包含指令、resolved DMA、初始 HPU_MEM 镜像、指定输出 golden 和软件验证报告；
 RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
+
+`hpu_native_kernel_delivery` 生成的 CMULT、NTT、INTT 也使用同样的文件格式，
+但属于未加密环算术测试。先检查 `metadata/parameters.json.test_layer`：
+`native_ring_arithmetic` 包使用独立整数计算或既有 NTT 功能模型作为参考，
+不提供 SEAL 密文差分、解密结果或安全参数证据；下文的 SEAL 双路径要求适用于
+三方案加密应用包。原生用例仍须通过包校验及最终指令模型比较。
 
 ## 64 对象版本接收要求
 
@@ -62,8 +68,8 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 
 `legacy_raw_stage` 用于回放历史 raw 镜像。选择 profile 不修改镜像或指令；
 新自然镜像使用 legacy profile 可能比较失败。
-`test/reference/main.cpp` 的历史固定 profile 算子包仍是 BR 系数镜像，不能套用
-新应用镜像的自然位置表约定。
+`test/reference/main.cpp` 的历史数学 fixture 仍含 BR 系数数据，不能套用新应用
+镜像约定，也不是当前公开交付格式。旧直接汇编交付入口已经移除。
 
 新包的数据 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
 回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
@@ -79,6 +85,18 @@ PINTT stage 0；pre/post PMUL 向量仍为 N 个 word。旧完整表镜像不能
 或已修复的结论。目标验收仍需确认命令合流在背压下保持程序顺序，并保存完整 IT
 结果；本次编译器不新增每 stage 软件等待。历史背景见
 [迁移说明第 8.1 节](../reference/TWIDDLE_COMPILER_MIGRATION.md#81-已知硬件合流器问题与参数迁移分开验收)。
+
+### 导出结果与 IO 验收
+
+目标端只按 `golden_manifest.csv` 读回导出结果。Evaluator 使用全部 `mark_output()`
+标记，无标记时保留最后计算结果；Plan 默认保留最终结果。内部逻辑节点不保证在
+程序结束后拥有可读 DDR 地址，不能按节点名称自行拼接地址。需要中间检查点时，
+请用例作者显式增加输出标记并重新生成完整包。
+
+软件资源报告以 `dma_bytes` 为主，分开记录读/写、重复范围读取和初始镜像大小。
+比较原序与优化结果时保持相同 N、Q/P、输入和导出集合。默认性能条件可使用
+`--degree 8192 --data-moduli 4 --seed 0`，加 `--no-opt` 生成原序对照。
+硬件阶段另记录实际 DDR 流量、执行周期及 LLC 行为。
 
 ## 2. 发布方生成步骤
 

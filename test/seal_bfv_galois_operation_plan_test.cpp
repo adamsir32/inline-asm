@@ -203,7 +203,7 @@ int main()
                     count_token(lowered.body_asm,
                                 hpu::dload(4, hpu::DataType::mod_ctx,
                                            hpu::DloadFlag::small_bank)) == 1 &&
-                    count_token(lowered.body_asm, hpu::pfree(4)) == 1,
+                    count_token(lowered.body_asm, hpu::pfree(4)) == 0,
                 "BFV rotation lowering selected the wrong kernel or modulus-table lifetime");
 
         const auto relocation = hpu::seal_adapter::build_bfv_relocation_schedule(

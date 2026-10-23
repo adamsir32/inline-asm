@@ -164,6 +164,48 @@ std::size_t physical_origin(const State& state, std::size_t index)
     return index;
 }
 
+// Output roots are logical handles. Metadata views share the physical value,
+// while repeated labels for that value must not duplicate deployment goldens.
+std::vector<std::size_t> output_indices(const State& state)
+{
+    std::vector<std::size_t> roots;
+    for (const auto& output : state.outputs) roots.push_back(output.second);
+    if (roots.empty()) {
+        std::size_t last = state.values.size();
+        for (std::size_t i = state.values.size(); i > 0; --i) {
+            const auto kind = state.values[i - 1].kind;
+            if (kind != Kind::input && kind != Kind::scale_view) {
+                last = i - 1;
+                break;
+            }
+        }
+        if (last != state.values.size()) {
+            // Use the latest metadata view of that computation, rather than a
+            // later import or a view of an unrelated, earlier computation.
+            for (std::size_t i = state.values.size(); i > last; --i) {
+                if (physical_origin(state, i - 1) == last) {
+                    roots.push_back(i - 1);
+                    break;
+                }
+            }
+        }
+    }
+    if (roots.empty()) throw std::invalid_argument("frontend application has no computation");
+    return roots;
+}
+
+std::vector<std::string> exported_prefixes(
+    const State& state, const std::vector<std::string>& physical_ids)
+{
+    std::vector<std::string> prefixes;
+    for (const auto index : output_indices(state)) {
+        const auto& prefix = physical_ids.at(index);
+        if (std::find(prefixes.begin(), prefixes.end(), prefix) == prefixes.end())
+            prefixes.push_back(prefix);
+    }
+    return prefixes;
+}
+
 std::string json_string(const std::string& text)
 {
     // Names are restricted to identifier paths; no escaping is needed here.
@@ -659,7 +701,7 @@ void compile_ckks(const State& state, const std::string& stem,
     const auto runtime = lower_ckks_runtime_program(lowered, relocation);
     const auto artifacts = render_ckks_runtime_artifacts(stem, runtime, builder.image().capacity_lines());
     data.request = make_ckks_application_package(stem, state.context, lowered, runtime, artifacts,
-        builder.image(), oracles, executor.memory().words());
+        builder.image(), oracles, executor.memory().words(), exported_prefixes(state, physical_ids));
     data.image = builder.image();
     data.request.initial_image = &data.image;
     data.node_count = execute.size();
@@ -810,7 +852,7 @@ void compile_bfv(const State& state, const std::string& stem,
     const auto runtime = lower_bfv_runtime_program(lowered, relocation);
     const auto artifacts = render_bfv_runtime_artifacts(stem, runtime, builder.image().capacity_lines());
     data.request = make_bfv_application_package(stem, state.context, lowered, runtime, artifacts,
-        builder.image(), oracles, executor.memory().words());
+        builder.image(), oracles, executor.memory().words(), exported_prefixes(state, physical_ids));
     data.image = builder.image();
     data.request.initial_image = &data.image;
     data.node_count = execute.size();
@@ -850,7 +892,7 @@ void compile_bgv(const State& state, const std::string& stem,
             oracles.push_back(data.oracles.at(i));
         }
     }
-    const auto output_index = state.outputs.empty() ? state.values.size() - 1 : state.outputs.back().second;
+    const auto output_index = output_indices(state).back();
     plan.set_output(prepared.at(output_index));
     for (std::size_t i = 0; i < prepared.size(); ++i)
         physical_ids[i] = plan.allocation_prefix(prepared[i]);
@@ -858,7 +900,7 @@ void compile_bgv(const State& state, const std::string& stem,
     BgvSoftwareExecutor executor(state.context, application.image);
     executor.execute(plan);
     data.request = make_bgv_application_package(stem, state.context, plan, application,
-        oracles, executor.memory().words());
+        oracles, executor.memory().words(), exported_prefixes(state, physical_ids));
     data.image = std::move(application.image);
     data.request.initial_image = &data.image;
     data.node_count = oracles.size();
@@ -868,7 +910,7 @@ void add_frontend_graph(const State& state, const std::vector<std::string>& phys
                         detail::CompiledFrontend& data)
 {
     auto& graph = data.request.operation_graph_json;
-    const auto final_index = state.outputs.empty() ? state.values.size() - 1 : state.outputs.back().second;
+    const auto final_index = output_indices(state).back();
     const auto final_marker = graph.rfind(",\"final_output\":");
     if (final_marker == std::string::npos) throw std::logic_error("frontend delivery graph has no final output");
     graph.resize(final_marker);
@@ -913,7 +955,7 @@ CompiledApplication ApplicationBuilder::compile(const std::string& stem, Compile
     for (const auto& value : snapshot.values)
         if (value.kind != Kind::input && value.kind != Kind::scale_view) ++operations;
     if (!operations) throw std::invalid_argument("frontend application has no computation");
-    const auto final_index = snapshot.outputs.empty() ? snapshot.values.size() - 1 : snapshot.outputs.back().second;
+    const auto final_index = output_indices(snapshot).back();
     if (snapshot.values.at(physical_origin(snapshot, final_index)).kind == Kind::input)
         throw std::invalid_argument("frontend final output must originate from a computation");
     auto data = std::make_shared<detail::CompiledFrontend>();

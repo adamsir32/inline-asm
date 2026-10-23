@@ -121,6 +121,10 @@ void OperatorProgram::append(const OperatorProgram& source, std::size_t begin, s
 void OperatorProgram::bind_port(PortId id, hpu::compiler::ResolvedDma binding)
 {
     auto& port = ports.at(id);
+    if (port.logical_binding.empty())
+        port.logical_binding = std::string(port.load ? "read:" : "write:") +
+            binding.allocation_id + "@" + std::to_string(binding.span.line_offset) +
+            ":" + std::to_string(binding.span.line_count);
     binding.instruction_index = port.operation_index;
     port.binding = std::move(binding);
 }
@@ -142,10 +146,35 @@ void OperatorProgram::bind_ports(const std::vector<hpu::compiler::ResolvedDma>& 
     }
 }
 
+void OperatorProgram::bind_named_ports(
+    const std::map<std::string, hpu::compiler::ResolvedDma>& bindings)
+{
+    for (PortId id = 0; id < ports.size(); ++id) {
+        const auto& name = ports[id].logical_binding;
+        if (name.empty()) continue;
+        const auto found = bindings.find(name);
+        if (found == bindings.end()) {
+            if (ports[id].binding) continue;
+            throw std::invalid_argument("missing named operator data binding: " + name);
+        }
+        bind_port(id, found->second);
+    }
+}
+
 Recording::Recording() : previous_(current) { current = this; }
 Recording::~Recording() { current = previous_; }
 OperatorProgram Recording::finish() { return std::move(program_); }
-void Recording::append(const OperatorProgram& program) { program_.append(program); }
+void Recording::append(const OperatorProgram& program)
+{
+    const auto begin = program_.operations.size();
+    program_.append(program);
+    for (std::size_t i = begin; i < program_.operations.size(); ++i) {
+        auto& operation = program_.operations[i];
+        if (operation.instruction.mnemonic == hpu::Mnemonic::kPmodld)
+            modulus_context_ = operation.instruction.mod_id;
+        else if (!operation.modulus_context) operation.modulus_context = modulus_context_;
+    }
+}
 std::optional<ValueId> Recording::existing(const Operand& variable) const
 {
     const auto found = program_.current_values.find(variable.symbol);
@@ -169,6 +198,9 @@ ValueId Recording::define(const Operand& variable)
 }
 void Recording::emit(Operation op)
 {
+    if (op.instruction.mnemonic == hpu::Mnemonic::kPmodld)
+        modulus_context_ = op.instruction.mod_id;
+    else if (!op.modulus_context) op.modulus_context = modulus_context_;
     if (op.instruction.mnemonic == hpu::Mnemonic::kDload || op.instruction.mnemonic == hpu::Mnemonic::kDstore) {
         if (op.port) {
             if (*op.port >= program_.ports.size()) throw std::invalid_argument("unknown data port");
@@ -178,6 +210,19 @@ void Recording::emit(Operation op)
         }
     }
     program_.operations.push_back(std::move(op));
+}
+
+void Recording::name_last_port(std::string logical_binding)
+{
+    if (program_.operations.empty() || !program_.operations.back().port)
+        throw std::logic_error("last operator operation has no data port");
+    program_.ports.at(*program_.operations.back().port).logical_binding = std::move(logical_binding);
+}
+void Recording::bind_last_port(hpu::compiler::ResolvedDma binding)
+{
+    if (program_.operations.empty() || !program_.operations.back().port)
+        throw std::logic_error("last operator operation has no data port");
+    program_.bind_port(*program_.operations.back().port, std::move(binding));
 }
 
 Operand compatibility_operand(int slot)
@@ -217,6 +262,40 @@ std::string read(Operand object, hpu::DataType type, hpu::DloadFlag flag, hpu::C
     op.cp = static_cast<std::uint8_t>(cp);
     emit(op, {}, {object});
     return object.compatibility_slot < 0 ? std::string{} : hpu::dload(object.compatibility_slot, type, flag, cp);
+}
+std::string read(Operand object, hpu::DataType type, const std::string& logical_binding,
+                 hpu::DloadFlag flag, hpu::CachePolicy cp)
+{
+    auto result = read(object, type, flag, cp);
+    if (current) current->name_last_port(logical_binding);
+    return result;
+}
+std::string input(Operand object, hpu::compiler::ResolvedDma binding,
+                  hpu::DataType type, hpu::DloadFlag flag, hpu::CachePolicy cp)
+{
+    auto result = read(object, type, flag, cp);
+    if (current) current->bind_last_port(std::move(binding));
+    return result;
+}
+std::string output(Operand object, hpu::CachePolicy cp)
+{
+    return publish(object, 0, cp);
+}
+std::string output(Operand object, const std::string& logical_binding, hpu::CachePolicy cp)
+{
+    auto result = output(object, cp);
+    if (current) current->name_last_port(logical_binding);
+    return result;
+}
+std::string output(Operand object, hpu::compiler::ResolvedDma binding, hpu::CachePolicy cp)
+{
+    auto result = output(object, cp);
+    if (current) current->bind_last_port(std::move(binding));
+    return result;
+}
+std::string publish(Operand object, const std::string& logical_binding)
+{
+    return output(object, logical_binding);
 }
 std::string publish(Operand object, int release, hpu::CachePolicy cp)
 {
@@ -271,6 +350,7 @@ std::string render_operator_ir(const OperatorProgram& program)
         out << "] defs=[";
         for (auto id : op.outputs) out << '%' << id << ' ';
         out << ']';
+        if (op.modulus_context) out << " modulus_context=" << *op.modulus_context;
         if (op.tied_input) out << " tied_input=" << *op.tied_input;
         if (op.reuse) out << " reuse=%" << *op.reuse;
         const auto& inst = op.instruction;
@@ -288,6 +368,7 @@ std::string render_operator_ir(const OperatorProgram& program)
         if (op.port) {
             out << " port=" << *op.port;
             const auto& port = program.ports.at(*op.port);
+            if (!port.logical_binding.empty()) out << " role=" << std::quoted(port.logical_binding);
             if (port.binding) out << " buffer=" << std::quoted(port.binding->allocation_id)
                 << " line_offset=" << port.binding->span.line_offset << " lines=" << port.binding->span.line_count;
         }

@@ -39,25 +39,23 @@ std::string generate_ciphertext_binary_body(
         asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
+            "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             asm_code << "        /* component_" << component
                      << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/" + limb);
+            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly, prefix + "right/" + limb);
             asm_code << (subtract
                 ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
                 : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
-            asm_code << hpu::resource::discard(kLeftObject);
-            asm_code << hpu::resource::discard(kRightObject);
-            asm_code << hpu::resource::publish(kOutputObject, 1);
+            asm_code << hpu::resource::output(kOutputObject, prefix + "output/" + limb);
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -82,28 +80,25 @@ std::string generate_plain_binary_body(
         asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
+            "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     for (int basis = 0; basis < num_q; ++basis) {
+        const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
         asm_code << "        /* q_" << basis << ": out0=c0 op plaintext */\n";
         asm_code << hpu::resource::select_modulus(basis);
-        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/c0");
+        asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly, prefix + "plaintext");
         asm_code << (subtract
             ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
             : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
-        asm_code << hpu::resource::discard(kLeftObject);
-        asm_code << hpu::resource::discard(kRightObject);
-        asm_code << hpu::resource::publish(kOutputObject, 1);
+        asm_code << hpu::resource::output(kOutputObject, prefix + "output/c0");
 
         // The standalone ABI materializes both output components. A runtime
         // implementing an in-place operation may alias c1 and omit this copy.
         asm_code << "        /* q_" << basis << ": out1=c1 */\n";
-        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::resource::publish(kLeftObject, 1);
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/c1");
+        asm_code << hpu::resource::output(kLeftObject, prefix + "output/c1");
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -170,12 +165,10 @@ std::string generate_multiply_plain_body_asm(
         asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
+            "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     asm_code << ::generate_hpu_pmult_body_asm(num_q, false, false);
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }
@@ -216,24 +209,23 @@ std::string generate_negate_body_asm(
         asm_code << hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
+            "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             asm_code << "        /* component_" << component
                      << ", q_" << basis << ": synthesize zero, then 0-c */\n";
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/" + limb);
             asm_code << hpu::resource::subtract(
                 kOutputObject, kLeftObject, kLeftObject);
             asm_code << hpu::resource::subtract(
                 kOutputObject, kOutputObject, kLeftObject);
-            asm_code << hpu::resource::discard(kLeftObject);
-            asm_code << hpu::resource::publish(kOutputObject, 1);
+            asm_code << hpu::resource::output(kOutputObject, prefix + "output/" + limb);
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();

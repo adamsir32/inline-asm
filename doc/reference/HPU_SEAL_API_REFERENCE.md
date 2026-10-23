@@ -270,8 +270,10 @@ app.mark_output("mixed", mixed);
 ```
 
 两个旋转节点都引用 `x`，`mixed` 引用两个分支，依赖由句柄确定。
-目前编译整个已记录图，各计算节点结果均保留 golden；`mark_output` 记录命名输出，
-不会裁剪其他节点。显式标记结果可避免依赖隐式的最后一个值。
+部署只保留全部 `mark_output()` 指定的结果；未标记的内部结果由编译器管理，
+不强制写回 DDR。未连接到输出的计算可被删除。没有标记时导出最后一个计算结果，
+而不是最后导入的输入。显式标记中间值即可让 IT 额外读回；它会限制相关写回优化。
+多个标签或 scale view 可以引用同一物理结果，包内 golden 不重复。
 
 ### 4.4 名称规则
 
@@ -299,7 +301,8 @@ context 必须是有效的 CKKS/BFV/BGV，N 为 `[128,65536]` 内的 2 次幂，
 | `compile(stem, options={})` | 编译快照并返回 `CompiledApplication`，要求图至少包含一个计算操作 |
 | `context()` | 查询应用使用的 SEAL context |
 
-不显式标记输出时，编译器使用最后记录的值作为最终结果，并要求它来源于计算。
+不显式标记输出时，编译器使用最后一个计算结果；该结果的最新 scale view 可提供
+导出元数据。后续导入输入或修改其他旧值的 scale 不会改变隐式结果。
 `ApplicationBuilder` 不可复制；每个应用建立自己的 builder。
 
 ### 5.2 值句柄
@@ -504,11 +507,12 @@ const auto compiled = app.compile("my_application", options);
 | 字段 | 默认值 | 用途 |
 | --- | --- | --- |
 | `capacity_lines` | `1ULL << 24` | 数据构建阶段的行数上限，1 line=256B；实际包按使用量收紧窗口 |
-| `optimize_resources` | `true` | 启用工作区生命周期复用、对象槽位与 bank 调度 |
+| `optimize_resources` | `true` | 比较原序、读取复用、依赖重排候选，按 DMA 字节/次数/指令数选择 |
 | `require_instruction_verification` | `true` | 最终指令模型与 golden 不匹配时停止编译 |
 | `instruction_ntt_contract` | `natural_coefficient_boundaries` | 新应用的默认 host NTT 功能契约 |
 
-选择 NoOpt 使用 `optimize_resources=false`；保留失败指令报告使用
+选择 NoOpt 使用 `optimize_resources=false`，使用统一 SSA 后端生成原序基准，不承诺
+保留历史手写 DMA、PFREE 或 DDR 布局。保留失败指令报告使用
 `require_instruction_verification=false`。诊断模式仍执行和记录指令比较，SEAL 与
 方案模型必须通过，资源优化改变基准结果也会失败。
 
@@ -519,13 +523,39 @@ const auto compiled = app.compile("my_application", options);
 用于回放旧 raw 镜像，选择它不转换镜像或表，也不改变硬件 ABI。完整约定和
 诊断 CLI 见 [前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
 
+### 8.1 IO 对照与示例参数
+
+仓库三个 Evaluator 示例支持 `--degree N`、`--data-moduli COUNT`、`--seed UINT64`、
+`--no-opt` 和 `--emit-dir PATH`。`--data-moduli 4` 表示 Q4，另准备一个 special P；
+默认仍为 Q3。`--seed` 是可重复测试 fixture 选项，不改变应用接口。
+
+```sh
+./build/hpu_ckks_evaluator_example --degree 8192 --data-moduli 4 --seed 0 \
+  --emit-dir outputs/ckks_evaluator_application_n8192_q4
+./build/hpu_ckks_evaluator_example --degree 8192 --data-moduli 4 --seed 0 --no-opt \
+  --emit-dir outputs/ckks_evaluator_application_n8192_q4_noopt
+```
+
+以 `compiler_resources.dma_bytes` 为主要 IO 指标，分别检查 `dload_bytes`、
+`dstore_bytes`、`repeated_range_read_bytes` 和 `io_by_allocation`。`spills=0` 不能
+说明没有重复读取。比较时保持相同参数、输入和输出集合；删除额外输出带来的收益
+应单独计算。初始镜像体积与运行期 DMA 分开统计。
+
+需要一次生成三方案并汇总时，使用 `python3 tools/benchmark_io.py --build-dir build
+--output-root outputs/io_optimized`。默认 N8192、Q4、P1、seed=0，结果在输出根的
+`io_summary.json`。用另一输出根加 `--no-opt` 生成原序报告，再通过
+`--baseline-json PATH/io_summary.json` 比较；参数、fixture 或导出输出不一致会
+拒绝比较。完整命令与统计口径见
+[前端入门的 IO 对照](../getting-started/HPU_EVALUATOR_FRONTEND.md#n8192q4p1-的可重复-io-对照)。
+
 ## 9. golden、数学验证与交付
 
 ### 9.1 自动对照与用例预期
 
 `compile()` 自动运行 SEAL oracle、方案 SoftwareExecutor 和最终指令 host 模型。
-每个计算节点的 golden 来自 SEAL 密文结果，转换到 HPU 布局后与两种软件实现的
-有效 uint32 word 严格比较；优化模式还比较原始流与优化流结果。
+方案 SoftwareExecutor 的每个节点与 SEAL oracle 的有效 uint32 word 严格比较。
+部署 golden 只保存指定导出结果，最终指令模型检查这些结果；优化模式还比较
+相同输出集合的统一后端原序基准与最终优化流。
 
 | 检查 | 用于回答 |
 | --- | --- |
@@ -547,13 +577,15 @@ BFV/BGV 解码预期按模 t 计算。自动对拍不能替代作者的独立公
 | `package.json` | 方案、案例名称及各清单路径 |
 | `program/` | 最终指令、DMA 清单、目标侧 C/h；提供 `hpu_run_<stem>()` |
 | `memory/hpu_mem_image.u32.bin` | 执行前加载的初始镜像 |
-| `golden/golden_manifest.csv` | 各节点、分量、模数、结果路径与最终读回 span |
+| `golden/golden_manifest.csv` | 指定导出结果的分量、模数、结果路径与最终读回 span |
 | `metadata/operation_graph.json` | 依赖图与命名输出，供失败定位 |
 | `oracle/report.json` | 功能对拍、最终指令验证、资源报告及优化等价状态 |
 | `semantic/decoded.json` | 可选的用例数学验证报告 |
 
 BFV golden 是自然顺序系数域；CKKS/BGV 是 canonical HPU NTT 物理布局。
-golden 按节点、密文分量和模数 limb 拆分，每个计算节点结果保留独立读回空间。
+golden 按导出节点、密文分量和模数 limb 拆分，仅这些结果保留目标读回空间。
+计算图中 `exported=false` 的节点只有逻辑引用，没有保证可读的最终 DDR 地址；
+`exported=true` 的节点通过 `golden_object_id` 关联 golden manifest。
 host 指令对拍检查有效字值，IT 还应检查 padding 和越界写入。
 
 目标端加载初始镜像并运行 C 入口，按 golden 清单读回和比较。golden 文件作为

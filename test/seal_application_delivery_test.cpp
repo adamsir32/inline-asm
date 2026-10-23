@@ -23,8 +23,8 @@ void rejects(F action, const std::string& fragment)
     throw std::runtime_error("delivery accepted invalid input: " + fragment);
 }
 
-// CP is independent of the relocation recipe: both native declarations and
-// the assembly compatibility path must accept a cached global modulus load.
+// Native relocation preserves CP. Assembly text alone is no longer an
+// application delivery entrypoint and must be rejected explicitly.
 template<class Lowered>
 Lowered cached_modulus_program(const Lowered& original, bool native)
 {
@@ -88,6 +88,11 @@ void test_ckks()
     make({oracle}, executor.memory().words());
     for (const bool native : {true, false}) {
         const auto cached = cached_modulus_program(lowered, native);
+        if (!native) {
+            rejects([&] { build_ckks_relocation_schedule(cached, image.image(), context); },
+                    "requires native operator IR");
+            continue;
+        }
         const auto relocation = build_ckks_relocation_schedule(cached, image.image(), context);
         if (relocation.bindings.empty() || relocation.bindings.front().cp != 1)
             throw std::runtime_error("CKKS global relocation lost CP=1");
@@ -147,6 +152,11 @@ void test_bfv()
     make({oracle}, executor.memory().words());
     for (const bool native : {true, false}) {
         const auto cached = cached_modulus_program(lowered, native);
+        if (!native) {
+            rejects([&] { build_bfv_relocation_schedule(cached, image.image(), context); },
+                    "requires native operator IR");
+            continue;
+        }
         const auto relocation = build_bfv_relocation_schedule(cached, image.image(), context);
         if (relocation.bindings.empty() || relocation.bindings.front().cp != 1)
             throw std::runtime_error("BFV global relocation lost CP=1");

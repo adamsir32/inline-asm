@@ -1,4 +1,5 @@
 #include "hpu/seal/bgv_modswitch_application.hpp"
+#include "native_application_bindings.hpp"
 
 #include "hpu/model/hardware_ntt.hpp"
 #include "hpu/seal/ntt_bridge.hpp"
@@ -105,66 +106,6 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
     image.add(prefix + "/intt/post_untwist_scale", post,
               hpu::runtime::AllocationKind::twiddle);
 }
-
-class DmaRecipe {
-public:
-    DmaRecipe(const hpu::runtime::HpuMemImage& image,
-              const std::vector<hpu::DmaRelocation>& encoded)
-        : image_(image), encoded_(encoded)
-    {}
-
-    void load(int slot, const std::string& id, std::size_t words,
-              hpu::DataType type = hpu::DataType::poly,
-              hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
-    {
-        if (id.find("/stage") != std::string::npos) type = hpu::DataType::twiddle_parameters;
-        bind(id, words, hpu::Mnemonic::kDload, slot,
-             hpu::dma_mod_bit(type), hpu::dma_bank_mask(type, flag));
-    }
-
-    void store(int slot, const std::string& id, std::size_t words)
-    {
-        bind(id, words, hpu::Mnemonic::kDstore, slot, 1, 0);
-    }
-
-    std::vector<BgvModSwitchDmaBinding> finish()
-    {
-        if (bindings_.size() != encoded_.size()) {
-            throw std::logic_error("BGV ModSwitch DMA recipe did not consume every instruction");
-        }
-        return std::move(bindings_);
-    }
-
-private:
-    void bind(const std::string& id, std::size_t words, hpu::Mnemonic direction,
-              int slot, std::uint8_t type_or_release, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
-    {
-        const std::size_t index = bindings_.size();
-        if (index >= encoded_.size()) {
-            throw std::logic_error("BGV ModSwitch DMA recipe exceeds encoded stream");
-        }
-        const auto& instruction = encoded_[index];
-        const auto& allocation = image_.allocation(id);
-        if (instruction.dma_index != index || instruction.direction != direction ||
-            (cp && instruction.cp != *cp) || instruction.object_id != slot ||
-            instruction.type_or_release != type_or_release ||
-            (direction == hpu::Mnemonic::kDload && instruction.flag != flag) ||
-            allocation.word_count != words || allocation.span.line_count == 0 ||
-            (direction == hpu::Mnemonic::kDstore && allocation.read_only)) {
-            throw std::invalid_argument(
-                "BGV ModSwitch DMA binding disagrees with encoded instruction or image: " + id);
-        }
-        bindings_.push_back({
-            index, instruction.instruction_index, instruction.direction,
-            instruction.object_id, instruction.type_or_release,
-            instruction.flag, id, allocation.span});
-        bindings_.back().cp = instruction.cp;
-    }
-
-    const hpu::runtime::HpuMemImage& image_;
-    const std::vector<hpu::DmaRelocation>& encoded_;
-    std::vector<BgvModSwitchDmaBinding> bindings_;
-};
 
 std::string csv_field(const std::string& value)
 {
@@ -294,50 +235,15 @@ BgvModSwitchApplication build_bgv_modswitch_application(
         static_cast<int>(degree), layout, static_cast<int>(input.size()), true, true);
     auto instructions = hpu::assemble_source(body);
     hpu::validate_executable_program(instructions);
-    const auto encoded_dma = hpu::collect_dma_relocations(instructions);
-    DmaRecipe recipe(image, encoded_dma);
-    const std::size_t stages = ntt_stage_count(degree);
-    recipe.load(4, "constants/modulus_table", modulus_words.size(),
-                hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
-    for (std::size_t component = 0; component < input.size(); ++component) {
-        const std::string component_prefix = "c" + std::to_string(component);
-        const int last_id = layout.q_mod_ids.back();
-        const std::string twiddle_last = mod_id("constants/twiddle/canonical", last_id);
-        const std::string last_coeff =
-            "workspace/bgv_modswitch/" + component_prefix + "/last_coeff";
-        const std::string u_t = "workspace/bgv_modswitch/" + component_prefix + "/u_t";
-        recipe.load(0, mod_id("input/" + component_prefix, last_id), degree);
-        for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle_last + "/intt", stage), hpu::model::kStageTwiddleParameterWords);
-        }
-        recipe.load(3, twiddle_last + "/intt/post_untwist_scale", degree);
-        recipe.store(0, last_coeff, degree);
-        recipe.load(0, last_coeff, degree);
-        recipe.load(1, constant_prefix + "/neg_inv_t", degree);
-        recipe.store(0, u_t, degree);
-        for (std::size_t basis = 0; basis + 1 < q_moduli.size(); ++basis) {
-            const int id = static_cast<int>(basis);
-            const std::string twiddle_q = mod_id("constants/twiddle/canonical", id);
-            recipe.load(0, u_t, degree);
-            recipe.load(1, mod_id(constant_prefix + "/q_last_mod", id), degree);
-            recipe.load(1, last_coeff, degree);
-            recipe.load(3, twiddle_q + "/ntt/pre_twist", degree);
-            for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(twiddle_q + "/ntt", stage), hpu::model::kStageTwiddleParameterWords);
-            }
-            recipe.load(1, mod_id("input/" + component_prefix, id), degree);
-            recipe.load(0, mod_id(constant_prefix + "/q_last_inv", id), degree);
-            recipe.store(1, mod_id("output/" + component_prefix, id), degree);
-        }
-    }
-
-    auto bindings = recipe.finish();
+    auto native_program = recording.finish();
+    auto bindings = detail::bind_native_application_ports<BgvModSwitchDmaBinding>(
+        native_program, image, degree);
     BgvModSwitchApplication result{
         std::move(image), input.parms_id(), source->next_context_data()->parms_id(),
         hpu::scheme::bgv::modswitch_correction_factor(
             input.correction_factor(), q_moduli.back(), t),
         std::move(instructions), std::move(bindings),
-            std::make_shared<hpu::resource::OperatorProgram>(recording.finish())};
+            std::make_shared<hpu::resource::OperatorProgram>(std::move(native_program))};
     return result;
 }
 

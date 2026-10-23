@@ -122,9 +122,10 @@ class DmaRecipe {
 public:
     DmaRecipe(const Image& image, const std::vector<hpu::DmaRelocation>& encoded,
               std::optional<std::size_t> operation_index = {},
-              std::string operation_id = "$application")
+              std::string operation_id = "$application",
+              const hpu::resource::OperatorProgram* program = nullptr)
         : image_(image), encoded_(encoded), operation_index_(operation_index),
-          operation_id_(std::move(operation_id)) {}
+          operation_id_(std::move(operation_id)), program_(program) {}
 
     void load(int slot, const std::string& id,
               hpu::DataType type = hpu::DataType::poly,
@@ -132,7 +133,11 @@ public:
     { bind(id, hpu::Mnemonic::kDload, slot, hpu::dma_mod_bit(type),
            hpu::dma_bank_mask(type, flag)); }
     void store(int slot, const std::string& id)
-    { bind(id, hpu::Mnemonic::kDstore, slot, 1, 0); }
+    { bind(id, hpu::Mnemonic::kDstore, slot, 0, 0); }
+    void load_named(const std::string& name, const std::string& id)
+    { load(named_slot(name, true), id); }
+    void store_named(const std::string& name, const std::string& id)
+    { store(named_slot(name, false), id); }
     template<class Binding>
     void replay(const Binding& binding, const std::string& id)
     { bind(id, binding.direction, binding.object_slot,
@@ -144,6 +149,18 @@ public:
         return std::move(bindings_);
     }
 private:
+    int named_slot(const std::string& name, bool load) const
+    {
+        if (!program_) throw std::logic_error("named BGV binding requires native IR");
+        const auto found = std::find_if(program_->ports.begin(), program_->ports.end(),
+            [&](const auto& port) { return port.logical_binding == name; });
+        if (found == program_->ports.end() || found->load != load)
+            throw std::logic_error("missing logical BGV tensor port: " + name);
+        const auto& operation = program_->operations.at(found->operation_index);
+        const auto id = load ? operation.outputs.at(0) : operation.inputs.at(0);
+        return program_->values.at(id).variable.compatibility_slot;
+    }
+
     void bind(const std::string& id, hpu::Mnemonic direction, int slot,
               std::uint8_t type, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
     {
@@ -169,6 +186,7 @@ private:
     const std::vector<hpu::DmaRelocation>& encoded_;
     std::optional<std::size_t> operation_index_;
     std::string operation_id_;
+    const hpu::resource::OperatorProgram* program_;
     std::vector<BgvKeySwitchDmaBinding> bindings_;
 };
 
@@ -558,13 +576,11 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
                 } else image.reserve(relocated, allocation.word_count, allocation.kind);
             }
             const auto& stream = standalone.instructions;
-            if (stream.size() < 3 || stream.front().instruction.mnemonic != hpu::Mnemonic::kDload ||
-                stream[stream.size() - 2].instruction.mnemonic != hpu::Mnemonic::kPfree ||
-                stream[stream.size() - 2].instruction.idx0 != 4 ||
+            if (stream.size() < 2 || stream.front().instruction.mnemonic != hpu::Mnemonic::kDload ||
                 stream.back().instruction.mnemonic != hpu::Mnemonic::kPsync ||
                 standalone.dma.empty() || standalone.dma.front().allocation_id != "constants/modulus_table")
                 throw std::logic_error("BGV standalone operation prologue/epilogue changed");
-            const std::vector<hpu::EncodedInstruction> body(stream.begin() + 1, stream.end() - 2);
+            const std::vector<hpu::EncodedInstruction> body(stream.begin() + 1, stream.end() - 1);
             const auto encoded = hpu::collect_dma_relocations(body);
             DmaRecipe recipe(image, encoded, index, step.id);
             for (std::size_t d = 1; d < standalone.dma.size(); ++d)
@@ -573,7 +589,7 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             if (!standalone.operator_program)
                 throw std::logic_error("BGV operation lacks native operator IR");
             operator_program->append(*standalone.operator_program, 1,
-                standalone.operator_program->operations.size() - 2);
+                standalone.operator_program->operations.size() - 1);
         };
         if (step.kind == Kind::rotate_rows || step.kind == Kind::rotate_columns) {
             const auto capacity = estimate_bgv_rotation_image_lines(degree, q_count, key_moduli.size());
@@ -638,7 +654,8 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
         }
         const auto body = hpu::assemble_source(assembly);
         const auto encoded = hpu::collect_dma_relocations(body);
-        DmaRecipe recipe(image, encoded, index, step.id);
+        auto native_program = recording.finish();
+        DmaRecipe recipe(image, encoded, index, step.id, &native_program);
         if (binary) {
             const auto right_prefix = allocation_prefix(step.inputs[1]);
             for (std::size_t c = 0; c < 2; ++c) for (std::size_t q = 0; q < q_count; ++q) {
@@ -652,13 +669,15 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
         } else if (step.kind == Kind::multiply_tensor) {
             const auto right_prefix = allocation_prefix(step.inputs[1]);
             for (std::size_t q = 0; q < q_count; ++q) {
-                recipe.load(0, mod_id(input_prefix + "/c0", q)); recipe.load(1, mod_id(right_prefix + "/c0", q));
-                recipe.store(2, mod_id(output_prefix + "/c0", q));
-                recipe.load(0, mod_id(input_prefix + "/c0", q)); recipe.load(1, mod_id(right_prefix + "/c1", q));
-                recipe.load(0, mod_id(input_prefix + "/c1", q)); recipe.load(1, mod_id(right_prefix + "/c0", q));
-                recipe.store(2, mod_id(output_prefix + "/c1", q));
-                recipe.load(0, mod_id(input_prefix + "/c1", q)); recipe.load(1, mod_id(right_prefix + "/c1", q));
-                recipe.store(2, mod_id(output_prefix + "/c2", q));
+                const auto prefix = "tensor/mod" + std::to_string(q) + "/";
+                recipe.load_named(prefix + "left/c0", mod_id(input_prefix + "/c0", q));
+                recipe.load_named(prefix + "right/c0", mod_id(right_prefix + "/c0", q));
+                recipe.load_named(prefix + "left/c1", mod_id(input_prefix + "/c1", q));
+                recipe.load_named(prefix + "right/c1", mod_id(right_prefix + "/c1", q));
+                for (std::size_t component = 0; component < 3; ++component) {
+                    recipe.store_named(prefix + "output/c" + std::to_string(component),
+                        mod_id(output_prefix + "/c" + std::to_string(component), q));
+                }
             }
         } else {
             for (std::size_t q = 0; q < q_count; ++q) {
@@ -669,11 +688,10 @@ BgvKeySwitchApplication BgvOperationPlan::lower(std::uint64_t capacity_lines) co
             }
         }
         append_program(body, recipe.finish());
-        operator_program->append(recording.finish());
+        operator_program->append(native_program);
     }
     hpu::resource::Recording ending_recording;
-    auto ending_assembly = hpu::resource::discard(native_modulus);
-    ending_assembly += hpu::resource::finish_program();
+    const auto ending_assembly = hpu::resource::finish_program();
     const auto ending = hpu::assemble_source(ending_assembly);
     append_program(ending, {});
     operator_program->append(ending_recording.finish());

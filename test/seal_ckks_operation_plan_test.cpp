@@ -280,7 +280,7 @@ int main()
             count_token(lowered.body_asm, hpu::dload(
                 4, hpu::DataType::mod_ctx,
                 hpu::DloadFlag::small_bank)) == 1
-                && count_token(lowered.body_asm, hpu::pfree(4)) == 1
+                && count_token(lowered.body_asm, hpu::pfree(4)) == 0
                 && count_token(lowered.body_asm, hpu::psync()) == 1
                 && lowered.body_asm.rfind(hpu::psync())
                     + hpu::psync().size() == lowered.body_asm.size(),
@@ -319,7 +319,8 @@ int main()
         require(
             relocations.expected_dma_count == generated_dma_count
                 && relocations.bindings.size()
-                    == 44 + relinearize_dma_count + rescale_dma_count
+                    == 1 + 7 * top.q_moduli.size() + 5 * next_level.q_moduli.size()
+                        + relinearize_dma_count + rescale_dma_count
                 && relocations.bindings.size() == generated_dma_count
                 && relocations.complete(),
             "relocation schedule did not account for generated DMA instructions");
@@ -335,7 +336,7 @@ int main()
                 && relocations.bindings.front().span.line_count != 0
                 && relocations.bindings[1].allocation_id == "input/x/c0/mod0"
                 && relocations.bindings[1].object_slot == 0
-                && relocations.bindings[3].allocation_id
+                && relocations.bindings[5].allocation_id
                     == "intermediate/tensor/c0/mod0"
                 && relocations.bindings.back().allocation_id
                     == "output/x2_plus_one/c1/mod1"

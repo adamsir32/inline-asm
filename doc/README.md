@@ -13,7 +13,6 @@
 | 对接 Nexus-AM 或 HPU runtime | [应用包 V1](delivery/HPU_APPLICATION_PACKAGE_V1.md) → [IT 交接清单](delivery/IT_HANDOFF_CHECKLIST.md) → [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) |
 | 维护 SEAL 与 HPU 适配层 | [SEAL 集成设计](architecture/HPU_SEAL_INTEGRATION.md) → [底层 API 参考](reference/HPU_LOW_LEVEL_API_REFERENCE.md) |
 | 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
-| 回归旧算子交付流水线 | [Legacy 测试交付说明](delivery/HPU_TEST_DELIVERY.md) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
 | 对接 K=8 在线 twiddle 参数格式 | [硬件组编译器迁移说明](reference/TWIDDLE_COMPILER_MIGRATION.md) |
 
@@ -42,14 +41,14 @@
 
 ### `architecture/`
 
-- [HPU_ARCHITECTURE.md](architecture/HPU_ARCHITECTURE.md)：整体分层、顶层 API、计算图编译流程、资源 IR 与统一资源管理、runtime 职责、验证边界和交付链路。
+- [HPU_ARCHITECTURE.md](architecture/HPU_ARCHITECTURE.md)：整体分层、顶层 API、计算图编译流程、SSA 优化、IO 调度、资源 IR 与统一资源管理、runtime 职责、验证边界和交付链路。
 - [HPU_SEAL_INTEGRATION.md](architecture/HPU_SEAL_INTEGRATION.md)：modified-SEAL 依赖、NTT 物理模型、模数链和三方案适配设计。
 
 ### `delivery/`
 
 - [HPU_APPLICATION_PACKAGE_V1.md](delivery/HPU_APPLICATION_PACKAGE_V1.md)：当前通用应用交付包格式，适用于 CKKS、BGV 和 BFV。
 - [IT_HANDOFF_CHECKLIST.md](delivery/IT_HANDOFF_CHECKLIST.md)：发布、归档、目标执行和 IT 签字所需的逐项检查。
-- [HPU_TEST_DELIVERY.md](delivery/HPU_TEST_DELIVERY.md)：由 `config/fhe_test.conf` 驱动的旧固定参数算子包，仅用于兼容和回归。
+- [IO_OPTIMIZATION_RESULTS.md](delivery/IO_OPTIMIZATION_RESULTS.md)：SSA 重构、N8192/Q4/P1 与 N65536 的实测 IO、局部验收和复现命令。
 
 - [HPU_64OBJ_INTEGRATION_HANDOFF.md](delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)：v1.2 接入要点、RTL 提供方历史交接记录及 CPU/SoC 验收范围。
 
@@ -62,5 +61,4 @@
 
 - `reference/`、`delivery/HPU_APPLICATION_PACKAGE_V1.md` 和应用示例随代码维护，可作为当前接口依据。
 - `audits/` 保存带日期的历史证据；其中的“当前状态”只对应审计日期。
-- `delivery/HPU_TEST_DELIVERY.md` 明确标记为 Legacy，仅描述旧固定参数流水线。
 - `outputs/` 是生成目录且不纳入 Git。需要交付时应从同一源码 commit 重新生成完整目录。

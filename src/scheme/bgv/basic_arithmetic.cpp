@@ -72,33 +72,33 @@ std::string generate_binary_body(
     const auto native_value = hpu::resource::make_operand("value", 0);
     if (manage_modulus_table) {
         code << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx,
-                           hpu::DloadFlag::small_bank);
+                           "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             code << "        /* component " << component << ", Q MOD_ID "
                  << basis << " */\n";
             code << hpu::resource::select_modulus(basis);
-            code << hpu::resource::read(native_value, hpu::DataType::poly);
+            code << hpu::resource::read(native_value, hpu::DataType::poly, prefix + "left/" + limb);
             if (balance.left_scalar != 1) {
                 code << "        // prepared left balancing scalar splat\n";
-                code << hpu::resource::read(native_transform_table, hpu::DataType::poly);
+                code << hpu::resource::read(native_transform_table, hpu::DataType::poly,
+                                             prefix + "balance/left/" + limb);
                 code << hpu::resource::multiply(native_value, native_value, native_transform_table);
-                code << hpu::resource::discard(native_transform_table);
             }
-            code << hpu::resource::read(native_auxiliary, hpu::DataType::poly);
+            code << hpu::resource::read(native_auxiliary, hpu::DataType::poly, prefix + "right/" + limb);
             if (balance.right_scalar != 1) {
                 code << "        // prepared right balancing scalar splat\n";
-                code << hpu::resource::read(native_transform_table, hpu::DataType::poly);
+                code << hpu::resource::read(native_transform_table, hpu::DataType::poly,
+                                             prefix + "balance/right/" + limb);
                 code << hpu::resource::multiply(native_auxiliary, native_auxiliary, native_transform_table);
-                code << hpu::resource::discard(native_transform_table);
             }
             code << (subtract ? hpu::resource::subtract(native_accumulator, native_value, native_auxiliary) : hpu::resource::add(native_accumulator, native_value, native_auxiliary));
-            code << hpu::resource::discard(native_value) << hpu::resource::discard(native_auxiliary);
-            code << hpu::resource::publish(native_accumulator, 1);
+            code << hpu::resource::output(native_accumulator, prefix + "output/" + limb);
         }
     }
-    if (manage_modulus_table) code << hpu::resource::discard(native_modulus_table);
     if (append_psync) code << hpu::resource::finish_program();
     return code.str();
 }

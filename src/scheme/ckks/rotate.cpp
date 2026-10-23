@@ -52,11 +52,13 @@ std::string generate_fused_inverse_body_asm(
             asm_code << "        /* fused component_" << component
                      << ", q MOD_ID " << context << ", key_domain="
                      << galois_element << " */\n";
+            const auto prefix = std::string("galois/inverse/c") + std::to_string(component)
+                + "/mod" + std::to_string(context);
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly, prefix + "/input");
             asm_code << generate_hpu_intt_body_asm(
-                N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << hpu::resource::publish(kPolynomialObject, 1);
+                N, kPolynomialObject, kTwiddleObject, false, prefix + "/table");
+            asm_code << hpu::resource::output(kPolynomialObject, prefix + "/output");
         }
     }
     return asm_code.str();
@@ -73,11 +75,13 @@ std::string generate_output_ntt_body_asm(
         for (int context : q_contexts) {
             asm_code << "        /* output component_" << component
                      << ", q MOD_ID " << context << " */\n";
+            const auto prefix = std::string("galois/forward/c") + std::to_string(component)
+                + "/mod" + std::to_string(context);
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly, prefix + "/input");
             asm_code << generate_hpu_ntt_body_asm(
-                N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << hpu::resource::publish(kPolynomialObject, 1);
+                N, kPolynomialObject, kTwiddleObject, false, prefix + "/table");
+            asm_code << hpu::resource::output(kPolynomialObject, prefix + "/output");
         }
     }
     return asm_code.str();
@@ -104,7 +108,7 @@ std::string generate_rotate_body_asm(
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(
             kModulusTableObject,
-            hpu::DataType::mod_ctx,
+            hpu::DataType::mod_ctx, "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
 
@@ -124,9 +128,6 @@ std::string generate_rotate_body_asm(
             N, layout, false, false));
     asm_code << generate_output_ntt_body_asm(N, layout.q_mod_ids);
 
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }

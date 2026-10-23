@@ -15,6 +15,32 @@
 | host 侧 SEAL-facing | `hpu::seal_adapter` | 从 `SEALContext`/`Ciphertext`/`Plaintext`/`RelinKeys`/`GaloisKeys` 派生 HPU 布局、HPU_MEM 镜像，并做软件执行 | `SEALContext`、`Evaluator`、`KeyGenerator`、`NTT` |
 | 指令生成（codegen） | `hpu::scheme::{ckks,bfv,bgv}` | 生成算子资源操作和兼容汇编，内部复用 `operator`/`poly`/`util` 层 | `Evaluator::add/sub/multiply/rotate/rescale/...` |
 
+### 原生算子用例应用包
+
+底层固定数学用例通过与前端相同的 SSA 编译器和包写入器导出：
+
+```sh
+cmake --build build --target hpu_native_kernel_application_example hpu_validate_package -j8
+python3 tools/generate_application_package.py \
+  --example ./build/hpu_native_kernel_application_example \
+  --validator ./build/hpu_validate_package --output outputs/native_cmult_n8192 \
+  --example-arg=--case --example-arg=cmult
+
+# 一次生成三类原生算子包。
+cmake --build build --target hpu_native_kernel_delivery -j8
+```
+
+将 `cmult` 改为 `ntt` 或 `intt`，并为输出选择对应目录，可以生成另外两个包。
+直接运行 `./build/hpu_native_kernel_application_example --case intt --emit-dir PATH`
+也可，要求 PATH 不存在。该工具不依赖 SEAL 集成构建。
+
+这些用例固定 N8192、seed=1，以小模数 65537 测试环算术；CMULT 覆盖四组模数
+槽位，变换用例覆盖同模数多个多项式。它们不是完整的加密应用或安全参数配置。
+Package V1 必须声明方案，因此使用 CKKS 标签表示规范的系数/NTT 布局，具体测试
+层次在 `metadata/parameters.json` 中标记为 `native_ring_arithmetic`、`encrypted=false`。
+IT 消费同样的 `program/`、`memory/`、`golden/` 和清单；实际 DMA 数据见
+`oracle/report.json.compiler_resources`，不再使用旧直接汇编交付链路。
+
 ---
 
 ## 1. HPU 指令集速查
@@ -53,9 +79,10 @@ dstore x10, x11, p39, 1, 1      # 成功后释放，并请求 LLC 写分配
 编码为 MOD=1，其他均为 MOD=0。`twiddle_parameters` 的默认 helper 会显式输出
 mask=0x20，原始指令本身没有 twiddle 专用装载类型。
 
-手工维护算子的代码可以选择 CP。以下片段生成读写资源操作；实际外存地址由
-调用者为 data port 绑定。它展示底层 `preserve` 策略保留显式 CP 的用法；
-应用交付编译另行采用下文的 twiddle 专用策略：
+维护算子的代码可以声明 CP 提示。以下片段声明有名称的输入和输出；实际外存
+地址由调用者按 data port 名称绑定，物化、释放和 REL 由编译器决定。
+它展示底层 `preserve` 策略保留显式 CP 的用法；应用交付编译另行采用下文的
+twiddle 专用策略：
 
 ```cpp
 #include "hpu/compiler/operator_resources.hpp"
@@ -65,10 +92,11 @@ const auto output = hpu::resource::make_operand("output");
 // 参数复用较多时，可请求 LLC 读分配。它仍然是普通 MOD=0 对象。
 const auto parameter_load = hpu::resource::read(
     parameter, hpu::DataType::twiddle_parameters,
+    "transform/stage0",
     hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
-// output 必须已由前面的计算定义；准备随后重载时可请求 LLC 写分配。
-const auto output_store = hpu::resource::publish(
-    output, 1, hpu::CachePolicy::allocate);
+// output 必须已由前面的计算定义。这里只声明结果目的地，不指定释放时机。
+const auto output_store = hpu::resource::output(
+    output, "result", hpu::CachePolicy::allocate);
 ```
 
 `hpu::dload` 与 `hpu::dstore` 的最后一个 C++ 参数也可传入同一枚举；省略时为
@@ -532,8 +560,10 @@ auto application = plan.lower(capacity_lines);
 - 元数据按每个输入推导：不同分支可处于不同 level。Add/Sub 对两个 correction
   factor 求平衡标量；Multiply 输出三分量并更新 factor；Relinearize 恢复二分量；
   只有 ModSwitch 显式降层。`append_multiply_relinearize` 可显式选择融合操作。
-- 图默认导出最后追加的节点；`set_output` 可以选择较早节点，其他节点仍保留逐步
-  golden。`allocation_prefix(value)` 返回 lowering 后用于查询镜像的逻辑前缀。
+- 图默认选最后追加的节点；`set_output` 可以选择较早节点。交付适配器只为指定
+  导出结果生成 golden，其余节点保留主机 oracle 快照。
+  `allocation_prefix(value)` 返回 lowering 后用于查询镜像的逻辑前缀，不承诺该值
+  在最终包内拥有独立 DDR 地址。
 - 计划拥有导入密文、明文和密钥的只读快照；重复密钥在 plan 中共享。lowering 对
   同 kind、同长度且字节完全相同的只读 payload 共享物理 allocation，hash 碰撞会
   再比较实际数据。可变 workspace 和 golden 输出保持独立。
@@ -874,18 +904,20 @@ std::string generate_ciphertext_multiply_body_asm(
   Relinearization；不使用 generic 非舍入 ModDown 语义。SEAL CKKS single-P 路径也采用带舍入 ModDown。
 - Q/P/B/`m_sk`/t 全部使用调用者提供的全局 MOD_ID，允许降 level 后 P 和辅助基不重编号；
   重复、越界、非 singleton-Q digit、multi-P 或不足的 B 基会被拒绝。
-- `manage_modulus_table=true` 时整个融合流只装载/释放一次 small-bank 模表；嵌入更大
-  planner 时可传 `false`，由外层统一管理模表和终止 `psync`。
+- `manage_modulus_table=true` 时声明融合流使用的 small-bank 模表，实际驻留和释放由
+  后端决定；嵌入更大 planner 时可传 `false`，由外层声明模表和终止 `psync`。
 
 ---
 
 ## 4. 内部组合层（被 `hpu::scheme::ckks` 复用）
 
-这些不是仿 SEAL 的直接入口，而是 codegen 复用的底层算子，各自返回 HPU 汇编：
+这些是 codegen 复用的底层算子。在 `resource::Recording` 内调用时生成逻辑 SSA；
+返回的汇编文本用于内部兼容检查。交付必须继续经过资源编译器和应用包写入器，
+由后端生成实际 DMA、PFREE 和 DSTORE REL。
 
 | 层 | 头文件 | 关键接口 | 内部 HPU 指令 |
 | --- | --- | --- | --- |
-| util NTT | `include/util/ntt.hpp` | `generate_hpu_ntt_body_asm` / `generate_hpu_intt_body_asm` | `pmul`（预/后扭转）、`pntt`/`pintt`、`dload`、`pfree` |
+| util NTT | `include/util/ntt.hpp` | `generate_hpu_ntt_body_asm` / `generate_hpu_intt_body_asm` | `pmul`（预/后扭转）、`pntt`/`pintt`；数据引用与生命周期由后端物化 |
 | util MM | `include/util/mm.hpp` | 逐点向量乘法 / 乘加 | `pmul`、`pmac` |
 | util BConv | `include/util/bconv.hpp` | 基转换两阶段 | `pmul`、`pmac`、`dload`、`dstore` |
 | poly CMult | `include/poly/cmult.hpp` | 张量积 t0/t1/t2 | `pmul`、`pmac` |
@@ -949,7 +981,9 @@ runtime、初始镜像、按算子顺序保存的 SEAL ciphertext oracle 和软�
 `write_application_package(directory, request)` 写出，再用
 `validate_application_package_on_disk(directory)` 独立校验。
 
-每个应用输出必须有 golden；显式预留的临时对象应在 `reserve_ciphertext` 最后一个参数中
+只有指定导出结果进入 golden：前端为全部 mark_output，未标记则为最后计算结果；
+Plan 默认最终输出，可通过 make_*_application_package 的可选输出前缀集合导出多个
+结果。每个最终 output allocation 必须有 golden；显式预留的临时对象应在 `reserve_ciphertext` 最后一个参数中
 传入 `AllocationKind::workspace`。默认仍为 `output`。
 参数和请求中不包含 SecretKey。三种方案都要求 SEAL oracle 到 golden 的检查为
 `pass`，并要求对应软件执行器与 SEAL 的每一步 HPU 物理输出逐字一致。详见
@@ -959,8 +993,10 @@ runtime、初始镜像、按算子顺序保存的 SEAL ciphertext oracle 和软�
 
 `include/hpu/compiler/operator_resources.hpp` 提供符号操作数、数据端口及算术/变换操作。
 算子发出的 `OperatorProgram` 随 lowering/runtime/application 保留；物理对象编号仅在
-兼容汇编渲染和最终后端编码中出现。`read/publish/discard` 是输入、结果与生命周期
-声明，实际加载、写回、释放及 spill/reload 由公共编译器调度。
+兼容汇编渲染和最终后端编码中出现。原生算子使用 `read/input` 声明逻辑来源、
+`output` 声明逻辑写入，端口可携带稳定 `logical_binding` 并按名称绑定。
+旧 `publish/discard` 经规范化后不再决定硬件 REL/PFREE，实际 DMA 和生命周期归
+公共编译器管理。算子核心不应按照固定物理容量手动插入释放。
 
 `compile_application_resources(request, image, optimize, require_instruction_verification)`
 位于 `hpu/delivery/resource_compiler.hpp`，供前端和旧 Plan 交付导出共同使用。
@@ -968,7 +1004,7 @@ runtime、初始镜像、按算子顺序保存的 SEAL ciphertext oracle 和软�
 DMA 和 golden 目的地址。已经编译的前端请求直接导出。原始编码请求仍按原路径导出。
 
 CKKS Plan 默认 Relinearize/Rescale 自动声明独立 coefficient workspace，保护输入和
-逐节点 golden；调用者仍可通过已有显式 workspace 重载指定逻辑工作区。
+仍被消费或显式导出的值；调用者仍可通过显式 workspace 重载指定逻辑工作区。
 
 
 ### SSA 值、显式端口和原地约束
@@ -978,10 +1014,12 @@ CKKS Plan 默认 Relinearize/Rescale 自动声明独立 coefficient workspace，
 `Recording::value(variable)` 可取得当前版本，`Operation.inputs/outputs` 引用这些版本。
 
 `OperatorProgram.ports` 保存每次加载/写回的 `PortId`、方向和 binding。
-通过 `bind_port(id, binding)` 单独绑定，或用 `bind_ports(bindings)` 完成已有请求的
-接入，再调用 `bind_program(program, image)` 降低到存储 IR。旧的四参数重载继续
+通过 `bind_named_ports(bindings)` 按逻辑身份绑定，或通过 `bind_port/bind_ports`
+连接已有适配请求；先进行 SSA 读取合并、内存转发及依赖调度，再用
+`bind_program(program, image)` 降低到存储 IR。旧的四参数重载继续
 提供兼容基准检查。程序片段拼接会重编号值与端口，不能直接拼接裸操作数组。
 
 NTT/PMAC 的 `tied_input` 声明结果必须承接的数据/累加器输入。降低器在旧版本仍
-被使用时通过 DMA snapshot 保留旧字值，再初始化新结果；常规算术可分配独立结果。
+被使用时优先从有效 backing 初始化新结果，必要时才生成 DMA snapshot；
+常规算术可分配独立结果。
 `render_operator_ir()` 提供值和端口的可读视图。此变更不修改统一 Evaluator 接口。

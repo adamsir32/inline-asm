@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -18,6 +20,10 @@ using ObjectId = std::size_t;
 enum class OptimizationMode { no_opt, optimized };
 enum class DmaCachePolicy { preserve, twiddle_loads_only };
 enum class ResourceIrOrigin { encoded_import, operator_emission };
+class ResourceCapacityError : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
 enum class MemoryLayout {
     unspecified,
     coefficient_natural,
@@ -38,6 +44,11 @@ struct CompileOptions {
     // Applied after DMA relocation using the final physical allocation kind.
     // preserve retains explicit per-command hints, including in NoOpt mode.
     DmaCachePolicy dma_cache_policy = DmaCachePolicy::preserve;
+    // Native SSA owns lifetime/materialization; encoded import can preserve
+    // explicit historical release semantics for replay and ISA tests.
+    bool automatic_lifetimes = false;
+    bool prune_unused_buffers = false;
+    std::set<std::string> required_outputs;
 };
 
 // Scheme-independent DMA provenance. Direction and object operands are taken
@@ -49,6 +60,9 @@ struct ResolvedDma {
     std::optional<std::size_t> operation_index;
     std::string operation_id;
     std::size_t operation_dma_index = 0;
+    std::string purpose;
+    // Diagnostic SSA identity; not part of the Package V1 DMA CSV ABI.
+    std::string logical_value;
 };
 
 struct BufferRange {
@@ -69,6 +83,7 @@ struct VirtualBuffer {
     bool fully_defined_before_read = false;
     std::size_t first_use = 0;
     std::size_t last_use = 0;
+    bool materialized = true;
 };
 
 struct VirtualObject {
@@ -88,6 +103,8 @@ struct VirtualInstruction {
     bool required_store = true;
     // A deferred scratch store and its unique reload share the object ID.
     bool reload_retained_object = false;
+    bool exact_copy = false;
+    std::string logical_value;
 };
 
 struct VirtualProgram {
@@ -122,6 +139,16 @@ struct ResourceReport {
     std::size_t deferred_scratch_stores = 0;
     std::size_t spills = 0;
     std::size_t reloads = 0;
+    std::uint64_t dload_bytes = 0;
+    std::uint64_t dstore_bytes = 0;
+    std::uint64_t repeated_range_read_bytes = 0;
+    std::uint64_t required_output_write_bytes = 0;
+    std::uint64_t initial_image_bytes = 0;
+    std::uint64_t original_dma_bytes = 0;
+    std::uint64_t spill_write_bytes = 0;
+    std::uint64_t reload_read_bytes = 0;
+    std::uint64_t exact_copy_bytes = 0;
+    std::string selected_schedule = "original";
 };
 
 struct CompiledResources {

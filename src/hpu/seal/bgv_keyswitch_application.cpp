@@ -1,4 +1,5 @@
 #include "hpu/seal/bgv_keyswitch_application.hpp"
+#include "native_application_bindings.hpp"
 
 #include "hpu/model/hardware_ntt.hpp"
 #include "hpu/seal/automorphism.hpp"
@@ -132,73 +133,6 @@ void add_galois_twiddles(hpu::runtime::HpuMemImage& image,
                   hpu::runtime::AllocationKind::twiddle);
     }
 }
-
-class DmaRecipe {
-public:
-    DmaRecipe(const hpu::runtime::HpuMemImage& image,
-              const std::vector<hpu::DmaRelocation>& encoded)
-        : image_(image), encoded_(encoded)
-    {}
-
-    void load(int slot, const std::string& id, std::size_t words,
-              hpu::DataType type = hpu::DataType::poly,
-              hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
-    {
-        if (id.find("/stage") != std::string::npos) type = hpu::DataType::twiddle_parameters;
-        bind(id, words, hpu::Mnemonic::kDload, slot,
-             hpu::dma_mod_bit(type), hpu::dma_bank_mask(type, flag));
-    }
-
-    void store(int slot, const std::string& id, std::size_t words)
-    {
-        bind(id, words, hpu::Mnemonic::kDstore, slot, 1, 0);
-    }
-
-    void replay(const BgvKeySwitchDmaBinding& binding)
-    {
-        const auto& allocation = image_.allocation(binding.allocation_id);
-        bind(binding.allocation_id, allocation.word_count, binding.direction,
-             binding.object_slot, binding.type_or_release, binding.flag, binding.cp);
-    }
-
-    std::vector<BgvKeySwitchDmaBinding> finish()
-    {
-        if (bindings_.size() != encoded_.size()) {
-            throw std::logic_error("BGV KeySwitch DMA recipe did not consume every instruction");
-        }
-        return std::move(bindings_);
-    }
-
-private:
-    void bind(const std::string& id, std::size_t words, hpu::Mnemonic direction,
-              int slot, std::uint8_t type_or_release, std::uint8_t flag, std::optional<std::uint8_t> cp = {})
-    {
-        const std::size_t index = bindings_.size();
-        if (index >= encoded_.size()) {
-            throw std::logic_error("BGV KeySwitch DMA recipe exceeds encoded stream");
-        }
-        const auto& instruction = encoded_[index];
-        const auto& allocation = image_.allocation(id);
-        if (instruction.dma_index != index || instruction.direction != direction ||
-            (cp && instruction.cp != *cp) || instruction.object_id != slot ||
-            instruction.type_or_release != type_or_release ||
-            (direction == hpu::Mnemonic::kDload && instruction.flag != flag) ||
-            allocation.word_count != words || allocation.span.line_count == 0 ||
-            (direction == hpu::Mnemonic::kDstore && allocation.read_only)) {
-            throw std::invalid_argument(
-                "BGV KeySwitch DMA binding disagrees with encoded instruction or image: " + id);
-        }
-        bindings_.push_back({
-            index, instruction.instruction_index, instruction.direction,
-            instruction.object_id, instruction.type_or_release,
-            instruction.flag, id, allocation.span});
-        bindings_.back().cp = instruction.cp;
-    }
-
-    const hpu::runtime::HpuMemImage& image_;
-    const std::vector<hpu::DmaRelocation>& encoded_;
-    std::vector<BgvKeySwitchDmaBinding> bindings_;
-};
 
 std::string csv_field(const std::string& value)
 {
@@ -422,76 +356,12 @@ static BgvKeySwitchApplication build_bgv_keyswitch_application_impl(
         static_cast<int>(degree), layout, static_cast<int>(t_id), true, true);
     auto instructions = hpu::assemble_source(body);
     hpu::validate_executable_program(instructions);
-    const auto encoded_dma = hpu::collect_dma_relocations(instructions);
-    DmaRecipe recipe(image, encoded_dma);
-    const std::size_t stages = ntt_stage_count(degree);
-    const auto twiddle = [](std::size_t id) {
-        return mod_id("constants/twiddle/canonical", id);
-    };
-    const auto accumulator = [p_id, q_count](std::size_t component, std::size_t target) {
-        return mod_id("workspace/bgv_keyswitch/c" + std::to_string(component) + "/acc",
-                      target == q_count ? p_id : target);
-    };
-    const auto inverse_twiddles = [&](std::size_t id) {
-        for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/intt", stage), hpu::model::kStageTwiddleParameterWords);
-        }
-        recipe.load(3, twiddle(id) + "/intt/post_untwist_scale", degree);
-    };
-    const auto forward_twiddles = [&](std::size_t id) {
-        recipe.load(3, twiddle(id) + "/ntt/pre_twist", degree);
-        for (std::size_t stage = 0; stage < stages; ++stage) {
-            recipe.load(3, stage_id(twiddle(id) + "/ntt", stage), hpu::model::kStageTwiddleParameterWords);
-        }
-    };
-
-    recipe.load(4, "constants/modulus_table", modulus_words.size(),
-                hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
-    for (std::size_t digit = 0; digit < q_count; ++digit) {
-        const std::string switch_coeff =
-            mod_id("workspace/bgv_keyswitch/switch_coeff", digit);
-        recipe.load(0, mod_id("input/c2", digit), degree);
-        inverse_twiddles(digit);
-        recipe.store(0, switch_coeff, degree);
-        for (std::size_t target = 0; target <= q_count; ++target) {
-            const std::size_t id = target == q_count ? p_id : target;
-            if (target == digit) {
-                recipe.load(0, mod_id("input/c2", digit), degree);
-            } else {
-                recipe.load(0, switch_coeff, degree);
-                forward_twiddles(id);
-            }
-            for (std::size_t component = 0; component < 2; ++component) {
-                recipe.load(1, mod_id("keys/digit" + std::to_string(digit) +
-                                          "/c" + std::to_string(component), id), degree);
-                if (digit != 0) recipe.load(2, accumulator(component, target), degree);
-                recipe.store(2, accumulator(component, target), degree);
-            }
-        }
-    }
-    for (std::size_t component = 0; component < 2; ++component) {
-        const std::string prefix = "workspace/bgv_keyswitch/c" + std::to_string(component);
-        recipe.load(0, accumulator(component, q_count), degree);
-        inverse_twiddles(p_id);
-        recipe.store(0, prefix + "/p_coeff", degree);
-        recipe.load(0, prefix + "/p_coeff", degree);
-        recipe.load(1, constant_prefix + "/neg_inv_t", degree);
-        recipe.store(0, prefix + "/u_t", degree);
-        for (std::size_t basis = 0; basis < q_count; ++basis) {
-            recipe.load(0, prefix + "/u_t", degree);
-            recipe.load(1, mod_id(constant_prefix + "/p_mod", basis), degree);
-            recipe.load(1, prefix + "/p_coeff", degree);
-            forward_twiddles(basis);
-            recipe.load(1, accumulator(component, basis), degree);
-            recipe.load(0, mod_id(constant_prefix + "/p_inv", basis), degree);
-            recipe.load(0, mod_id("input/c" + std::to_string(component), basis), degree);
-            recipe.store(1, mod_id("output/c" + std::to_string(component), basis), degree);
-        }
-    }
-    auto bindings = recipe.finish();
+    auto native_program = recording.finish();
+    auto bindings = detail::bind_native_application_ports<BgvKeySwitchDmaBinding>(
+        native_program, image, degree);
     return {std::move(image), product.parms_id(), product.correction_factor(),
             std::move(instructions), std::move(bindings),
-            std::make_shared<hpu::resource::OperatorProgram>(recording.finish())};
+            std::make_shared<hpu::resource::OperatorProgram>(std::move(native_program))};
 }
 
 BgvKeySwitchApplication build_bgv_keyswitch_application(
@@ -574,30 +444,24 @@ BgvKeySwitchApplication build_bgv_multiply_relinearize_application(
         true, true);
     auto instructions = hpu::assemble_source(body);
     hpu::validate_executable_program(instructions);
-    const auto encoded_dma = hpu::collect_dma_relocations(instructions);
-    DmaRecipe recipe(application.image, encoded_dma);
-    recipe.replay(application.dma.front());
+    auto native_program = recording.finish();
+    std::map<std::string, std::string> aliases;
     for (std::size_t basis = 0; basis < q_count; ++basis) {
-        recipe.load(0, mod_id("input/left/c0", basis), degree);
-        recipe.load(1, mod_id("input/right/c0", basis), degree);
-        recipe.store(2, mod_id("input/c0", basis), degree);
-
-        recipe.load(0, mod_id("input/left/c0", basis), degree);
-        recipe.load(1, mod_id("input/right/c1", basis), degree);
-        recipe.load(0, mod_id("input/left/c1", basis), degree);
-        recipe.load(1, mod_id("input/right/c0", basis), degree);
-        recipe.store(2, mod_id("input/c1", basis), degree);
-
-        recipe.load(0, mod_id("input/left/c1", basis), degree);
-        recipe.load(1, mod_id("input/right/c1", basis), degree);
-        recipe.store(2, mod_id("input/c2", basis), degree);
+        const auto prefix = "tensor/mod" + std::to_string(basis) + "/";
+        for (std::size_t component = 0; component < 2; ++component) {
+            const auto limb = "c" + std::to_string(component);
+            aliases.emplace(prefix + "left/" + limb, mod_id("input/left/" + limb, basis));
+            aliases.emplace(prefix + "right/" + limb, mod_id("input/right/" + limb, basis));
+        }
+        for (std::size_t component = 0; component < 3; ++component) {
+            const auto limb = "c" + std::to_string(component);
+            aliases.emplace(prefix + "output/" + limb, mod_id("input/" + limb, basis));
+        }
     }
-    for (std::size_t index = 1; index < application.dma.size(); ++index) {
-        recipe.replay(application.dma[index]);
-    }
-    application.operator_program = std::make_shared<hpu::resource::OperatorProgram>(recording.finish());
+    application.dma = detail::bind_native_application_ports<BgvKeySwitchDmaBinding>(
+        native_program, application.image, degree, aliases);
+    application.operator_program = std::make_shared<hpu::resource::OperatorProgram>(std::move(native_program));
     application.instructions = std::move(instructions);
-    application.dma = recipe.finish();
     const std::uint32_t t = narrow(source->parms().plain_modulus().value());
     application.correction_factor =
         hpu::scheme::bgv::multiply_correction_factor(
@@ -670,55 +534,34 @@ static BgvKeySwitchApplication build_bgv_galois_application(
     const auto native_modulus_table = hpu::resource::make_operand("modulus_table", 4);
     const auto native_transform_table = hpu::resource::make_operand("transform_table", 3);
     const auto native_value = hpu::resource::make_operand("value", 0);
-    body << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx,
+    body << hpu::resource::read(native_modulus_table, hpu::DataType::mod_ctx, "constants/modulus_table",
                        hpu::DloadFlag::small_bank);
     for (std::size_t component = 0; component < 2; ++component) {
         for (std::size_t basis = 0; basis < q_count; ++basis) {
             body << hpu::resource::select_modulus(static_cast<int>(basis));
-            body << hpu::resource::read(native_value, hpu::DataType::poly);
+            body << hpu::resource::read(native_value, hpu::DataType::poly,
+                mod_id("input/original/c" + std::to_string(component), basis));
             body << generate_hpu_intt_body_asm(
-                static_cast<int>(degree), native_value, native_transform_table, false);
+                static_cast<int>(degree), native_value, native_transform_table, false,
+                mod_id("constants/twiddle/galois", basis) + "/intt");
             body << generate_hpu_ntt_body_asm(
-                static_cast<int>(degree), native_value, native_transform_table, false);
-            body << hpu::resource::publish(native_value, 1);
+                static_cast<int>(degree), native_value, native_transform_table, false,
+                mod_id("constants/twiddle/canonical", basis) + "/ntt");
+            body << hpu::resource::output(native_value,
+                mod_id(component == 0 ? "input/c0" : "input/c2", basis));
         }
     }
     body << hpu::scheme::bgv::generate_keyswitch_ntt_body_asm(
         static_cast<int>(degree), layout,
         static_cast<int>(key_modulus_count), false, false);
-    body << hpu::resource::discard(native_modulus_table) << hpu::resource::finish_program();
+    body << hpu::resource::finish_program();
     auto instructions = hpu::assemble_source(body.str());
     hpu::validate_executable_program(instructions);
-    const auto encoded_dma = hpu::collect_dma_relocations(instructions);
-    DmaRecipe recipe(application.image, encoded_dma);
-    recipe.replay(application.dma.front());
-    const std::size_t stages = ntt_stage_count(degree);
-    for (std::size_t component = 0; component < 2; ++component) {
-        for (std::size_t basis = 0; basis < q_count; ++basis) {
-            const auto fused_prefix =
-                mod_id("constants/twiddle/galois", basis) + "/intt";
-            const auto canonical_prefix =
-                mod_id("constants/twiddle/canonical", basis) + "/ntt";
-            recipe.load(0,
-                mod_id("input/original/c" + std::to_string(component), basis), degree);
-            for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(fused_prefix, stage), hpu::model::kStageTwiddleParameterWords);
-            }
-            recipe.load(3, fused_prefix + "/post_untwist_scale", degree);
-            recipe.load(3, canonical_prefix + "/pre_twist", degree);
-            for (std::size_t stage = 0; stage < stages; ++stage) {
-                recipe.load(3, stage_id(canonical_prefix, stage), hpu::model::kStageTwiddleParameterWords);
-            }
-            recipe.store(0,
-                mod_id(component == 0 ? "input/c0" : "input/c2", basis), degree);
-        }
-    }
-    for (std::size_t index = 1; index < application.dma.size(); ++index) {
-        recipe.replay(application.dma[index]);
-    }
-    application.operator_program = std::make_shared<hpu::resource::OperatorProgram>(recording.finish());
+    auto native_program = recording.finish();
+    application.dma = detail::bind_native_application_ports<BgvKeySwitchDmaBinding>(
+        native_program, application.image, degree);
+    application.operator_program = std::make_shared<hpu::resource::OperatorProgram>(std::move(native_program));
     application.instructions = std::move(instructions);
-    application.dma = recipe.finish();
     application.correction_factor = input.correction_factor();
     return application;
 }

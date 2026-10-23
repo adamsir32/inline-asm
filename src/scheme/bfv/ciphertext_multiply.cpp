@@ -1,6 +1,7 @@
 #include "scheme/bfv/ciphertext_multiply.hpp"
 
 #include "operator/relinearization.hpp"
+#include "poly/cmult.hpp"
 #include "util/bconv.hpp"
 #include "hpu/compiler/operator_resources.hpp"
 #include "util/mm.hpp"
@@ -43,7 +44,8 @@ std::vector<int> make_contexts(int begin, int count)
 
 std::string generate_basis_transform_body_asm(int N, const std::vector<int>& contexts,
                                               int num_components, bool inverse,
-                                              const std::string& label, bool manage_modulus_table)
+                                              const std::string& label, bool manage_modulus_table,
+                                              const std::string& port_prefix)
 {
     std::ostringstream asm_code;
     const auto POBJ_POLY = hpu::resource::make_operand("value", 0);
@@ -52,70 +54,25 @@ std::string generate_basis_transform_body_asm(int N, const std::vector<int>& con
 
     asm_code << "        /* " << label << (inverse ? ": INTT */\n" : ": NTT */\n");
     if (manage_modulus_table) {
-        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, port_prefix + "/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < num_components; ++component) {
         for (int context : contexts) {
             asm_code << "        /* component " << component << ", MOD_ID " << context << " */\n";
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
-            asm_code << (inverse ? ::generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false)
-                                 : ::generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false));
-            asm_code << hpu::resource::publish(POBJ_POLY, 1);
+            const auto limb = port_prefix + "/c" + std::to_string(component) + "/mod" + std::to_string(context);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly, limb + "/input");
+            asm_code << (inverse ? ::generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false, limb + "/table")
+                                 : ::generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false, limb + "/table"));
+            asm_code << hpu::resource::output(POBJ_POLY, limb + "/output");
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
-    }
-    return asm_code.str();
-}
-
-std::string generate_tensor_body_asm(const std::vector<int>& contexts, const std::string& label,
-                                     bool manage_modulus_table)
-{
-    std::ostringstream asm_code;
-    const auto POBJ_A = hpu::resource::make_operand("value", 0);
-    const auto POBJ_B = hpu::resource::make_operand("auxiliary", 1);
-    const auto POBJ_OUT = hpu::resource::make_operand("accumulator", 2);
-    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
-
-    asm_code << "        /* " << label << ": (a0,a1)*(b0,b1) -> (t0,t1,t2) */\n";
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
-    }
-    for (int context : contexts) {
-        asm_code << hpu::resource::select_modulus(context);
-
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
-        asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1);
-
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
-        asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
-        asm_code << hpu::resource::accumulate(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1);
-
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly);
-        asm_code << ::generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A) << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1);
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
     return asm_code.str();
 }
 
 std::string generate_scalar_multiply_body_asm(const std::vector<int>& contexts, int num_components,
-                                              const std::string& label, bool manage_modulus_table)
+                                              const std::string& label, bool manage_modulus_table,
+                                              const std::string& port_prefix)
 {
     std::ostringstream asm_code;
     const auto POBJ_VALUE = hpu::resource::make_operand("value", 0);
@@ -124,20 +81,17 @@ std::string generate_scalar_multiply_body_asm(const std::vector<int>& contexts, 
 
     asm_code << "        /* " << label << " */\n";
     if (manage_modulus_table) {
-        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx, port_prefix + "/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < num_components; ++component) {
         for (int context : contexts) {
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly);
+            const auto limb = port_prefix + "/c" + std::to_string(component) + "/mod" + std::to_string(context);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly, limb + "/input");
+            asm_code << hpu::resource::read(POBJ_SCALAR, hpu::DataType::poly, limb + "/scalar");
             asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_SCALAR);
-            asm_code << hpu::resource::discard(POBJ_SCALAR);
-            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
+            asm_code << hpu::resource::output(POBJ_VALUE, limb + "/output");
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
     }
     return asm_code.str();
 }
@@ -155,25 +109,22 @@ std::string generate_fast_floor_body_asm(const std::vector<int>& q_contexts,
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* FastFloor component " << component
                  << ": FastConv(Q->Bsk), subtract, multiply Q^-1 */\n";
+        const auto prefix = "behz/fast_floor/c" + std::to_string(component);
         asm_code << ::generate_hpu_bconv_contexts_body_asm(q_contexts, bsk_contexts, false,
-                                                           manage_modulus_table);
+                                                           manage_modulus_table, prefix + "/bconv");
         if (manage_modulus_table) {
             asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
-                                   hpu::DloadFlag::small_bank);
+                                   prefix + "/modulus_table", hpu::DloadFlag::small_bank);
         }
         for (int context : bsk_contexts) {
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_CONVERTED, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_Q_INV, hpu::DataType::poly);
+            const auto limb = prefix + "/mod" + std::to_string(context);
+            asm_code << hpu::resource::read(POBJ_VALUE, hpu::DataType::poly, limb + "/input");
+            asm_code << hpu::resource::read(POBJ_CONVERTED, hpu::DataType::poly, limb + "/converted");
+            asm_code << hpu::resource::read(POBJ_Q_INV, hpu::DataType::poly, limb + "/inverse");
             asm_code << hpu::resource::subtract(POBJ_VALUE, POBJ_VALUE, POBJ_CONVERTED);
-            asm_code << hpu::resource::discard(POBJ_CONVERTED);
             asm_code << hpu::resource::multiply(POBJ_VALUE, POBJ_VALUE, POBJ_Q_INV);
-            asm_code << hpu::resource::discard(POBJ_Q_INV);
-            asm_code << hpu::resource::publish(POBJ_VALUE, 1);
-        }
-        if (manage_modulus_table) {
-            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
+            asm_code << hpu::resource::output(POBJ_VALUE, limb + "/output");
         }
     }
     return asm_code.str();
@@ -190,53 +141,45 @@ std::string generate_branchless_sk_body_asm(const std::vector<int>& q_contexts,
     const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
 
     for (int component = 0; component < num_components; ++component) {
+        const auto prefix = "behz/sk/c" + std::to_string(component);
         asm_code << "        /* branchless SK component " << component << " */\n";
         asm_code << "        /* y = FastConv(B->Q) */\n";
         asm_code << ::generate_hpu_bconv_contexts_body_asm(b_contexts, q_contexts, false,
-                                                           manage_modulus_table);
+                                                           manage_modulus_table, prefix + "/to_q");
         asm_code << "        /* temp = FastConv(B->m_sk) */\n";
         asm_code << ::generate_hpu_bconv_contexts_body_asm(b_contexts, {msk_context}, false,
-                                                           manage_modulus_table);
+                                                           manage_modulus_table, prefix + "/to_msk");
 
         asm_code << "        /* alpha=(temp-z_msk)*B^-1 mod m_sk */\n";
         if (manage_modulus_table) {
             asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
-                                   hpu::DloadFlag::small_bank);
+                                   prefix + "/modulus_table", hpu::DloadFlag::small_bank);
         }
         asm_code << hpu::resource::select_modulus(msk_context);
-        asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly, prefix + "/alpha/input");
+        asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly, prefix + "/alpha/coefficient");
+        asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly, prefix + "/alpha/inverse");
         asm_code << hpu::resource::subtract(POBJ_ALPHA, POBJ_ALPHA, POBJ_FACTOR);
-        asm_code << hpu::resource::discard(POBJ_FACTOR);
         asm_code << hpu::resource::multiply(POBJ_ALPHA, POBJ_ALPHA, POBJ_DEST);
-        asm_code << hpu::resource::discard(POBJ_DEST);
-        asm_code << hpu::resource::publish(POBJ_ALPHA, 1);
-        if (manage_modulus_table) {
-            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
-        }
+        asm_code << hpu::resource::output(POBJ_ALPHA, prefix + "/alpha/output");
 
         asm_code << "        /* broadcast alpha: {m_sk}->Q */\n";
         asm_code << ::generate_hpu_bconv_contexts_body_asm({msk_context}, q_contexts, false,
-                                                           manage_modulus_table);
+                                                           manage_modulus_table, prefix + "/broadcast");
 
         asm_code << "        /* out_i=y_i+alpha*(-B mod q_i) */\n";
         if (manage_modulus_table) {
             asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
-                                   hpu::DloadFlag::small_bank);
+                                   prefix + "/modulus_table", hpu::DloadFlag::small_bank);
         }
         for (int context : q_contexts) {
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly);
+            const auto limb = prefix + "/mod" + std::to_string(context);
+            asm_code << hpu::resource::read(POBJ_DEST, hpu::DataType::poly, limb + "/base");
+            asm_code << hpu::resource::read(POBJ_ALPHA, hpu::DataType::poly, limb + "/alpha");
+            asm_code << hpu::resource::read(POBJ_FACTOR, hpu::DataType::poly, limb + "/factor");
             asm_code << hpu::resource::accumulate(POBJ_DEST, POBJ_ALPHA, POBJ_FACTOR);
-            asm_code << hpu::resource::discard(POBJ_ALPHA);
-            asm_code << hpu::resource::discard(POBJ_FACTOR);
-            asm_code << hpu::resource::publish(POBJ_DEST, 1);
-        }
-        if (manage_modulus_table) {
-            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
+            asm_code << hpu::resource::output(POBJ_DEST, limb + "/output");
         }
     }
     return asm_code.str();
@@ -283,24 +226,24 @@ std::string generate_behz_core_body_asm(int N, const std::vector<int>& q_context
         asm_code << "        /* input component " << component
                  << ": unreduced FastBConv Q->Bsk; no m_tilde/SmMRq */\n";
         asm_code << ::generate_hpu_bconv_contexts_body_asm(q_contexts, bsk_contexts, false,
-                                                           manage_modulus_table);
+                                                           manage_modulus_table, "behz/input_bconv/c" + std::to_string(component));
     }
     asm_code << generate_basis_transform_body_asm(N, q_contexts, 4, false, "input Q",
-                                                  manage_modulus_table);
+                                                  manage_modulus_table, "behz/input_q");
     asm_code << generate_basis_transform_body_asm(N, bsk_contexts, 4, false, "input Bsk",
-                                                  manage_modulus_table);
-    asm_code << generate_tensor_body_asm(q_contexts, "tensor Q", manage_modulus_table);
-    asm_code << generate_tensor_body_asm(bsk_contexts, "tensor Bsk", manage_modulus_table);
+                                                  manage_modulus_table, "behz/input_bsk");
+    asm_code << ::generate_hpu_cmult_contexts_body_asm(q_contexts, "tensor Q", false, manage_modulus_table);
+    asm_code << ::generate_hpu_cmult_contexts_body_asm(bsk_contexts, "tensor Bsk", false, manage_modulus_table);
     asm_code << generate_basis_transform_body_asm(N, q_contexts, 3, true, "tensor Q",
-                                                  manage_modulus_table);
+                                                  manage_modulus_table, "behz/tensor_inverse_q");
     asm_code << generate_basis_transform_body_asm(N, bsk_contexts, 3, true, "tensor Bsk",
-                                                  manage_modulus_table);
+                                                  manage_modulus_table, "behz/tensor_inverse_bsk");
 
     std::vector<int> q_bsk_contexts = q_contexts;
     q_bsk_contexts.insert(q_bsk_contexts.end(), bsk_contexts.begin(), bsk_contexts.end());
     asm_code << generate_scalar_multiply_body_asm(
         q_bsk_contexts, 3, "multiply every Q union Bsk limb by plaintext modulus t",
-        manage_modulus_table);
+        manage_modulus_table, "behz/scalar");
     asm_code << generate_fast_floor_body_asm(q_contexts, bsk_contexts, 3, manage_modulus_table);
     asm_code << generate_branchless_sk_body_asm(q_contexts, b_contexts, msk_context, 3,
                                                 manage_modulus_table);
@@ -327,16 +270,13 @@ std::string generate_multiply_tensor_body_asm(int N, const BfvCiphertextMultiply
     const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "modulus_table", hpu::DloadFlag::small_bank);
     }
     asm_code << "        /* Explicit SEAL MOD_IDs: fixed P="
              << layout.keyswitch_layout.p_mod_ids.front() << ", m_sk=" << layout.m_sk_mod_id
              << ", t=" << layout.plaintext_mod_id << " */\n";
     asm_code << generate_behz_core_body_asm(N, layout.keyswitch_layout.q_mod_ids, layout.b_mod_ids,
                                             layout.m_sk_mod_id, false);
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(modulus_table_object);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }
@@ -355,7 +295,7 @@ std::string generate_ciphertext_multiply_body_asm(int N, const BfvCiphertextMult
     const auto modulus_table_object = hpu::resource::make_operand("modulus_table", 4);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(modulus_table_object, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "modulus_table", hpu::DloadFlag::small_bank);
     }
     asm_code << "        /* Explicit SEAL MOD_IDs: fixed P="
              << layout.keyswitch_layout.p_mod_ids.front() << ", m_sk=" << layout.m_sk_mod_id
@@ -366,9 +306,6 @@ std::string generate_ciphertext_multiply_body_asm(int N, const BfvCiphertextMult
                 "without host synchronization */\n";
     asm_code << ::generate_hpu_bfv_relinearization_body_asm(N, layout.keyswitch_layout, false,
                                                             false);
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(modulus_table_object);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }

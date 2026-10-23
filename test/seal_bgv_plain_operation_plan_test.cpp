@@ -117,7 +117,7 @@ void check_keyswitch_splice(
                     "BGV KeySwitch key/twiddle changed during plan composition");
         }
     }
-    const auto middle_count = standalone.instructions.size() - 3;
+    const auto middle_count = standalone.instructions.size() - 2;
     bool found = false;
     for (std::size_t index = 0;
          index + middle_count <= combined.instructions.size(); ++index) {
@@ -204,7 +204,7 @@ void check_modswitch_splice(
                     "BGV ModSwitch constants changed during composition");
         }
     }
-    const auto middle_count = standalone.instructions.size() - 3;
+    const auto middle_count = standalone.instructions.size() - 2;
     bool found = false;
     for (std::size_t index = 0;
          index + middle_count <= combined.instructions.size(); ++index) {

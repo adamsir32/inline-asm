@@ -18,9 +18,9 @@ enum class CkksDmaDirection {
     store
 };
 
-// Binds one generated dload/dstore, in program order, to a named HPU_MEM
-// allocation. The runtime places span.line_offset/span.line_count in x10/x11
-// immediately before issuing the corresponding DMA instruction.
+// Binds a native logical data port to a named HPU_MEM allocation. The compiler
+// assigns final DMA order and renders the required x10/x11 updates after
+// scheduling, resource allocation, and DDR placement.
 struct CkksDmaBinding {
     std::size_t program_dma_index = 0;
     std::optional<std::size_t> operation_index;
@@ -60,9 +60,8 @@ struct CkksRelocationSchedule {
     }
 };
 
-// Resolves every currently supported plan operation and validates its binding
-// order against the actual generated assembly. A schedule built from the
-// official application image is therefore complete and directly consumable.
+// Resolves supported plan operations by named native data ports. Physical
+// object hints and compatibility assembly order do not identify their data.
 CkksRelocationSchedule build_ckks_relocation_schedule(
     const CkksLoweredProgram& program,
     const hpu::runtime::HpuMemImage& image,

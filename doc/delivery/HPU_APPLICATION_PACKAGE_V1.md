@@ -130,14 +130,15 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   执行前加载初始镜像，output 与 workspace 从零开始。
 - `golden_manifest.csv`：记录 object、component、MOD_ID、模数、domain、路径、
   目标行范围、有效 word 数、padding 和校验和。每个 `AllocationKind::output`
-  恰有一个 golden limb。当前输出包括每个算子的结果；内部 scratch 的每次 dstore
-  不一定有独立 golden。`step_<index>` 与计算图中的 `golden_object_id` 相连。
+  恰有一个 golden limb。前端只导出全部标记结果，无标记则导出最后计算结果；
+  Plan 默认只导出最终结果。内部 scratch 的 dstore 不必有独立 golden。`step_<index>` 与计算图中的 `golden_object_id` 相连。
 - BFV golden 为 `coefficient`；CKKS/BGV 为 `canonical_ntt_physical`。
   新应用包的系数域使用自然系数位置。所有 word 均为 `[0,q)` 的 residue，文件补零到完整 HPU line。
 - `parameters.json` 保存 N、plain modulus、安全等级、key-context 模数及各 level
   的 `parms_id`、Q 和 chain index。`operation_graph.json` 保存节点、输入引用、
   输出、level、scale/correction factor。节点的 `operation_index` 从 0 连续编号，
-  `golden_object_id=step_<index>`；三种方案的多分支依赖均保留。
+  `exported` 标明是否导出，只有导出节点具有 `golden_object_id=step_<index>`；
+  未导出节点保留逻辑依赖，不声明不存在的持久 DDR 结果。
   BGV 只读资源可有多个逻辑名称，对外 memory 清单只列物理 allocation，
   DMA 的 `allocation_id` 始终指向这张清单中的物理对象。
 - `provenance/files.csv` 列出其余文件的路径、角色、长度和 FNV-1a64。
@@ -178,8 +179,8 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 
 `legacy_raw_stage` 可回放历史 raw 镜像。选择 profile 不修改数据、DMA 或指令，
 新自然镜像使用 legacy profile 可能
-比较失败。历史 `test/reference/main.cpp` 固定 profile 算子包仍使用 BR 系数镜像，
-其布局不因应用包的新约定而改变；该 raw 算子包也不属于本页的新应用镜像协议。
+比较失败。`test/reference/main.cpp` 仅保留为内部历史数学差分 fixture；其 BR 数据
+不能当作应用包镜像，原直接汇编交付入口已经移除。
 
 新应用包的 `metadata/parameters.json` 记录实际的 NTT 数据 ABI：
 
@@ -215,8 +216,8 @@ PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word；64 对�
 选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
 schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，应按原生成版本和
 镜像约定回放。迁移到新自然边界时应重新生成完整应用包，包括镜像、golden、元数据
-和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。旧 raw 算子包可以保留
-用于旧契约回归，不将其文件混入新生成的自然镜像包。
+和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。历史数学 fixture 不得
+混入新生成的自然镜像包。
 
 旧完整 stage 表即使通过包结构和 checksum 验证，也不代表兼容在线生成 RTL。
 当前 target 无完整表执行分支，必须重新生成镜像、DMA spans、sidecar 和 checksum；
@@ -226,7 +227,8 @@ schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，
 
 三种方案使用相同的主验证规则：独立 modified-SEAL `Evaluator` 在每个 plan 算子后
 保存 ciphertext，适配器检查 ciphertext 的 level、component、scale/correction
-factor，并转换为对应的 HPU 物理布局。转换结果就是包内 golden。因此三个方案的
+factor，并转换为对应的 HPU 物理布局。指定导出结果的转换值构成包内 golden；
+其他节点只用于 host 检查，不因此强制向目标程序增加写回。因此三个方案的
 `seal_oracle_to_golden` 都必须为 `pass`，报告同时记录 `oracle_verified=true` 和
 `golden_matches_oracle=true`。该项为必选检查（`required=true`）；通过后，三种方案
 都记录统一的 `overall_status=pass`。
@@ -274,7 +276,7 @@ Relinearize，也保留旧接口的融合 Multiply+Relinearize。
 | 程序文件 | 直接位于包根目录 | 通过 `package.json` 定位，当前位于 `program/` |
 | 初始镜像 | `test_data/hardware/hpu_mem_image.u32.bin` | `memory/hpu_mem_image.u32.bin` |
 | DMA 映射 | 根目录 CSV，CKKS 专用 | `program/dma_relocation_manifest.csv`，三种方案统一 15 列 |
-| 预期输出 | `expected_outputs.csv` 和按 dstore 导出的镜像 | `golden/golden_manifest.csv` 和逐算子、逐 RNS limb 文件 |
+| 预期输出 | `expected_outputs.csv` 和按 dstore 导出的镜像 | `golden/golden_manifest.csv` 和指定输出的逐 RNS limb 文件 |
 | 完整性检查 | 依赖案例自身检查 | `hpu_validate_package PACKAGE_DIR` 做统一静态校验 |
 | C++ 写包接口 | `write_ckks_delivery_package(...)` | `make_*_application_package(...)` 后调用 `write_application_package(...)` |
 
@@ -316,9 +318,15 @@ hpu::delivery::write_application_package("outputs/my_bgv_case", request);
 兼容重载允许省略最后一个参数并在适配器内部执行相同模型；显式形式便于测试代码
 单独检查各步 HPU_MEM 内容，也与 CKKS/BFV 的交付调用形状一致。
 
+CKKS/BFV 以及带显式执行镜像的 BGV 适配器支持可选的
+`exported_output_prefixes` 参数，指定需要持久化的完整逻辑结果前缀集合；
+空集合默认只选最终输出。所有 oracle 快照仍须提供并检查。Evaluator 自动把全部
+`mark_output()` 转成该集合，同一物理值的别名只导出一次。
+
 返回的 request 借用初始 `HpuMemImage`；写出前应保持其存活、内容不变。
 显式预留临时 ciphertext 工作区时，将 `reserve_ciphertext` 最后一个参数设为
-`hpu::runtime::AllocationKind::workspace`。默认仍是 `output`，会要求完整 golden。
+`hpu::runtime::AllocationKind::workspace`。数据准备阶段默认仍是 `output`；导出适配器按选择集合将未导出的节点交给编译器
+管理。最终包中的每个 output allocation 必须恰有一个 golden limb。
 
 ```cmake
 add_executable(my_bfv_case examples/my_bfv_case.cpp)
@@ -331,9 +339,10 @@ hpu_application_delivery(bfv my_bfv_case my_bfv_case)
 自定义测试入口并调用独立校验器。公共层可直接接受 `ApplicationPackageRequest`，
 未来新增方案需要补充方案标识、适配器和测试，无需复制落盘实现。
 
-原 CKKS 专用的 `write_ckks_delivery_package` 和扁平目录格式已删除；所有
-`hpu_*_delivery` 应用目标统一使用本规范。旧固定 profile 算子交付目标
-`hpu_delivery` 仍使用原协议，与新应用目标 `hpu_fhe_delivery` 分开。
+所有公开应用交付目标统一使用本规范。旧 CKKS 专用写入器、扁平格式以及
+`inline_asm_codegen`、`inline_asm_encode_outputs`、`hpu_delivery`、
+`hpu_delivery_with_seal` 直接汇编交付链均已移除。数学 reference 仅作为可选内部
+差分 fixture 保留，底层算子测试也通过原生 SSA 和统一应用包入口生成产物。
 
 ## 回归命令
 
@@ -347,18 +356,22 @@ ctest --test-dir build -L application-delivery --output-on-failure
 ### 显式 Multiply 与 Relinearize
 
 CKKS、BFV、BGV 均可在 plan 中分别添加 Multiply（三分量输出）和 Relinearize（二分量输出），
-每个节点都有独立的 `operation_index` 和 golden 对象。BFV 和 BGV 的原有融合乘法接口继续兼容，
+每个节点保留独立的 `operation_index`；只有指定导出节点具有 golden 对象。
+BFV 和 BGV 的原有融合乘法接口继续兼容，
 融合节点标记为 `multiply_relinearize`；IT 用例必须提供对应的融合 SEAL oracle 快照。
 
 ## 原生算子资源编译
 
 Evaluator 和 CKKS/BFV/BGV Plan 应用携带算子直接生成的资源 IR 与结构化 DMA 端口。
 前端在编译时调度资源，旧 Plan 包在 `write_application_package()` 导出时自动调用
-同一后端。导出在私有镜像中复用 workspace 并重新绑定 DMA 和 golden 目的地址，
+同一后端。导出在私有镜像中执行 SSA 读取复用、写读转发、死值消除及依赖调度，按需物化
+workspace 并重新绑定 DMA 和指定输出的 golden 地址，
 调用者的原始镜像保持不变。最终包保持 v1 文件和二进制格式。
 
 `oracle/report.json.compiler_resources.ir_source="operator"` 标识原生路径；报告还记录
-原始/最终 DDR、DMA、bank 峰值及 spill/reload。导出要求所有保留输出逐字匹配 SEAL
+原始/最终 DDR、DMA 字节/次数、bank 峰值、spill/reload 和逐 allocation IO。
+原序、复用和重排候选按 DMA 总字节、次数、指令数依次选择，`--no-opt` 使用统一
+后端的原序基准，不承诺保留旧手写指令和布局。导出要求所有保留输出逐字匹配 SEAL
 golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不由 host 对拍置为 true。
 原始 `--print-asm` 可以用于对照，消费最终程序时应使用包内的指令及 DMA 清单。
 

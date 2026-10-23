@@ -203,7 +203,7 @@ int main()
                     hpu::dload(
                         4, hpu::DataType::mod_ctx,
                         hpu::DloadFlag::small_bank)) == 1
-                && count_token(lowered.body_asm, hpu::pfree(4)) == 1,
+                && count_token(lowered.body_asm, hpu::pfree(4)) == 0,
             "Galois lowering selected the wrong kernel or duplicated the modulus table");
 
         const auto relocations =

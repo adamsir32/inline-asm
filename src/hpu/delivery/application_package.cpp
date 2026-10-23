@@ -2067,7 +2067,9 @@ void validate_application_package_request(
                 context_case(request) + " output allocation '" + allocation.id
                 + "' is read_only");
         }
-        if (output_coverage[allocation.id] != 1) {
+        if (output_coverage[allocation.id] != 1
+            && !(output_coverage[allocation.id] == 0 && request.program.operator_program
+                && !request.program.resources_compiled)) {
             throw std::invalid_argument(
                 context_case(request) + " output allocation '" + allocation.id
                 + "' must be covered by exactly one golden limb");
@@ -2111,7 +2113,10 @@ ApplicationPackageReport write_application_package(
     const std::filesystem::path& output_root,
     const ApplicationPackageRequest& original_request)
 {
-    validate_application_package_request(original_request);
+    if (!original_request.program.operator_program || original_request.program.resources_compiled)
+        validate_application_package_request(original_request);
+    else if (!original_request.initial_image)
+        throw std::invalid_argument("native application package requires an initial image");
     if (output_root.empty()) {
         throw std::invalid_argument("application package output root is empty");
     }

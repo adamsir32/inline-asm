@@ -119,7 +119,9 @@ context、编码、加密、密钥生成和解密继续使用 native SEAL。应�
 前端保留 SEAL 风格的显式操作：`multiply` 后的重线性化、rescale、mod switch
 和 scale 调整均由应用选择。`set_scale` 是共享数据的元数据视图，不发出算术指令。
 
-多个结果可以通过 `mark_output` 命名。目前每个计算节点的结果也保留用于 IT 读回。
+多个结果可以通过 `mark_output` 命名。部署默认只保留全部标记结果；没有标记时保留
+最后一个计算结果。内部节点不为逐节点读回强制写回，显式标记中间值即可将其作为
+可观察输出。多个标签或 scale view 引用同一物理值时不重复生成 golden。
 `compiled.oracle_result(value)` 返回 SEAL 参考结果；实际 HPU 结果由目标端另行读回。
 
 ## 5. 从计算图到最终指令
@@ -130,10 +132,11 @@ context、编码、加密、密钥生成和解密继续使用 native SEAL。应�
 2. 根据 context 的 scheme 创建对应 Plan 和应用镜像，准备资源与输出元数据。
 3. 用对应方案的 SoftwareExecutor 执行应用，与 oracle 比较各节点的元数据和字值。
 4. 展开方案算子，收集原生 `OperatorProgram`，并准备与镜像关联的 DMA 端口。
-5. 公共交付编译器将算子资源 IR 绑定为 `VirtualProgram`，完成资源优化、DMA 和
-   golden 目的地址重定位，重新生成最终指令与目标侧 C。
+5. 公共交付编译器先规范化内存身份，执行 SSA 读取合并、写读转发和死值消除，
+   构造依赖调度候选；再绑定为 `VirtualProgram`，统一安排按需加载、bank、
+   释放、spill/reload 和 DDR，重定位 DMA 与指定输出的 golden，生成最终 C/指令。
 6. host 指令模型执行最终指令字与实际 DMA span，与 oracle golden 比较。
-   优化模式还比较原始流与优化流的全部保留输出。
+   优化模式还比较统一后端原序基准与所选优化流的全部导出结果。
 7. 返回持有编译快照、包请求和报告的 `CompiledApplication`。
 
 公共交付编译入口为 `hpu/delivery/resource_compiler.hpp` 中的
@@ -148,156 +151,146 @@ context、编码、加密、密钥生成和解密继续使用 native SEAL。应�
 旧 Plan 示例打印的 `--print-asm` 和指令计数属于兼容基准；最终交付指令及地址
 以包中的 `program/*.asm`、`*.inst32` 和 `dma_relocation_manifest.csv` 为准。
 
-## 6. 编译器资源管理
+## 6. SSA、IO 优化与统一资源管理
 
-### 6.1 算子资源 IR
+### 6.1 两层 IR 的职责
 
-公共资源编译器位于 `hpu/compiler/resource_ir.hpp/.cpp`，算子资源接口位于
-`hpu/compiler/operator_resources.hpp/.cpp`。CKKS、BFV、BGV 共用对象调度、
-DDR 生命周期复用和交付编译后端。
+| IR | 表达内容 | 不负责 |
+| --- | --- | --- |
+| `OperatorProgram` | 单次定义的 `ValueId`、逻辑数据端口、计算依赖、模数上下文和原地约束 | 物理对象号、bank、硬件释放时机 |
+| `VirtualProgram` | 存储对象、DDR backing/range、驻留和生命周期、资源约束 | 重新定义方案数学规则 |
 
-算子通过 `make_operand(label, compatibility_slot=-1)` 创建独立变量，同名变量也具有
-不同身份。`Recording` 对每次加载、算术结果和 NTT stage 定义分配新的 `ValueId`，
-`Operation.inputs/outputs` 直接引用 SSA 版本。`value`、`auxiliary` 等旧别名仅供兼容
-入口使用，原生算子已使用独立变量。变量数量不受物理对象槽位数量限制。
+继续使用这两层，不再增加一套与之平行的指令模型。优化必须在 SSA 值仍独立时完成；
+降低为原地存储后直接删除 DLOAD，可能破坏 NTT 或 PMAC 的旧值。
+
+### 6.2 原生算子的表达
+
+算子通过 `make_operand(label)` 建立任意数量的独立变量，同名也具有不同身份。
+`Recording` 为输入、算术结果和每个 NTT stage 创建新的 SSA 版本。
 
 ```cpp
 namespace r = hpu::resource;
 r::Recording recording;
-const auto a = r::make_operand("input");
-const auto b = r::make_operand("input"); // 与 a 是两个独立变量。
-const auto product = r::make_operand("product");
-r::read(a, hpu::DataType::poly);
-r::read(b, hpu::DataType::poly);
-r::multiply(product, a, b);
-r::accumulate(product, a, b); // 产生新的 SSA 版本，输入包含旧 product。
-r::publish(product);
+const auto a0 = r::make_operand("a0");
+const auto b0 = r::make_operand("b0");
+const auto t0 = r::make_operand("t0");
+r::read(a0, hpu::DataType::poly, "input/left/c0/mod0");
+r::read(b0, hpu::DataType::poly, "input/right/c0/mod0");
+r::multiply(t0, a0, b0);
+r::output(t0, "output/c0/mod0");
 auto program = recording.finish();
+// 数据准备层为上述逻辑端口绑定实际 allocation 和范围。
 ```
 
-`read/publish` 直接建立显式 `PortId`，每个端口记录所属操作、方向和独立 binding。
-调用方用 `bind_port()` 或 `bind_ports()` 提供 allocation/span；
-`bind_program(program, image)` 从这些端口检查范围、只读属性和 SSA 定义使用关系，
-构建后端 `VirtualProgram`。未绑定端口、重复定义和未定义输入在此阶段报错。
+`read/input` 声明逻辑数据来源，`output` 声明逻辑写入，不决定目标机器的即时 DMA
+或 REL。算子无需按固定容量反复读取同一输入，也无需手动 `discard`。
+兼容接口仍可渲染历史汇编；兼容槽号只供这种渲染使用，编译器不据此分配资源。
+`publish/discard` 的兼容语义在规范化时转成逻辑写入和自动生命周期。
 
-`Recording` 在线程间隔离，嵌套作用域和异常展开恢复外层记录器。程序片段通过
-`append()` 重新编号局部 SSA 值与端口，显式连接片段的活跃输入；CKKS/BFV 保存
-每个操作的原生片段，BGV 拼接独立子程序时同步处理这些身份。
+端口保存稳定的 `logical_binding`，可使用 `bind_named_ports()` 或已解析的 `input`
+绑定数据；`bind_port/bind_ports` 用于连接已有适配请求。逻辑身份不依赖最终 DMA
+序号。程序片段 `append()` 重编号值和端口，并连接显式 live-out。
+`render_operator_ir()` 可查看这些值、端口和数据依赖。
 
-SSA 降低时根据最后使用位置合并可安全复用的存储。NTT 的数据对象和 PMAC 的
-累加器是强制原地输入；旧 SSA 值仍有后续使用时，编译器通过独立 snapshot
-工作区和 DSTORE/DLOAD 初始化新版本，保留旧版本的精确 uint32 字值。
-延迟写回与唯一重载关联时，存储生命周期至少保留到该重载，避免跨间隔被其他值覆盖。
+### 6.3 数据身份、内存版本与复用
 
-现有 `generate_*_body_asm` 返回接口保留，操作数的可选槽位提示只供兼容汇编渲染。
-CKKS/BFV 从原生片段的端口声明构造 DMA 绑定，兼容汇编用于一致性检查；历史手工
-请求保留汇编导入路径。资源编译器的原生入口直接使用 SSA 与端口，不恢复汇编数据流。
-`render_operator_ir(program)` 可输出 SSA 值与端口文本。各方案的数据准备 recipe
-继续分别维护，前端 Evaluator API 和包 V1 协议保持兼容。
+绑定后按规范化的 allocation、精确子范围、内存版本、表示和加载约束识别数据。
+只读输入、明文、密钥、twiddle 可在多次引用之间复用。写入使重叠范围的缓存身份
+失效；完全匹配的写后读可以转发 SSA 值，部分覆盖保守处理。
 
-### 6.2 逻辑值、对象与缓冲区
+优化按以下顺序进行：
 
-| 概念 | 职责 |
+1. 去除算子中的物理释放约定，把所需输出作为持久化根。
+2. 合并可证明相同的读取，将后续 uses 指向统一值。
+3. 转发内部完整写读，删除不必要的 DDR 往返。
+4. 从指定输出和必要副作用反向标记存活节点，删除死计算与未用数据。
+5. 重算 uses/最后使用，再降低为存储对象。
+
+统一值身份不等于永久驻留。一个值可以被释放后重新从有效 backing 加载；容量
+充足时才保持到后续使用。NTT/PMAC 的 `tied_input` 保留原地硬件约束，旧值仍存活
+时优先利用已有 backing；确实没有可用副本时才生成精确 uint32 snapshot。
+
+### 6.4 调度候选与选择
+
+编译器构造原序、复用和重排三个候选，均使用同一个资源后端。
+重排使用确定性的 list scheduling，遵守 SSA、内存读写、模数上下文和屏障依赖，
+按预计新增 IO、瞬时存储压力及原序打平选择就绪计算。每个多项式内部的 NTT stage
+依赖不变；独立多项式可以共享 stage 参数，不按源代码段边界强制释放。
+
+运算记录实际 `modulus_context`，最终按调度次序补充必要 PMODLD，避免把隐含的
+模数选择移错。完整程序末尾仍统一 PSYNC，不新增逐 stage CPU 等待。
+
+三个候选按最终 **DMA 总字节、DMA 次数、指令数** 依次比较，选出代价最小者。
+`optimize_resources=false` 选择统一 SSA 后端生成的原序基准；它不再承诺保留早期
+手写 DLOAD/PFREE 流的机器码、布局或每条 DMA。单独的 encoded-import ISA 回放
+仍可保留显式原始编码，不能与应用 NoOpt 混为一谈。
+
+### 6.5 片上对象与 bank 分配
+
+64 个逻辑对象槽位 p0…p63 与物理 bank 独立。Bank 0…4 各 1024 line，普通对象
+按 `128 * next_pow2(ceil(actual_len/128))` 保留对齐区间。N8192 的单模多项式为
+128 line，普通区理论容纳 40 个；二分量 Q4 密文占 8 个这样的多项式。
+执行时还需要常量、密钥和新结果的瞬时空间，不能只按完整密文个数判断可行性。
+
+编译器与指令模型共用 `runtime::BankAllocator`。Bank 5 前 4 line 固定留给模表，
+其余可容纳 14 个两条 line 的 stage 参数。mask 仅约束当前 DLOAD；CP 不参与
+SRAM 容量或生命周期计算。PMAC 和 NTT 先申请新结果，再释放旧区间；NTT 排除
+输入 bank。具体硬件规则见 [Bank 分配指南](../reference/HPU_BANK_ALLOCATION_GUIDE.md)。
+
+后端先回收死值，再尝试实际放置。需要淘汰时，只选择能缓解当前 bank/mask/区间
+失败的候选，结合写回/重载字节和下一次使用距离决定：干净输入直接释放，脏且仍
+存活的值才 spill。对象槽位峰值低也可能因 bank 限制溢出；`spill=0` 也可能存在
+重复输入 DMA，两者应分别统计。
+
+PFREE、DSTORE REL 和 reload 由后端生成。必要输出写回后如还有消费者，可以
+继续驻留，不因算子边界强制释放。PE 内部的 128 个 NTT 寄存器仍由硬件调度。
+
+### 6.6 DDR 与输出物化
+
+只有实际使用的输入、只读资源、必要 backing 和指定输出进入部署镜像。未导出的
+计算结果归编译器管理；值一直驻留且没有必要写回时，不为其保留独立 DDR。
+
+可写 workspace 在所有读取前已完整定义，且使用区间不交叠时，可进入统一 scratch
+arena。依赖初始零值的范围保持必要初始化。逻辑别名规范化后指向实际物理分配；
+最终 memory manifest 只列物理对象，DMA 指向相应子范围。
+
+前端默认只持久化全部标记结果，无标记则持久化最后计算结果。Plan 交付适配器
+默认只持久化最终输出，也可显式传入输出前缀集合。host SoftwareExecutor 仍在
+独立主机镜像中检查各步 oracle；它的中间镜像不是部署输出清单。
+
+### 6.7 IO 与资源报告
+
+`oracle/report.json.compiler_resources` 和 `compiled.resource_report_json()` 给出：
+
+| 字段 | 含义 |
 | --- | --- |
-| 前端逻辑值 | 数学依赖、level、分量数、scale、correction factor |
-| 算子 `ValueId` / `PortId` | 单次定义的值版本 / 显式内存访问端口 |
-| `VirtualObject` | SSA 降低后的片上存储对象及长度、加载类型；可承载不重叠的值版本 |
-| `VirtualBuffer` | DDR 逻辑分配、读写属性、首次/最后使用和布局标签 |
-| `VirtualInstruction` | 对象 uses/definitions、DDR range、原始指令及算子来源 |
+| `ir_source` | `operator` 为原生 SSA；`encoded_import` 为 ISA 兼容导入 |
+| `original_ddr_lines` / `allocated_ddr_lines` | 输入镜像与最终物化布局的行数 |
+| `original_dma_bytes` / `original_dma_count` | 相同输出集合的原序基准 IO |
+| `all_checkpoint_dma_bytes` / `all_checkpoint_dma_count` | 保留全部计算节点 checkpoint 的诊断基准 IO |
+| `output_policy_saved_dma_bytes` | 只收敛输出根、尚未做读取合并和转发时减少的实际 IO |
+| `dload_bytes` / `dstore_bytes` / `dma_bytes` | 所选目标流实际 DMA 字节 |
+| `required_output_write_bytes` | 导出 allocation 的实际写入字节；含必要的多次或分段写入 |
+| `repeated_range_read_bytes` | 同地址范围的重复加载字节；含合法重载，仅用于定位热点 |
+| `spill_write_bytes` / `reload_read_bytes` / `exact_copy_bytes` | 换出写回、重载及 SSA 精确副本的实际传输字节 |
+| `removed_checkpoint_min_write_bytes` | 未导出中间 checkpoint 的最少写回量，不计入同输出集合的优化收益 |
+| `initial_image_bytes` | 初始镜像体积，单独于运行期 IO |
+| `selected_schedule` | `original`、`reuse` 或 `reordered` |
+| `spills` / `reloads` | 换出次数 / SSA 对象首次装载后的再次装载次数 |
+| `peak_regular_lines` / `peak_small_lines` / `peak_object_slots` | 片上占用和槽位峰值 |
+| `logical_buffers` / `io_by_value` / `io_by_allocation` / `io_by_kind` | 逻辑到物理映射、布局、逐 SSA value、逐 allocation 和逐数据类别的 IO |
 
-一个逻辑密文含多个分量和 RNS limb，因此对应多个对象与缓冲区。算子的符号
-操作数在定义时建立对象生命周期，调度器选择物理槽位；输入端口的 `BufferRange`
-记录初始化来源。
+性能基准使用 N8192、Q4、P1；示例命令为 `--degree 8192 --data-moduli 4 --seed 0`。
+加 `--no-opt`、保持相同输出集合可对照编译器收益。取消中间输出本身带来的 IO
+变化应单独报告，不能计入同一输出集合的复用收益。CP=1 仅请求 LLC 分配，编译
+代价仍按完整传输字节计算；功能模型不模拟缓存命中或硬件周期。
 
-内存布局与数学域分别处理。IR 提供 `coefficient_natural`、
-`coefficient_bit_reversed`、`canonical_ntt_physical`、`unspecified` 标签。
-资源后端的 `hpu::compiler::CompileOptions.buffer_layouts` 可按真实 allocation
-名称显式标注，NoOpt 与优化模式均保留标签，不据此修改字值。
-
-公共交付编译器根据适配器约定标注已知输入和评估密钥，并按 golden ABI 标注输出。
-输出标签表示期望布局，结果仍由指令比较检查。一个 workspace 在执行中可能保存
-系数、NTT 或 stage 中间数据，因此跨域 workspace 保持 `unspecified`。
-
-### 6.3 DDR 工作区复用
-
-为了提供逐节点读回，输入、常量、明文、评估密钥和每个计算节点结果都保留独立
-存储。当前优化重点是算子内部 `workspace`，只有满足以下条件才可复用：
-
-1. 可写且不属于需要保留的结果。
-2. 所有初始读操作之前，相关 line 已由程序写入。
-3. 生命周期与拟复用的区域没有交叠。
-
-依赖初始零值的 workspace 保留独立存储。复用器按使用区间进行确定性、line
-对齐的放置，建立统一 `$compiler/scratch_arena`。CKKS Plan 的 Relinearize/Rescale
-默认声明独立系数工作区以保留输入节点的 NTT 数据，后端按生命周期复用这些工作区。
-
-`memory/memory_manifest.csv` 描述实际物理分配；scratch arena 作为一个分配出现。
-每个逻辑 workspace 的子范围记录在 `compiler_resources.logical_buffers` 中。
-最终 DMA 指向对应物理 allocation 与子 span。spill 使用独立可写 backing，
-保留输入、只读资源及 IT 所需的逐节点结果。
-
-### 6.4 片上对象与 bank 调度
-
-HPU 有 **64 个逻辑对象槽位 p0…p63**，与物理 bank 独立。Bank 0…4 各
-1024 line；普通区间以 128 line 为单元，容量为
-`128 * next_pow2(ceil(actual_len/128))`，起点按容量对齐。短对象可共享 bank，
-N8192 最多静态容纳 40 个，但执行还须为新结果预留候选区间。
-
-`runtime::BankAllocator` 维护每个逻辑对象的 bank、base、实际长度和保留容量，
-由编译器与逐指令模型共同使用。默认 Bank 5 前 4 line 永久保留模表，
-其余可容纳 14 个两条 line 的只读 stage 参数。参数通过 MOD=0、显式 mask=0x20
-装入；mask 仅约束 DLOAD。CP 是每条 DMA 独立的 LLC 分配提示，不改变 SRAM 分配。
-
-普通算术有匹配长度目的时复用原区间；新目的按源读取次数最少的可用 bank 分配，
-以 `dst%5` 起的循环次序打破并列。PMAC 与每个 NTT stage 总是先申请新结果，
-完成后才回收旧区间；NTT 还必须排除输入 bank。失败保持旧映射。
-完整规则见 [Bank 分配指南](../reference/HPU_BANK_ALLOCATION_GUIDE.md)。
-
-调度器预先建立下一次使用索引，保护当前操作数，优先淘汰下一次使用最远的对象。
-干净数据直接释放，脏数据保存到 backing；是否需要淘汰由实际候选区间与空闲对象号
-共同决定，不能只比较对象个数或总剩余空间。固定的 128 个 NTT 运算寄存器由硬件
-stage 调度使用，编译器不分配 PE 内部寄存器。
-
-DSTORE REL=0 保留对象，REL=1 成功完成后释放；spill 需明确释放。
-后端可消除有完整生命周期证明的内部 workspace 写回，必需节点输出仍写回。
-最终代码使用 x10/x11 DMA sideband，并声明 `hpu-objects64-v1.2` ISA。
-
-### 6.5 NoOpt 基准
-
-`OptimizationMode::no_opt` 保留原始调度、每条 DMA 的 offset/count、原始镜像
-字节和分配，同时检查对象、DMA 与 bank 容量，并生成资源统计。公共资源编译器
-在默认 `DmaCachePolicy::preserve` 下也保留原始指令字；若另选
-`twiddle_loads_only`，仍在资源处理后独立重写 DMA 的 CP 位，其他编码保持不变。
-应用交付链路采用后一策略，因此 NoOpt 包的指令字可能与原始流存在 CP 位差异，
-不承诺逐字保持；该差异不改变数学结果、DMA span 或镜像。
-
-上述保留行为适用于提供兼容指令基线的现有前端。直接编写原生 SSA IR、没有提供
-基线时，NoOpt 仍执行必要的槽位分配，但关闭 workspace 写回延迟和 DDR 复用。
-若旧 SSA 值跨 NTT/PMAC 原地更新继续存活，必须生成保留旧值的 DMA 副本；
-此时 NoOpt 也以 SSA 语义为准进行保守降级，不能直接返回无法表达该语义的旧指令。
-
-前端通过 `hpu::seal_adapter::CompileOptions.optimize_resources=false` 选择该模式，
-示例 CLI 使用 `--no-opt`。NoOpt 用于重现原始调度和比较优化结果；原始流与 oracle
-的数学一致性仍由独立验证决定。
-
-### 6.6 资源报告
-
-报告写入 `oracle/report.json` → `compiler_resources`，前端也可通过
-`compiled.resource_report_json()` 读取：
-
-| 字段 | 内容 |
-| --- | --- |
-| `ir_source` | `operator` 表示算子直接发出的 IR；历史导入入口为 `encoded_import` |
-| `original_ddr_lines` / `allocated_ddr_lines` | 原始与最终 DDR 使用量 |
-| `scratch_arena_lines` | 复用工作区的物理容量 |
-| `original_dma_count` / `dma_count` | 优化前后 DMA 次数 |
-| `peak_regular_banks` / `peak_object_slots` | 调度峰值，计入 stage 额外 bank |
-| `deferred_scratch_stores` | 可通过片上保留延迟的内部写回 |
-| `spills` / `reloads` | 资源压力下的保存和重载次数 |
-| `logical_buffers` | 逻辑名称、物理 allocation、原始与最终 span、生命周期和布局标签 |
-
-能节省多少 DDR 和 DMA 取决于图及 workspace 生命周期；保留全部节点结果会限制
-压缩空间。
+`tools/benchmark_io.py --build-dir build --output-root outputs/io_optimized` 统一生成
+和校验三方案基准，把本次候选、最终 DMA 清单核对结果、逐数据类别 IO、参数和
+导出输出集合写入 `io_summary.json`。可指定 `--baseline-json` 比较另一次真实
+测量，仅接受参数、fixture、输出集合及 oracle payload 指纹一致的报告。比较结果
+按数据类别列出读写 IO 差值，并单列精确副本、spill 和 reload 的前后字节。命令见
+[前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md#n8192q4p1-的可重复-io-对照)。
 
 ## 7. runtime 的作用与边界
 
@@ -441,7 +434,7 @@ host 模型描述功能行为，尚未建立 RTL 每 stage 地址和周期的验
 | --- | --- |
 | `program/` | 最终 `.asm`、`.inst32`、`.cmd26`、C/h 入口和 `dma_relocation_manifest.csv` |
 | `memory/` | 初始 `hpu_mem_image.u32.bin`、物理分配清单、行映射和内存 ABI |
-| `golden/` | 逐节点输出及目标读回 span，用于结果比较 |
+| `golden/` | 指定导出结果及目标读回 span，用于结果比较 |
 | `metadata/` | 加密参数、level 和计算图依赖 |
 | `oracle/`、`semantic/` | 软件验证、资源报告和可选的解码语义结果 |
 | `provenance/` | 生成版本、文件长度和校验和 |
@@ -470,7 +463,8 @@ golden 作为期望结果保存，不能预加载到 HPU_MEM。
 输出指令流是静态的。
 
 编译器目前覆盖已实现的 CKKS/BFV/BGV 操作，支持范围见前端文档。资源优化以
-保留 IT 逐节点读回为前提，采用保守 bank 调度，尚未提供 PE 寄存器分配。
+指定输出为持久化根，支持读取复用、写读转发、依赖调度和 bank 分配，尚未提供
+PE 寄存器分配。
 目标 ELF/BIN 的生成及设备执行属于 Nexus-AM/目标工具链集成阶段。
 
 因此，项目的软件编译链路已经成立，实际 RTL/HPU 执行验收是独立的目标验证阶段。

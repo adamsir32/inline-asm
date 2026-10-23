@@ -84,6 +84,16 @@ def main():
         assert graph["frontend"] == "seal_evaluator"
         assert graph["metadata_views"]
         assert graph["marked_outputs"]
+        exported = [op for op in graph["operations"] if op["exported"]]
+        assert len(exported) == 1, "scale-view aliases duplicated physical exports"
+        assert {op["output"] for op in exported} == {
+            output["physical_output"] for output in graph["marked_outputs"]}
+        assert all("golden_object_id" not in op for op in graph["operations"] if not op["exported"])
+        with (package / descriptor["golden_manifest"]).open() as manifest:
+            golden = list(csv.DictReader(manifest))
+        assert {row["object_id"] for row in golden} == {op["golden_object_id"] for op in exported}
+        assert {(row["line_offset"], row["line_count"]) for row in allocations if row["kind"] == "output"} == {
+            (row["line_offset"], row["line_count"]) for row in golden}
         for view in graph["metadata_views"]:
             assert view["kind"] == "set_scale"
             assert isinstance(view["input"], str) and view["input"]

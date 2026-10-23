@@ -1,5 +1,6 @@
 #include "assembler.hpp"
 #include "executable.hpp"
+#include "hpu/compiler/operator_resources.hpp"
 #include "scheme/bgv/modswitch.hpp"
 #include "util/hpu_asm.hpp"
 
@@ -41,7 +42,7 @@ void check_layout(const std::vector<int>& q_contexts, int t_context)
     require(body.find("Invalid") == std::string::npos,
             "valid BGV NTT ModSwitch layout was rejected");
     require(count(body, hpu::psync()) == 1 &&
-                body.rfind(hpu::psync()) > body.rfind(hpu::pfree(4)),
+                body.rfind(hpu::psync()) + hpu::psync().size() == body.size(),
             "complete BGV NTT ModSwitch needs one terminal psync");
     require(count(body, hpu::dload(
                 4, hpu::DataType::mod_ctx,
@@ -86,6 +87,24 @@ void check_layout(const std::vector<int>& q_contexts, int t_context)
             "nested BGV NTT ModSwitch duplicated application-owned state");
 }
 
+void check_coefficient_port_names()
+{
+    hpu::resource::Recording recording;
+    hpu::scheme::bgv::generate_modswitch_body_asm(3, 1, 2, true, "custom_drop");
+    const auto program = recording.finish();
+    require(!program.ports.empty(), "coefficient ModSwitch produced no logical data ports");
+    bool conversion = false;
+    bool output = false;
+    for (const auto& port : program.ports) {
+        require(port.logical_binding.find("custom_drop/c") == 0,
+                "coefficient ModSwitch has an unnamed or unscoped data port");
+        conversion = conversion || port.logical_binding.find("/last_to_t/") != std::string::npos;
+        output = output || port.logical_binding == "custom_drop/c1/output/mod1";
+    }
+    require(conversion && output,
+            "coefficient ModSwitch lost nested conversion or component output identities");
+}
+
 } // namespace
 
 int main()
@@ -110,6 +129,7 @@ int main()
         }
         check_layout({0, 1, 2}, 5);
         check_layout({0, 1}, 5);
+        check_coefficient_port_names();
         const auto production = hpu::scheme::bgv::generate_modswitch_ntt_body_asm(
             65536, {{0, 1, 2}, 5}, 2);
         require(count(production, "\"pintt ") == 2 * 16 &&

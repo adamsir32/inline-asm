@@ -7,13 +7,15 @@ std::string generate_hpu_moddown_contexts_body_asm(
     const std::vector<int>& q_contexts,
     const std::vector<int>& p_contexts,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "moddown");
 
 std::string generate_hpu_moddown_body_asm(
     int num_q,
     int num_p,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "moddown");
 
 std::string generate_hpu_moddown_asm(
     int num_q,

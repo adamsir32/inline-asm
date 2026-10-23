@@ -74,7 +74,15 @@ def main():
         outputs = {(r["line_offset"], r["line_count"]) for r in memory if r["kind"] == "output"}
         assert outputs == {(r["line_offset"], r["line_count"]) for r in golden}
         assert report["verified_limb_count"] == len(golden)
-        assert {op["golden_object_id"] for op in graph["operations"]} == {r["object_id"] for r in golden}
+        exported = [op for op in graph["operations"] if op["exported"]]
+        assert exported
+        assert {op["golden_object_id"] for op in exported} == {r["object_id"] for r in golden}
+        assert all("golden_object_id" not in op for op in graph["operations"] if not op["exported"])
+        if graph.get("frontend") == "seal_evaluator":
+            assert {op["output"] for op in exported} == {
+                output["physical_output"] for output in graph["marked_outputs"]}
+        else:
+            assert len(exported) == 1 and exported[0]["output"] == graph["final_output"]
         image = (package / descriptor["image"]).read_bytes()
         for limb in golden:
             assert limb["domain"] == ("coefficient" if scheme == "bfv" else "canonical_ntt_physical")
@@ -111,7 +119,9 @@ def main():
             count = node_dma_counts.get(index, 0)
             assert int(binding["operation_dma_index"]) == count
             node_dma_counts[index] = count + 1
-        assert set(node_dma_counts) == set(range(len(graph["operations"])))
+        # Logical nodes remain visible when DCE or forwarding removes all of
+        # their DMA. Every emitted association must still name a valid node.
+        assert set(node_dma_counts) <= set(range(len(graph["operations"])))
         if example_args:
             assert parameters["poly_modulus_degree"] == int(example_args[example_args.index("--degree") + 1])
         if scheme == "bgv" and "plain_chain" in example:
