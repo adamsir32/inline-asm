@@ -114,7 +114,7 @@ def collect(package, fixture, optimized):
     }
 
 
-def compare(current, baseline):
+def compare(current, baseline, allow_data_abi_change=False):
     if baseline.get("schema") != SCHEMA or baseline.get("schema_version") != 1:
         raise ValueError("baseline must be a benchmark_io.py schema v1 summary")
     old_cases = {case["scheme"]: case for case in baseline["cases"]}
@@ -124,7 +124,12 @@ def compare(current, baseline):
     for case in current:
         old = old_cases[case["scheme"]]
         for key in ("parameters", "fixture", "required_output_set"):
-            if old[key] != case[key]:
+            before, after = old[key], case[key]
+            if key == "parameters" and allow_data_abi_change:
+                before, after = dict(before), dict(after)
+                before.pop("ntt_table_abi", None)
+                after.pop("ntt_table_abi", None)
+            if before != after:
                 raise ValueError(f"{case['scheme']}: baseline {key} differs; IO comparison refused")
         previous, actual = old["metrics"]["dma_bytes"], case["metrics"]["dma_bytes"]
         by_kind = {}
@@ -153,6 +158,8 @@ def compare(current, baseline):
             "saved_percent": (100.0 * (previous - actual) / previous) if previous else None,
             "io_by_kind": by_kind,
             "classified_io": classified,
+            "baseline_data_abi": old["parameters"].get("ntt_table_abi"),
+            "data_abi": case["parameters"].get("ntt_table_abi"),
         })
     return result
 
@@ -179,12 +186,16 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-opt", action="store_true", help="generate the same-output original-order baseline")
     parser.add_argument("--baseline-json", type=Path, help="compare only identical parameters, fixture, and required outputs")
+    parser.add_argument("--allow-data-abi-change", action="store_true",
+                        help="allow a recorded NTT data ABI migration; mathematical parameters and oracle fingerprints must still match")
     args = parser.parse_args()
     if args.degree < 128 or args.degree & (args.degree - 1):
         parser.error("--degree must be a power of two >= 128")
     if not 2 <= args.data_moduli <= 16 or not 0 <= args.seed < 2 ** 64:
         parser.error("--data-moduli must be in [2, 16] and --seed must be uint64")
     baseline = read_json(args.baseline_json) if args.baseline_json else None
+    if args.allow_data_abi_change and baseline is None:
+        parser.error("--allow-data-abi-change requires --baseline-json")
     build = args.build_dir.absolute()
     validator = build / "hpu_validate_package"
     binaries = [build / f"hpu_{scheme}_evaluator_example" for scheme in SCHEMES]
@@ -212,8 +223,9 @@ def main():
                "generated_at_utc": datetime.now(timezone.utc).isoformat(), "cases": cases,
                "measurement": "final encoded DMA transfer bytes; excludes LLC hits and hardware timing"}
     if baseline is not None:
-        summary["comparison"] = compare(cases, baseline)
+        summary["comparison"] = compare(cases, baseline, args.allow_data_abi_change)
         summary["baseline_json"] = str(args.baseline_json.absolute())
+        summary["allow_data_abi_change"] = args.allow_data_abi_change
     output = root / "io_summary.json"
     write_summary(output, summary)
     print("\nScheme  DMA bytes  Read bytes  Write bytes  Spill/Reload  Schedule")

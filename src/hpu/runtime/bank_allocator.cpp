@@ -153,6 +153,24 @@ BankAllocation BankAllocator::ntt(std::uint8_t data)
     return commit(data, next, true);
 }
 
+BankAllocation BankAllocator::online_multiply(
+    std::uint8_t dst, std::uint8_t lhs, std::uint8_t parameters)
+{
+    check_id(dst);
+    if (parameters == lhs || parameters == dst)
+        throw std::invalid_argument("online PMUL parameters must differ from source/destination");
+    const auto& source = require(lhs);
+    const auto& parameter = require(parameters);
+    const auto lines = source.actual_lines;
+    if (lines < 2 || lines > 1024 || (lines & (lines - 1)) != 0)
+        throw std::invalid_argument("online PMUL data length must be a power of two in [2, 1024] lines");
+    if (source.type == 1 || parameter.type == 1 || parameter.actual_lines != 2)
+        throw std::invalid_argument("online PMUL requires ordinary data and two-line parameters");
+    // Immediate arithmetic has the same one-stream placement rule. The
+    // parameter object remains resident in the search layout but adds no cost.
+    return arithmetic(dst, lhs);
+}
+
 BankAllocation BankAllocator::commit(std::uint8_t id, BankAllocation next, bool coexist)
 {
     if (coexist) account(objects_, next);

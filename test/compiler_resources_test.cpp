@@ -677,6 +677,83 @@ void test_ntt_preserves_live_ssa_input()
     }
 }
 
+void test_online_pmul_parameter_lifetime_and_destination()
+{
+    namespace r = hpu::resource;
+    constexpr std::uint32_t q = 65537;
+    constexpr std::size_t degree = 8192;
+    constexpr std::uint32_t c = 13, ratio = 3;
+    for (const bool preserve_source : {false, true}) {
+        hpu::runtime::HpuMemImage image(512);
+        constexpr auto mu = std::numeric_limits<std::uint64_t>::max() / q;
+        image.add("moduli", {q, static_cast<std::uint32_t>(mu),
+                  static_cast<std::uint32_t>(mu >> 32U), 0}, AllocationKind::modulus_table);
+        std::vector<std::uint32_t> input(degree), expected(degree);
+        std::uint32_t factor = c;
+        for (std::size_t i = 0; i < degree; ++i) {
+            input[i] = static_cast<std::uint32_t>((97 * i + 3) % q);
+            expected[i] = static_cast<std::uint32_t>(std::uint64_t(input[i]) * factor % q);
+            factor = static_cast<std::uint32_t>(std::uint64_t(factor) * ratio % q);
+        }
+        image.add("input", input, AllocationKind::ciphertext);
+        image.add("parameters", hpu::model::pack_online_pmul_parameters(c, ratio, q, degree),
+                  AllocationKind::twiddle);
+        image.reserve("result", degree, AllocationKind::output);
+        if (preserve_source) image.reserve("original", degree, AllocationKind::output);
+        const auto bind = [&](const std::string& id) -> ResolvedDma {
+            return {0, id, image.allocation(id).span, 0, "online_pmul", 0};
+        };
+        r::Recording recording;
+        const auto mod = r::make_operand("moduli"), data = r::make_operand("data"),
+                   parameters = r::make_operand("parameters");
+        const auto result = preserve_source ? r::make_operand("independent_result") : data;
+        r::input(mod, bind("moduli"), hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+        r::select_modulus(0);
+        r::input(data, bind("input"), hpu::DataType::poly);
+        r::input(parameters, bind("parameters"), hpu::DataType::online_pmul_parameters);
+        r::multiply_online(result, data, parameters);
+        r::output(result, bind("result"));
+        // The parameter dies at PMUL, but the polynomial source remains live.
+        // A generic arithmetic allocator must not steal the two-line Bank 5
+        // parameter slot as the 128-line polynomial destination.
+        if (preserve_source) r::output(data, bind("original"));
+        r::finish_program();
+        const auto source = recording.finish();
+        for (const auto optimization : {hpu::compiler::OptimizationMode::optimized,
+                                        hpu::compiler::OptimizationMode::no_opt}) {
+            hpu::compiler::CompileOptions options;
+            options.optimization = optimization;
+            options.automatic_lifetimes = true;
+            options.required_outputs = {"result"};
+            if (preserve_source) options.required_outputs.insert("original");
+            const auto compiled = hpu::compiler::compile_resources(
+                r::bind_program(source, image), {}, {}, image, options);
+            std::size_t online_count = 0;
+            for (const auto& encoded : compiled.instructions) {
+                const auto& op = encoded.instruction;
+                if (op.mnemonic != hpu::Mnemonic::kPmul || op.mode != 1) continue;
+                ++online_count;
+                require(op.psrc2 != op.pdst && op.psrc2 != op.psrc1,
+                        "online PMUL aliases its parameter and polynomial object IDs");
+                if (preserve_source)
+                    require(op.pdst != op.psrc1,
+                            "online PMUL overwrote a still-live SSA source");
+            }
+            require(online_count == 1, "resource compiler lost the online PMUL mode");
+            std::vector<hpu::runtime::HpuMemSpan> spans;
+            for (const auto& dma : compiled.dma) spans.push_back(dma.span);
+            const auto execution = hpu::model::execute_instructions(
+                compiled.instructions, spans, compiled.image);
+            require(execution.report.completed(), execution.report.message.c_str());
+            require(allocation_words(execution.words, compiled.image, "result") == expected,
+                    "online PMUL resource lowering changed geometric multiplication");
+            if (preserve_source)
+                require(allocation_words(execution.words, compiled.image, "original") == input,
+                        "online PMUL resource lowering destroyed a live source");
+        }
+    }
+}
+
 void test_deferred_reload_storage_lifetime()
 {
     namespace r = hpu::resource;
@@ -969,6 +1046,7 @@ int main()
         test_full_64_object_bank_layout();
         test_store_retention_and_pmac_capacity();
         test_ntt_preserves_live_ssa_input();
+        test_online_pmul_parameter_lifetime_and_destination();
         test_deferred_reload_storage_lifetime();
         test_native_operator_resources();
         test_nested_recording();

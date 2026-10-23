@@ -57,6 +57,10 @@ public:
     BankAllocation arithmetic(std::uint8_t dst, std::uint8_t lhs,
                               std::optional<std::uint8_t> rhs = {},
                               bool accumulate = false);
+    // Online PMUL reads a two-line ordinary parameter object once. Only lhs
+    // contributes a sustained bank read cost; dst may reuse lhs in place.
+    BankAllocation online_multiply(std::uint8_t dst, std::uint8_t lhs,
+                                   std::uint8_t parameters);
     // Every stage reserves a new region outside the old input bank.
     BankAllocation ntt(std::uint8_t data);
     void release(std::uint8_t id);

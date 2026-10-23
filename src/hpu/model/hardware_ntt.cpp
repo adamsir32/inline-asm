@@ -160,6 +160,17 @@ std::size_t stage_parameter_ratio_count(std::size_t degree, std::uint32_t modulu
     return count;
 }
 
+std::size_t online_pmul_ratio_count(std::size_t degree, std::uint32_t modulus)
+{
+    if (degree < kArrayWidth || degree > kMaxDegree || (degree & (degree - 1)) != 0
+        || modulus < 3)
+        throw std::invalid_argument("invalid online PMUL parameter degree/modulus");
+    std::size_t count = 0;
+    for (std::size_t batches = degree / kButterflyCount; batches > kTwiddleChains;
+         batches >>= 1U) ++count;
+    return count;
+}
+
 } // namespace
 
 std::uint32_t pow_mod(
@@ -189,6 +200,68 @@ std::uint32_t inverse_mod_prime(std::uint32_t value, std::uint32_t modulus)
         throw std::invalid_argument("non-zero value and prime modulus required");
     }
     return pow_mod(value, static_cast<std::uint64_t>(modulus) - 2U, modulus);
+}
+
+std::vector<std::uint32_t> pack_online_pmul_parameters(
+    std::uint32_t coefficient, std::uint32_t ratio, std::uint32_t modulus,
+    std::size_t degree)
+{
+    const auto ratio_count = online_pmul_ratio_count(degree, modulus);
+    if (coefficient >= modulus || ratio >= modulus)
+        throw std::invalid_argument("online PMUL coefficient/ratio must be canonical residues");
+    std::vector<std::uint32_t> parameters(kOnlinePmulParameterWords, 1);
+    auto value = coefficient;
+    for (std::size_t lane = 0; lane < kButterflyCount; ++lane) {
+        parameters[lane] = value;
+        value = mul_mod(value, ratio, modulus);
+    }
+    const auto batches = degree / kButterflyCount;
+    for (std::size_t slot = 1; slot < std::min(kTwiddleChains, batches); ++slot)
+        parameters[kButterflyCount + slot - 1] = pow_mod(ratio, kButterflyCount * slot, modulus);
+    const auto step = pow_mod(ratio, kButterflyCount * kTwiddleChains, modulus);
+    constexpr auto ratio_start = kButterflyCount + kTwiddleChains - 1;
+    std::fill_n(parameters.begin() + ratio_start, ratio_count, step);
+    return parameters;
+}
+
+std::vector<std::uint32_t> expand_online_pmul_factors(
+    const std::vector<std::uint32_t>& parameters, std::uint32_t modulus,
+    std::size_t degree)
+{
+    const auto ratio_count = online_pmul_ratio_count(degree, modulus);
+    if (parameters.size() != kOnlinePmulParameterWords
+        || std::any_of(parameters.begin(), parameters.end(),
+            [&](std::uint32_t value) { return value >= modulus; }))
+        throw std::invalid_argument("online PMUL parameters require 128 canonical u32 words");
+    const auto batches = degree / kButterflyCount;
+    for (std::size_t slot = std::min(kTwiddleChains, batches); slot < kTwiddleChains; ++slot)
+        if (parameters[kButterflyCount + slot - 1] != 1)
+            throw std::invalid_argument("unused online PMUL V parameters must be one");
+    constexpr auto ratio_start = kButterflyCount + kTwiddleChains - 1;
+    for (std::size_t word = ratio_start + ratio_count; word < parameters.size(); ++word)
+        if (parameters[word] != 1)
+            throw std::invalid_argument("unused online PMUL R/padding parameters must be one");
+
+    std::array<std::array<std::uint32_t, kButterflyCount>, kTwiddleChains> chains {};
+    for (std::size_t slot = 0; slot < kTwiddleChains; ++slot) {
+        const auto initial = slot == 0 ? 1U : parameters[kButterflyCount + slot - 1];
+        for (std::size_t lane = 0; lane < kButterflyCount; ++lane)
+            chains[slot][lane] = mul_mod(parameters[lane], initial, modulus);
+    }
+    std::vector<std::uint32_t> result;
+    result.reserve(degree);
+    for (std::size_t batch = 0; batch < batches; ++batch) {
+        auto& chain = chains[batch % kTwiddleChains];
+        result.insert(result.end(), chain.begin(), chain.end());
+        if (batch + kTwiddleChains < batches) {
+            std::size_t next = batch / kTwiddleChains + 1;
+            std::size_t ratio = 0;
+            while ((next & 1U) == 0) { ++ratio; next >>= 1U; }
+            for (auto& value : chain)
+                value = mul_mod(value, parameters[ratio_start + ratio], modulus);
+        }
+    }
+    return result;
 }
 
 std::vector<std::uint32_t> expand_stage_twiddles(

@@ -97,7 +97,11 @@ void require_fused_automorphism(
             span_words(image, stage, hpu::model::kStageTwiddleParameterWords),
             table.modulus, degree));
     }
-    inverse.set_natural_post_scale(span_words(image, table.post_untwist_scale, degree));
+    require(table.post_untwist_scale.line_count == hpu::model::kOnlinePmulParameterLines,
+            "BFV fused post factor must use two online-PMUL parameter lines");
+    inverse.set_natural_post_scale(hpu::model::expand_online_pmul_factors(
+        span_words(image, table.post_untwist_scale, hpu::model::kOnlinePmulParameterWords),
+        table.modulus, degree));
     const auto actual = model.inverse(canonical_ntt, inverse);
     const auto expected =
         hpu::model::automorphism_coefficients(coefficients, galois_element, table.modulus);
@@ -192,6 +196,27 @@ int main()
                 hpu::model::pow_mod(twiddles.canonical_psi, 2, twiddles.modulus));
             const auto forward = model.forward_twiddles();
             const auto inverse = model.inverse_twiddles();
+            require(twiddles.pre_twist.line_count == hpu::model::kOnlinePmulParameterLines &&
+                        twiddles.post_untwist_scale.line_count == hpu::model::kOnlinePmulParameterLines,
+                    "BFV pre/post factors must use online-PMUL parameter objects");
+            const auto pre = hpu::model::expand_online_pmul_factors(
+                span_words(builder.image(), twiddles.pre_twist, hpu::model::kOnlinePmulParameterWords),
+                twiddles.modulus, spec.poly_modulus_degree);
+            const auto post = hpu::model::expand_online_pmul_factors(
+                span_words(builder.image(), twiddles.post_untwist_scale,
+                           hpu::model::kOnlinePmulParameterWords),
+                twiddles.modulus, spec.poly_modulus_degree);
+            const auto inverse_psi = hpu::model::inverse_mod_prime(
+                twiddles.canonical_psi, twiddles.modulus);
+            const auto inverse_n = hpu::model::inverse_mod_prime(
+                static_cast<std::uint32_t>(spec.poly_modulus_degree), twiddles.modulus);
+            for (std::size_t index = 0; index < pre.size(); ++index) {
+                require(pre[index] == hpu::model::pow_mod(
+                            twiddles.canonical_psi, index, twiddles.modulus) &&
+                            post[index] == multiply_mod(inverse_n, hpu::model::pow_mod(
+                                inverse_psi, index, twiddles.modulus), twiddles.modulus),
+                        "BFV online-PMUL parameters changed pre/post factors");
+            }
             for (std::size_t stage = 0; stage < forward.size(); ++stage) {
                 require(twiddles.forward_stages[stage].line_count ==
                             hpu::model::kStageTwiddleParameterLines &&

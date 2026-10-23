@@ -106,7 +106,7 @@ const auto output_store = hpu::resource::output(
 公共资源编译器的默认 `DmaCachePolicy::preserve` 保留各条命令的显式 CP，
 便于手写指令及底层实验。Evaluator 和 CKKS/BFV/BGV Plan 应用交付链路使用
 `DmaCachePolicy::twiddle_loads_only`：以最终内存分配的 `AllocationKind::twiddle`
-为依据，stage 参数、pre-twist 和 post-untwist/scale 向量的 DLOAD 均设 CP=1，
+为依据，stage 参数、在线 pre-twist 和 post-untwist/scale 模板的 DLOAD 均设 CP=1，
 其余 DLOAD 和全部 DSTORE 均设 CP=0。这一步在最终布局确定后处理，也覆盖
 资源编译器插入的 reload，在 NoOpt 模式下仍生效。它不按对象编号、bank 或
 分配名猜测 twiddle，也不会将某次装载的 CP 继承到后续命令。

@@ -56,7 +56,10 @@ hpu::Instruction decode_word(std::uint32_t word)
             result.psrc1 = static_cast<int>((word >> 16U) & 63U);
             const auto op2 = static_cast<int>((word >> 8U) & 255U);
             if ((word & (1U << 7U)) != 0) result.imm8 = op2;
-            else result.psrc2 = op2;
+            else {
+                result.psrc2 = op2 & 63;
+                result.mode = static_cast<std::uint8_t>((word >> 14U) & 3U);
+            }
         } else if (operation < 6) {
             result.pdst = static_cast<int>((word >> 22U) & 63U);
             result.psrc1 = static_cast<int>((word >> 16U) & 63U);
@@ -250,6 +253,19 @@ InstructionExecutionResult execute_instructions(
                     throw UnsupportedContract("arithmetic mode/flag is not modeled");
                 const auto& left = require_object(instruction.psrc1);
                 const auto* right = instruction.imm8 < 0 ? &require_object(instruction.psrc2) : nullptr;
+                if (instruction.mnemonic == Mnemonic::kPmul && instruction.mode == 1) {
+                    const auto factors = expand_online_pmul_factors(right->words, *modulus, left.words.size());
+                    std::vector<std::uint32_t> output(left.words.size());
+                    for (std::size_t i = 0; i < output.size(); ++i)
+                        output[i] = static_cast<std::uint32_t>(
+                            static_cast<std::uint64_t>(left.words[i]) * factors[i] % *modulus);
+                    banks->online_multiply(static_cast<std::uint8_t>(instruction.pdst),
+                        static_cast<std::uint8_t>(instruction.psrc1),
+                        static_cast<std::uint8_t>(instruction.psrc2));
+                    objects[instruction.pdst] = ResidentObject{std::move(output), 0};
+                    account_banks();
+                    break;
+                }
                 if (right && right->words.size() != left.words.size())
                     throw std::invalid_argument("arithmetic source layouts/lengths differ");
                 const bool mac = instruction.mnemonic == Mnemonic::kPmac;

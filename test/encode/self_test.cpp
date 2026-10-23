@@ -5,6 +5,7 @@
 
 #include "assembler.hpp"
 #include "executable.hpp"
+#include "encoder.hpp"
 #include "util/hpu_asm.hpp"
 
 namespace {
@@ -117,6 +118,26 @@ int main()
         expect_encoded("dstore x10, x11, p2, 1, 0", 0x08B5502BU);
         expect_encoded("pmul p2, p0, 255", 0x2080FFDBU);
         expect_encoded("pmac p2, p0, 255", 0x3080FFDBU);
+        expect_encoded("pmul p2, p0, 64", 0x208040DBU);
+        expect_encoded("pmul p2, p0, 192", 0x2080C0DBU);
+        expect_encoded("pmac p2, p0, 64", 0x308040DBU);
+        expect_encoded("pmac p2, p0, 192", 0x3080C0DBU);
+        expect_precoded("pmul p40, p40, p63, 1", 0x2A287F5BU, 0x05450FEU);
+        const auto online = hpu::assemble_line("pmul p40, p40, p63, 1");
+        if (online.instruction.mode != 1 || online.instruction.psrc2 != 63 ||
+            online.normalized_asm != "pmul p40, p40, p63, 1" ||
+            hpu::assemble_source(hpu::pmul_online(40, 40, 63)).front().word != online.word ||
+            hpu::dma_mod_bit(hpu::DataType::online_pmul_parameters) != 0 ||
+            hpu::dma_bank_mask(hpu::DataType::online_pmul_parameters,
+                              hpu::DloadFlag::regular_bank) != 32)
+            throw std::runtime_error("online PMUL assembly or parameter role mismatch");
+        auto invalid_immediate_mode = hpu::assemble_line("pmul p2, p0, 192").instruction;
+        invalid_immediate_mode.mode = 1;
+        bool rejected_immediate_mode = false;
+        try { (void)hpu::encode_instruction(invalid_immediate_mode); }
+        catch (const std::exception&) { rejected_immediate_mode = true; }
+        if (!rejected_immediate_mode)
+            throw std::runtime_error("immediate PMUL accepted an independent mode field");
 
         // Frozen vectors from the v1.2 tables cover independent MOD/REL and
         // CP bits, six object/mask bits, and all five bits of rs2.
@@ -179,6 +200,40 @@ int main()
             "dload x10, x11, p40, 1, 0, 0\n"
             "dload x10, x11, p41, 1, 0, 32\n"
             "psync\n");
+        const auto online_program = hpu::assemble_source(
+            "dload x10, x11, p4, 1, 0, 32\n"
+            "pmodld 0\n"
+            "dload x10, x11, p40, 0, 0, 0\n"
+            "dload x10, x11, p63, 0, 1, 32\n"
+            "pmul p40, p40, p63, 1\n"
+            "pmul p41, p40, p63, 1\n"
+            "dstore x10, x11, p41, 1, 0\n"
+            "psync\n");
+        hpu::validate_executable_program(online_program);
+        for (const std::uint64_t data_lines : {2U, 128U, 1024U}) {
+            (void)hpu::render_fixed_executable_source("online", online_program, 4096,
+                {{0, 4}, {4, data_lines}, {1028, 2}, {1030, data_lines}});
+        }
+        for (const auto shape : std::vector<std::pair<std::uint64_t, std::uint64_t>>{
+                 {1, 2}, {3, 2}, {128, 1}, {128, 4}}) {
+            bool rejected = false;
+            try {
+                (void)hpu::render_fixed_executable_source("online", online_program, 4096,
+                    {{0, 4}, {4, shape.first}, {1028, shape.second}, {1030, shape.first}});
+            } catch (const std::exception&) { rejected = true; }
+            if (!rejected) throw std::runtime_error("online PMUL accepted invalid data/parameter lengths");
+        }
+        for (const auto arithmetic : {"pmul p4, p40, p63, 1", "pmul p40, p4, p63, 1",
+                                      "pmul p40, p40, p4, 1"}) {
+            expect_program_rejected(
+                std::string("dload x10, x11, p4, 1, 0, 32\npmodld 0\n") +
+                "dload x10, x11, p40, 0, 0, 0\n" +
+                "dload x10, x11, p63, 0, 0, 32\n" + arithmetic + "\npsync\n");
+        }
+        const auto online_source = hpu::render_executable_source("online", online_program, 4096);
+        if (online_source.find("hpu_obj_len[63] != 2") == std::string::npos ||
+            online_source.find("hpu_obj_len[40] != hpu_obj_len[63]") != std::string::npos)
+            throw std::runtime_error("online PMUL runtime guard uses vector operand length");
         const std::string executable =
             hpu::render_executable_source("smoke", executable_encoded, 65536);
         const std::string header = hpu::render_executable_header(
@@ -221,6 +276,16 @@ int main()
             "padd p64, p0, p1",
             "padd p0, p1, 1",
             "pmul p0, p1, 256",
+            "pmul p0, p1, p2, 2",
+            "pmul p0, p1, p2, 3",
+            "pmul p0, p1, p2, 256",
+            "pmul p0, p1, p2, -1",
+            "pmul p0, p1, 192, 1",
+            "pmul p0, p1, p0, 1",
+            "pmul p0, p1, p1, 1",
+            "padd p0, p1, p2, 1",
+            "psub p0, p1, p2, 1",
+            "pmac p0, p1, p2, 1",
             "pntt p0, p1, 16, 0, 0",
             "pntt p0, p1, 0, 4, 0",
             "pntt p0, p1, 0, 0, 2",

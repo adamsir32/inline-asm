@@ -108,6 +108,10 @@ void transform_table_residency(bool inverse)
     const auto& outputs = fixture.outputs;
     const auto& expected = fixture.expected;
     const std::string factor_id = inverse ? "tables/post" : "tables/pre";
+    const auto& factor = image.allocation(factor_id);
+    require(factor.word_count == hpu::model::kOnlinePmulParameterWords &&
+                factor.span.line_count == hpu::model::kOnlinePmulParameterLines,
+            "transform pre/post factor is not a two-line online-PMUL template");
     const auto baseline = compile(program, image, outputs, false);
     const auto optimized = compile(program, image, outputs, true);
     if (inverse) {
@@ -117,9 +121,9 @@ void transform_table_residency(bool inverse)
                 "three N8192 INTTs did not save 13 KiB of stage parameter reads");
     } else {
         require(loads(baseline, factor_id) == 6 && loads(optimized, factor_id) == 1,
-                "six N8192 NTTs did not retain their shared pre-twist vector");
-        require(load_bytes(baseline, factor_id) - load_bytes(optimized, factor_id) == 160 * 1024,
-                "six N8192 NTTs did not save 160 KiB of pre-twist reads");
+                "six N8192 NTTs did not retain their shared online pre-twist template");
+        require(load_bytes(baseline, factor_id) - load_bytes(optimized, factor_id) == 5 * 512,
+                "six N8192 NTTs did not save five repeated 512-byte pre-twist template reads");
     }
     check(baseline, expected);
     check(optimized, expected);

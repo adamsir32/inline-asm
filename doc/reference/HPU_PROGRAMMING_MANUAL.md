@@ -2,6 +2,11 @@
 
 版本：1.2；日期：2026-10-22。规范对应 `Nsnhuv_5.0_integra/main` 的 `hpu/rtl/`。
 
+本项目已同步同日追加的 [PMUL 在线因子交接](PMUL_ONLINE_COMPILER_HANDOFF.md)：
+PMUL 对象模式 `[15:14]=01` 使用两条 line 的因子模板。基础 ISA 标识仍为
+`hpu-objects64-v1.2`；该扩展需要目标 RTL 支持，不能仅按基础 ISA 名称判断兼容。
+交接原文保持不变，其中 RTL 路径和测试记录链接指向硬件工作区。
+
 **本版将 DMA `[14:13]` 从 TYPE 改为 `{MOD/REL,CP}`。MOD 只标记模数表，CP 为读写共用的 LLC 分配提示；旧 TYPE=3 参数机器码必须重新生成。删除 PPLACE，OPC=9…F 保留且译码非法。DLOAD mask 只约束本次装入，不保存为对象的后续策略。新结果按第 5 节的固定规则分配，编译器须同步此规则。**
 
 本版替代附件《HPU_PROGRAMMING_MANUAL.pdf》0.4 的指令编码、对象编号和分配约定。数学算子语义保持；旧 `.inst32/.cmd26` 必须重新生成。本仓库使用单套 `hpu/rtl`；Chisel 重新生成和核侧集成由集成同事处理，接入要求见 [集成交接](../delivery/HPU_64OBJ_INTEGRATION_HANDOFF.md)。
@@ -30,6 +35,7 @@ Bank 5 物理为 **32 line=8 KiB**，全局 line 地址 `0x1400…0x141F`。`MOD
 
 - `[0,R)` 永久保留给模表，模表对象始终从 Bank 5 line 0 开始。
 - `[R,32)` 是小对象区；以两条 line 对齐搜索，twiddle 对象长度必须为 2 line。
+- NTT stage 与 PMUL 在线 pre/post 模板共用这一区域；默认 14 个槽不是各自独立的额度。
 - 模表没有装满时，保留区内剩余空间也不能分给 twiddle。
 - 模表同一时间最多一个 live 对象。重新装载同一对象可以替换；不同对象必须先释放旧对象。
 - `pmodld mod_id` 保留原语法，固定从 Bank 5 取模表；不携带模表对象号。
@@ -89,7 +95,28 @@ for b = 0…B-1:
 
 软件可选择一个参数对象逐 stage 重载，或者预加载多个参数对象。参数通过普通 DLOAD（MOD=0）装入，必须显式指定 mask=0x20 才仅选择 Bank 5；mask=0 默认选择普通 bank，代价是两条 line 会占一个 128-line 单元。
 
-pre-twist、post-untwist/scale 仍是普通向量常量；本版没有把它们并入在线 twiddle 生成。
+### 3.1 PMUL 在线 pre/post 因子（2026-10-22 追加）
+
+pre-twist、post-untwist/scale 继续由独立 PMUL 执行，不融合进 PNTT/PINTT。
+因子序列为 `c*r^j mod q` 时，使用在线 PMUL 的两条 line 模板替代 N-word 向量。
+先将全部 128 个 u32 填 1，再设置以下字段；每个值是 `[0,q)` 内的普通模剩余数。
+
+| 位置 | 内容 |
+|---|---|
+| line 0，word `ell=0…63` | `U[ell]=c*r^ell mod q` |
+| line 1，word `a-1`，`1<=a<=min(7,B-1)` | `V[a]=r^(64*a) mod q`，`V[0]=1` 隐含 |
+| line 1，word `7+t`，`0<=t<T` | `R[t]=r^512 mod q` |
+
+这里 **`B=N/64`，`T=max(0,log2(B)-3)`**；stage twiddle 的 B 是 N/128，
+两种模板不能共用校验公式。N8192 的 line 1 word 0…6 放 V[1…7]，word 7…10
+都放 `r^512`，word 11…63 为 1。post 的 U[0] 可以不是 1。
+
+- pre：`c=1,r=psi`；post：`c=N^-1,r=psi^-1`。post 已包含归一化，不能再乘一次 N 的逆。
+- 每条 PMUL 重新初始化递推状态，不修改参数对象，不执行 butterfly 或 shuffle。
+- 数据实际长度为 2…1024 line 的二次幂，参数实际长度必须为 2 line，参数 ID 不同于数据源和目的；三者都不能是模表对象。
+- 参数使用 `DLOAD MOD=0,mask=0x20` 放入 Bank 5，与 stage 模板共享生命周期和容量。
+  10 份 pre/post 占 20 line，加默认模表后只余 8 line，即 4 个 stage 参数槽。
+- 非几何序列的普通 PMUL 向量仍使用原向量模式；只需乘 N 的逆时可以继续使用原有安排。
 
 ## 4. 32-bit 指令编码
 
@@ -102,13 +129,21 @@ pre-twist、post-untwist/scale 仍是普通向量常量；本版没有把它们�
 | `[31:28]` | OPC4 |
 | `[27:22]` | PDST6 |
 | `[21:16]` | PSRC1_6 |
-| `[15:8]` | OP2_8 |
+| `[15:14]` | I=0：MODE2；I=1：imm8 高两位 |
+| `[13:8]` | I=0：PSRC2_6；I=1：imm8 低六位 |
 | `[7]` | I：0 对象，1 立即数 |
 | `[6:0]` | **0x5B** |
 
-对象模式 OP2[5:0] 为 PSRC2，OP2[7:6]=0。立即数模式保留 cimm8=0…255，只允许 PMUL/PMAC。
+I=0 时，MODE=00 是原向量模式；**只有 PMUL 允许 MODE=01 在线因子模式**，
+此时 PSRC2 指向第 3.1 节的两条 line 参数。MODE=10/11 非法，PADD/PSUB/PMAC
+对象模式只接受 00。I=1 时 `[15:8]` 是完整 cimm8=0…255，只允许 PMUL/PMAC；
+64、192、255 的高位不能解释成 MODE。
 
 `padd/psub/pmul pdst,psrc1,psrc2`：逐系数模运算。`pmac` 的 pdst 还必须已有有效累加值。兼容长度的 padd/psub/pmul 允许覆盖既有目的对象；新目的对象由硬件分配。
+
+本项目在线语法为 `pmul pdst,psrc1,pparam,1`，生成器为 `hpu::pmul_online()`。
+计算 `dst[j]=src[j]*c*r^j mod q`，允许 `dst=src` 或独立目的。
+例如 `pmul p40,p40,p63,1` 编码为 **`0x2A287F5B`**，计算类 cmd26 仍为 `inst>>7`。
 
 ### 4.2 NTT/INTT stage
 
@@ -202,12 +237,14 @@ PFREE 在对象不忙且已分配时，由控制器本地释放，不进入 PE �
 1. 计算保留容量 `C=128*next_pow2(ceil(len/128))`。对每个普通 bank，在起点为 C 的整数倍的区间中，找出能容纳 C 条 line 的**最低地址空闲区间**。累计空闲容量够、但没有合适连续区间的 bank 不算可用。
 2. 计算结果只考虑 Bank 0…4；NTT/INTT 额外排除当前输入 bank。DLOAD 按本次有效 mask 筛选；若允许 Bank 5 且其中有合适小区间，优先使用 Bank 5。
 3. 对有合适区间的普通 bank，计算 `read_cost[b]`。算术结果取本次 stream 在该 bank 的读操作数；**PMAC 包括旧目的、第一源和非立即数第二源**。同 bank 的多个读分别计数，立即数不计 SRAM 读。DLOAD 的 cost 全部为 0。
+   **在线 PMUL 仅计 PSRC1 数据流，PPARAM 只在启动时读取两行，不计为持续读流**，即使参数实际位于普通 bank 也一样。
 4. 优先取 cost 最小的可用 bank；并列时从 preference 起，按 `(preference+k)%5, k=0…4` 的固定顺序选择第一个。选中 bank 后使用第 1 步的最低地址区间。
 
 | 申请类别 | preference | 算术读集合 |
 |---|---|---|
 | DLOAD | `OBJ%5` | 空，所有 cost=0 |
 | 新 PADD/PSUB/PMUL 目的 | `PDST%5` | PSRC1，以及非立即数 PSRC2 |
+| 在线 PMUL 新目的 | `PDST%5` | 仅 PSRC1，不计两行参数源 |
 | PMAC 新累加结果 | `(旧目的bank+1)%5` | 旧 PDST、PSRC1，以及非立即数 PSRC2 |
 | NTT/INTT 新数据 | `(输入bank+1)%5` | 同一输入 bank 的两次读；该 bank 已从候选排除 |
 
@@ -234,6 +271,9 @@ PFREE 在对象不忙且已分配时，由控制器本地释放，不进入 PE �
 统一 `cmd26={kind,inst[31:7]}`，kind=0 对应 0x5B，kind=1 对应 0x2B。**custom1 不做字段重排。** GPR 值继续通过 line_offset32、len_lines16 sideband 同命令传递。
 
 核侧必须按 opcode 识别两类指令。custom1 固定读取 rs1/rs2，不得把 `[11:7]` 的 mask 当作 GPR 目的寄存器并产生写回。
+
+PMUL 在线模式无需新增 CPU 寄存器读取。核侧若检查或改写计算指令保留位，
+必须让对象 PMUL 的 `[15:14]=01` 原样进入 HPU；I=1 的完整 imm8 同样必须保留。
 
 ## 7. 编程示例
 
@@ -262,7 +302,7 @@ DLOAD 的显式 mask 可安排输入 bank；后续结果按第 5 节自动放置
 
 ## 8. 生命周期、失败与状态
 
-对象要先有效再使用；算术源长度须匹配；PMAC 的目的也必须有效。参数格式和模数匹配由编译器保证。PNTT/PINTT 参数实际长度必须为 2。源在计算期间不能被修改。计算 stream 之间串行；DMA 与计算的重叠限制见第 5 节。
+对象要先有效再使用；向量算术源长度须匹配；在线 PMUL 第二源为两行参数，第一源决定数据长度；PMAC 的目的也必须有效。参数格式和模数匹配由编译器保证。PNTT/PINTT 与在线 PMUL 参数实际长度必须为 2。源在计算期间不能被修改。计算 stream 之间串行；DMA 与计算的重叠限制见第 5 节。
 
 无空间、不能满足 bank mask 或非法分配长度会返回失败；失败不回收旧对象、不更新 base/len、不发射 DMA/PE，并消费失败命令，避免队首永久阻塞。失败通过既有 fault 通知输出携带对象号；与 memory-window fault 共用通知通道，本版没有增加独立原因码。
 
@@ -275,8 +315,8 @@ HPU 本地 CSR FAULT_STATUS 的对象号扩展为 `[9:4]`；VALID=[0]，IS_LOAD=
 
 - 顶层 `ApplicationBuilder`、`Evaluator`、密文/明文句柄 API 保持不变，应用写法见 [应用编程手册](HPU_SEAL_API_REFERENCE.md)。ISA 更新作用于编译、编码、资源调度与指令模型。
 - 本项目默认 `R=4`；64 个模上下文与 64 个逻辑对象是不同资源。交付包 `memory/abi.json` 声明 `instruction_isa=hpu-objects64-v1.2`、`dma_format=mod_rel_cp`、`default_cp=0`、对象数、分配粒度和模表保留长度。旧 ISA 包必须重新生成，不能复用 v1.1 或更早的 `.inst32/.cmd26`。
-- C++ 的 `DataType::seg/poly/mod_ctx/twiddle_parameters` 是生成器的数据角色，不再直接编码成 DMA TYPE。只有 `mod_ctx` 产生 MOD=1，其余产生 MOD=0。`twiddle_parameters` 生成器默认显式输出 mask=0x20；原始汇编的 MOD=0、mask=0 则选择普通 bank。
-- stage 参数实际为两条 line，应用交付编译使用 `MOD=0, CP=1, mask=0x20`；pre/post 向量使用 `MOD=0, CP=1, mask=0`。参数对象可以逐 stage 重载，也可以同时保留多个。参数长度在 NTT/INTT 使用时检查，普通 DLOAD 没有专用 twiddle 类型。
+- C++ 的 `DataType::seg/poly/mod_ctx/twiddle_parameters/online_pmul_parameters` 是生成器的数据角色，不再直接编码成 DMA TYPE。只有 `mod_ctx` 产生 MOD=1，其余产生 MOD=0。后两种参数生成器默认显式输出 mask=0x20；原始汇编的 MOD=0、mask=0 则选择普通 bank。
+- stage 与在线 pre/post 参数实际均为两条 line，应用交付编译使用 `MOD=0, CP=1, mask=0x20`，共用默认 14 个 Bank 5 参数槽。参数对象可以按需重载，也可以同时保留多个。参数长度在计算使用时检查，普通 DLOAD 没有专用 wire TYPE。
 - 应用交付编译采用 `dma_cache_policy=twiddle_loads_only`：按最终分配的 `kind=twiddle` 为相应 DLOAD 设置 CP=1，其他 DLOAD 与全部 DSTORE 设置 CP=0。该步骤覆盖编译器插入的 reload，NoOpt 模式也执行；仅请求 twiddle 的 LLC 读分配，不保证 LLC 中没有其他数据，也不保证驻留。
 - 底层 API 的省略参数默认仍为 CP=0，资源编译器默认 `preserve` 保留显式 CP，供手工实验；可在 `resource::read/publish` 或 `hpu::dload/dstore` 中指定 `CachePolicy::allocate`。包内 `dma_cache_policy` 声明实际策略，`default_cp=0` 只声明底层默认值。CP 不参与数学结果、SRAM 区间分配或对象生命周期，不继承上次命令；功能指令模型检查其编码，但不模拟 LLC 命中、替换或写回时间。
 - 算子仍采用独立 pre-twist 和 post-untwist/scale PMUL。系数域边界为自然顺序；NTT 域按 HPU 物理排列与 SEAL 转换后对拍。PNTT 的内部 shuffle 由功能模型模拟，不额外向指令流添加输入位反转。

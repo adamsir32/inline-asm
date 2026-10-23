@@ -97,8 +97,8 @@ void check(const seal::SEALContext& context, seal::Evaluator& evaluator,
             tables.stages.push_back(hpu::model::expand_stage_twiddles(
                 words(package.image, parameter_id), q, degree));
         }
-        tables.set_natural_post_scale(words(package.image,
-            prefix + "/post_untwist_scale"));
+        tables.set_natural_post_scale(hpu::model::expand_online_pmul_factors(
+            words(package.image, prefix + "/post_untwist_scale"), q, degree));
         for (std::size_t component = 0; component < 2; ++component) {
             const auto original = words(package.image,
                 mod_id("input/original/c" + std::to_string(component), basis));
@@ -241,7 +241,7 @@ int main()
         check(context, evaluator, input, keys, 1, false);
         check(context, evaluator, input, keys, 0, true);
         require(hpu::seal_adapter::estimate_bgv_rotation_image_lines(
-                    65536, 3, 4) == 80225,
+                    65536, 3, 4) == 68983,
                 "BGV target-degree rotation capacity estimate changed");
         bool rejected = false;
         try {

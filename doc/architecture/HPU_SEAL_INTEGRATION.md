@@ -92,8 +92,12 @@ words (two 256-byte lines) per stage, for every supported degree. Builders pack
 the original physical oracle tables into U/V/R parameters and verify their full
 reconstruction. Instruction and scheme executors expand the actual image
 parameters before invoking the original mathematical stage model. Explicit
-pre/post factors remain degree-sized vectors. The frontend and instruction
-encoding are unchanged; old full-table images must be regenerated. See the
+pre/post PMULs now use separate two-line `c*r^j` templates through object PMUL
+mode 1. Their batch count is N/64; stage twiddle templates use N/128. Both
+formats share the 14 default Bank 5 slots, while the frontend remains unchanged.
+NTT data ABI version 3 declares `hpu-pmul-online-k8-v1`; old full-table images
+must be regenerated. See the [online PMUL extension](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)
+and the earlier
 [hardware compiler migration contract](../reference/TWIDDLE_COMPILER_MIGRATION.md).
 
 `hpu::seal_adapter::ciphertext_component_to_hpu` implements the first exact

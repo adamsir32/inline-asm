@@ -52,12 +52,12 @@ std::uint32_t opcode_for(Mnemonic mnemonic) {
 std::uint32_t encode_ar3(const Instruction& instruction) {
     ensure_range(instruction.pdst, 0, 63, "pdst");
     ensure_range(instruction.psrc1, 0, 63, "psrc1");
-    if (instruction.mode != 0 || instruction.flag != 0) {
-        throw std::runtime_error("arithmetic mode/flag are reserved; use imm8 for I");
-    }
-
     std::uint32_t op2 = 0;
     const bool immediate = instruction.imm8 >= 0;
+    if (instruction.flag != 0 || instruction.mode > 1 ||
+        (instruction.mode != 0 &&
+         (immediate || instruction.mnemonic != Mnemonic::kPmul)))
+        throw std::runtime_error("only object PMUL supports online mode 1; arithmetic flag is reserved");
     if (immediate) {
         if (instruction.mnemonic != Mnemonic::kPmul
             && instruction.mnemonic != Mnemonic::kPmac) {
@@ -67,6 +67,9 @@ std::uint32_t encode_ar3(const Instruction& instruction) {
         op2 = static_cast<std::uint32_t>(instruction.imm8);
     } else {
         ensure_range(instruction.psrc2, 0, 63, "psrc2");
+        if (instruction.mode == 1 &&
+            (instruction.psrc2 == instruction.psrc1 || instruction.psrc2 == instruction.pdst))
+            throw std::runtime_error("online PMUL parameters must differ from data and destination");
         op2 = static_cast<std::uint32_t>(instruction.psrc2);
     }
 
@@ -75,6 +78,7 @@ std::uint32_t encode_ar3(const Instruction& instruction) {
     word |= static_cast<std::uint32_t>(instruction.pdst) << 22;
     word |= static_cast<std::uint32_t>(instruction.psrc1) << 16;
     word |= op2 << 8;
+    if (!immediate) word |= static_cast<std::uint32_t>(instruction.mode) << 14;
     word |= static_cast<std::uint32_t>(immediate) << 7;
     word |= kCustom0Opcode;
     return word;

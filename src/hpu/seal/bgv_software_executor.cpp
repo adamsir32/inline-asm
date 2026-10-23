@@ -151,8 +151,9 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::inverse_ntt(
         tables.stages.push_back(detail::read_stage_twiddles(
             memory_, item.span, modulus, degree_));
     }
-    tables.set_natural_post_scale(read(
-        twiddle_prefix + "/intt/post_untwist_scale"));
+    tables.set_natural_post_scale(detail::read_online_pmul_factors(
+        memory_, allocation(twiddle_prefix + "/intt/post_untwist_scale").span,
+        modulus, degree_));
     return model.inverse(words, tables);
 }
 
@@ -178,7 +179,9 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::forward_ntt(
         stages.push_back(detail::read_stage_twiddles(
             memory_, item.span, modulus, degree_));
     }
-    const auto pre_twist = read(twiddle_prefix + "/ntt/pre_twist");
+    const auto pre_twist = detail::read_online_pmul_factors(
+        memory_, allocation(twiddle_prefix + "/ntt/pre_twist").span,
+        modulus, degree_);
     Limb prepared = coefficients;
     for (std::size_t index = 0; index < degree_; ++index) {
         if (prepared[index] >= modulus) {

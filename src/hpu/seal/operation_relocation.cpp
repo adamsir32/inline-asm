@@ -380,13 +380,15 @@ void bind_transform_limb(
             ? inverse_twiddle_prefix + "/" + suffix
             : canonical_twiddle_id(modulus_id, inverse, suffix);
     };
-    if (!inverse) bindings.load_named(table + "pre_twist", twiddle("pre_twist"));
+    if (!inverse) bindings.load_named(table + "pre_twist", twiddle("pre_twist"),
+                                     hpu::model::kOnlinePmulParameterWords);
     for (std::size_t stage = 0; stage < ntt_stage_count(degree); ++stage) {
         const auto suffix = "stage" + std::to_string(stage);
         bindings.load_named(table + suffix, twiddle(suffix),
                             hpu::model::kStageTwiddleParameterWords);
     }
-    if (inverse) bindings.load_named(table + "post_untwist_scale", twiddle("post_untwist_scale"));
+    if (inverse) bindings.load_named(table + "post_untwist_scale", twiddle("post_untwist_scale"),
+                                    hpu::model::kOnlinePmulParameterWords);
     bindings.store_named(port_prefix + "/output", output_id.empty() ? data_id : output_id);
 }
 

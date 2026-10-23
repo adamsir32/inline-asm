@@ -37,12 +37,12 @@ std::string generate_hpu_ntt_body_asm(
     asm_code << "        // modulus table is loaded by the enclosing complete program\n";
     // 假设调用方已经加载过密文模数
     // Negacyclic NTT = pointwise pre-twist followed by a cyclic NTT.
-    asm_code << "\n        // Negacyclic pre-twist: explicit PMUL by psi^i\n";
+    asm_code << "\n        // Negacyclic pre-twist: online PMUL by psi^i\n";
     asm_code << hpu::resource::read(
-        twiddle_obj, hpu::DataType::poly,
+        twiddle_obj, hpu::DataType::online_pmul_parameters,
         table_port_prefix + "/pre_twist",
-        hpu::DloadFlag::regular_bank, hpu::CachePolicy::allocate);
-    asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
+        hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
+    asm_code << hpu::resource::multiply_online(data_obj, data_obj, twiddle_obj);
 
     // obj_poly 是稳定的逻辑对象；控制器为每个 stage 执行物理 out-of-place，
     // 完成后提交新 base。stage 配对由 stream_ctrl 地址与 lane 调度完成。
@@ -110,12 +110,12 @@ std::string generate_hpu_intt_body_asm(
     }
 
     // The PE butterfly does not implicitly normalize or apply the inverse twist.
-    asm_code << "\n        // INTT normalize and inverse-twist: explicit PMUL by N^-1 * psi^-i\n";
+    asm_code << "\n        // INTT normalize and inverse-twist: online PMUL by N^-1 * psi^-i\n";
     asm_code << hpu::resource::read(
-        twiddle_obj, hpu::DataType::poly,
+        twiddle_obj, hpu::DataType::online_pmul_parameters,
         table_port_prefix + "/post_untwist_scale",
-        hpu::DloadFlag::regular_bank, hpu::CachePolicy::allocate);
-    asm_code << hpu::resource::multiply(data_obj, data_obj, twiddle_obj);
+        hpu::DloadFlag::small_bank, hpu::CachePolicy::allocate);
+    asm_code << hpu::resource::multiply_online(data_obj, data_obj, twiddle_obj);
 
     if (append_psync) {
         asm_code << hpu::resource::finish_program();

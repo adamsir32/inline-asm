@@ -187,7 +187,9 @@ std::uint8_t parse_u8(const std::string& token, const std::string& field_name) {
 
 Instruction parse_ar3(Mnemonic mnemonic,
                       const std::vector<std::string>& operands) {
-    expect_operand_count(operands, 3, to_string(mnemonic));
+    if (operands.size() != 3 &&
+        !(mnemonic == Mnemonic::kPmul && operands.size() == 4))
+        throw std::runtime_error("unexpected operand count for " + to_string(mnemonic));
 
     Instruction instruction {};
     instruction.mnemonic = mnemonic;
@@ -200,6 +202,11 @@ Instruction parse_ar3(Mnemonic mnemonic,
             throw std::runtime_error("only pmul/pmac support cimm8");
         }
         instruction.imm8 = parse_base0_int(operands[2], "cimm8");
+    }
+    if (operands.size() == 4) {
+        if (instruction.imm8 >= 0 || instruction.psrc2 < 0)
+            throw std::runtime_error("PMUL mode requires an object parameter operand");
+        instruction.mode = parse_u8(operands[3], "pmul mode");
     }
     return instruction;
 }

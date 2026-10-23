@@ -397,10 +397,14 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 `pack_stage_twiddles` 从完整物理 oracle 表提取 U/V/R 并重构全表校验；逐指令层和
 算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
 raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
+独立 pre/post PMUL 使用 `hpu-pmul-online-k8-v1` 两行几何模板，由对象模式
+`MODE=1` 递推 `c*r^j`；B=N/64，不同于 stage 的 N/128。post 含一次 N^-1，
+不再加载完整 pre/post 向量。stage 与 PMUL 模板共享默认 14 个 Bank 5 槽，
+在线 PMUL 参数只在启动时读取，不计入结果放置的持续读成本。
 前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数以 MOD=0、
 显式 mask=0x20 放入 Bank 5；普通 bank 按 128-line 单元分配。应用交付编译在
 最终布局确定后按 `AllocationKind::twiddle` 设置 DMA：twiddle DLOAD 为 CP=1，
-其他 DLOAD 与全部 DSTORE 为 CP=0，覆盖 stage 参数、pre/post 向量和编译器
+其他 DLOAD 与全部 DSTORE 为 CP=0，覆盖 stage 参数、在线 pre/post 模板和编译器
 插入的 reload，NoOpt 模式也采用相同策略。底层 API 默认 CP=0、公共资源编译器
 默认保留手工 CP；包内 `dma_cache_policy` 区分两种策略。K=8 参数内容继承先前迁移，
 最新 ISA 与放置规则见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。

@@ -25,10 +25,14 @@
   `stage_parameter_mod=0`、`stage_parameter_bank_mask=32`、`default_cp=0`；
   resolved DMA CSV 为 15 列，最后一列为 `cp`。顶层 Evaluator API 保持不变。
 - 新应用包声明 `dma_cache_policy=twiddle_loads_only`，根据最终分配的
-  `kind=twiddle`，仅相应 DLOAD 的 CP=1，含 stage 参数、pre/post 向量及编译器
+  `kind=twiddle`，仅相应 DLOAD 的 CP=1，含 stage 参数、在线 pre/post 模板及编译器
   插入的 reload；其他 DLOAD 与全部 DSTORE 为 CP=0，NoOpt 同样执行。
   `default_cp=0` 仍指底层 API 默认值。底层实验可用 `preserve` 保留手工 CP；
   较早 v1.2 包无此字段时按 `preserve` 校验。该策略只控制分配提示，性能需实测。
+- 2026-10-22 追加 [在线 PMUL 扩展](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)：
+  I=0 时允许 PMUL MODE=01，第二源为两行 `c*r^j` 模板，B=N/64；I=1 的
+  imm8 仍完整。两种模板共享 Bank 5 的 14 个槽；PMUL 新目的分配的持续读成本
+  仅计数据源。下文提供方历史记录中的“未引入在线 pre/post”只描述当时状态。
 
 ## 2. CPU/SoC 接入验收
 

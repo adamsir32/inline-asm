@@ -34,16 +34,6 @@ std::uint64_t barrett_mu(std::uint32_t modulus)
         (static_cast<unsigned __int128>(1) << 64) / modulus);
 }
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::string mod_id(const std::string& prefix, int id)
 {
     return prefix + "/mod" + std::to_string(id);
@@ -74,11 +64,8 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
     const std::string prefix = mod_id("constants/twiddle/canonical", modulus_id);
     hpu::model::HardwareNttModel model(
         degree, modulus, hpu::model::pow_mod(psi, 2, modulus));
-    std::vector<std::uint32_t> pre_twist(degree);
-    for (std::size_t index = 0; index < degree; ++index) {
-        pre_twist[index] = hpu::model::pow_mod(
-            psi, index, modulus);
-    }
+    const auto pre_twist = hpu::model::pack_online_pmul_parameters(
+        1, psi, modulus, degree);
     image.add(prefix + "/ntt/pre_twist", pre_twist,
               hpu::runtime::AllocationKind::twiddle);
     const auto forward = model.forward_twiddles();
@@ -93,16 +80,9 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
                   hpu::model::pack_stage_twiddles(inverse.stages[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
-    const std::uint32_t inverse_psi = hpu::model::inverse_mod_prime(psi, modulus);
-    std::vector<std::uint32_t> post(degree);
-    for (std::size_t index = 0; index < degree; ++index) {
-        const std::uint32_t untwist = hpu::model::pow_mod(
-            inverse_psi, index, modulus);
-        // PINTT restores natural coefficient order before the explicit PMUL.
-        post[index] = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(inverse.post_scale[bit_reverse(index, degree)]) *
-             untwist) % modulus);
-    }
+    const auto post = hpu::model::pack_online_pmul_parameters(
+        hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), modulus),
+        hpu::model::inverse_mod_prime(psi, modulus), modulus, degree);
     image.add(prefix + "/intt/post_untwist_scale", post,
               hpu::runtime::AllocationKind::twiddle);
 }

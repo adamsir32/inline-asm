@@ -42,8 +42,12 @@ std::vector<Binding> bind_native_application_ports(
         const bool modulus = port.load && instruction.type == 1;
         const bool stage = port.load && allocation.kind == hpu::runtime::AllocationKind::twiddle
             && port.logical_binding.find("/stage") != std::string::npos;
+        const bool factor = port.load && allocation.kind == hpu::runtime::AllocationKind::twiddle
+            && (port.logical_binding.find("/pre_twist") != std::string::npos
+                || port.logical_binding.find("/post_untwist_scale") != std::string::npos);
         const auto words = modulus ? allocation.word_count
-            : stage ? hpu::model::kStageTwiddleParameterWords : degree;
+            : stage ? hpu::model::kStageTwiddleParameterWords
+            : factor ? hpu::model::kOnlinePmulParameterWords : degree;
         if (instruction.mnemonic != direction || allocation.word_count != words
             || allocation.span.line_count == 0 || (!port.load && allocation.read_only)
             || (modulus && (allocation.kind != hpu::runtime::AllocationKind::modulus_table

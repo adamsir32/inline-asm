@@ -14,6 +14,26 @@ inline constexpr std::size_t kStageTwiddleParameterLines = 2;
 inline constexpr std::size_t kTwiddleChains = 8;
 inline constexpr const char* kStageTwiddleParameterFormat = "hpu-twiddle-k8-v1";
 
+// PMUL online factors use the same two-line storage shape as NTT parameters,
+// but process 64 coefficients per batch (NTT processes 128). U[0] may be any
+// canonical residue, including the inverse-transform normalization N^-1.
+inline constexpr std::size_t kOnlinePmulParameterWords = 128;
+inline constexpr std::size_t kOnlinePmulParameterLines = 2;
+inline constexpr const char* kOnlinePmulParameterFormat = "hpu-pmul-online-k8-v1";
+
+std::vector<std::uint32_t> pack_online_pmul_parameters(
+    std::uint32_t coefficient,
+    std::uint32_t ratio,
+    std::uint32_t modulus,
+    std::size_t degree);
+
+// Expand the supplied U/V/R payload as the online multiplier does. No NTT
+// permutation or extra normalization is applied, and state is reset per call.
+std::vector<std::uint32_t> expand_online_pmul_factors(
+    const std::vector<std::uint32_t>& parameters,
+    std::uint32_t modulus,
+    std::size_t degree);
+
 // Compress an existing physical batch/BF-lane table. Reconstructs and checks
 // every factor; unsupported physical recurrences throw instead of falling
 // back to the old full-table representation.

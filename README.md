@@ -125,7 +125,9 @@ IT 应先读取 `package.json`，加载初始镜像、执行目标程序，再�
 读回指定输出。golden 不得预加载到目标内存。
 
 目标 ISA 为 `hpu-objects64-v1.2`：64 个逻辑对象、普通 bank 以 128 line 分配；
-stage 参数为 K=8 的 512 B 参数对象，pre/post PMUL 向量保持独立。交付编译仅为
+stage 和 pre/post 因子均使用 K=8 的 512 B 只读参数对象，pre/post 仍由独立
+PMUL 执行。在线 PMUL 为 2026-10-22 追加扩展，目标 RTL 必须支持对象模式位
+`01`；模板格式见 [硬件交接](doc/reference/PMUL_ONLINE_COMPILER_HANDOFF.md)。交付编译仅为
 `kind=twiddle` 的 DLOAD 设置 CP=1，其余 DLOAD 与全部 DSTORE 为 0，包括编译器
 重载和 NoOpt。ISA、参数格式与应用包 schema 分别版本化。
 

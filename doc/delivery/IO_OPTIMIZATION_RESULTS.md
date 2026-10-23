@@ -60,6 +60,11 @@ spill 和 reload，属于同一批传输的另一观察维度，不能再与上�
 
 ## 3. 局部验收
 
+本节数字记录 SSA 重构时的完整 pre/post 向量基线。后续 2026-10-22 在线 PMUL
+扩展将每份 pre/post 因子从 N-word 向量变为 512 B 模板；下表的 160 KiB 是
+旧向量格式的历史结果。新格式下 6 次加载合并为 1 次对应减少 2.5 KiB，
+不能混用两种格式计算收益。最新产物和 IO 报告应从同一源码版本重新生成。
+
 现有 `hpu_native_io_optimization_test` 在 N8192 下验证实际生成指令和数学结果：
 
 | 用例 | 结果 |
@@ -112,3 +117,42 @@ cmake --build build --target hpu_frontend_delivery hpu_fhe_delivery hpu_native_k
 这些数据衡量生成指令请求的传输量，不等同于实际 DDR 总线流量或执行周期。
 CP=1 仍只用于 twiddle 加载，统计没有假定 LLC 命中，也没有修改 Nexus-AM、驱动
 或硬件契约。RTL/板端流量和周期仍由后续硬件运行确认。
+
+## 6. PMUL 在线因子扩展接入
+
+本节是在上述 SSA 优化之后，接入硬件组在线 PMUL 交接的追加实测。基准仍为
+Q4、P1、seed=0、只导出 y；旧对照保留在 `outputs/io_refactor*/`，新产物为
+`outputs/pmul_online/` 和 `outputs/pmul_online_n65536/`。
+
+只允许声明的 NTT 数据 ABI 从 2 迁移到 3；其余数学参数、fixture、输出集合及
+oracle 数据指纹均核对一致。比较的是两个优化后程序的实际 DMA 字节。
+
+| N | 方案 | 向量 pre/post 的 DMA | 在线 pre/post 的 DMA | 进一步减少 |
+| --- | --- | ---: | ---: | ---: |
+| 8192 | CKKS | 8,975,616 | 7,814,400 | 12.9% |
+| 8192 | BFV | 15,615,232 | 13,734,656 | 12.0% |
+| 8192 | BGV | 5,748,992 | 4,439,296 | 22.8% |
+| 65536 | CKKS | 210,996,480 | 176,469,248 | 16.4% |
+| 65536 | BFV | 468,421,376 | 434,423,552 | 7.3% |
+| 65536 | BGV | 174,765,312 | 142,848,768 | 18.3% |
+
+新格式每份 pre/post 模板固定 512 B，N8192 原向量为 32768 B，N65536 为
+262144 B。数据在普通 bank，模板默认进入 Bank 5；与 stage 模板共享 14 个槽，
+不能假定全部模数、方向的模板同时驻留。报告仍按实际重载计算字节，不对 CP
+命中率作假设，也不把硬件内部额外乘法当作零周期。
+
+跨数据 ABI 的比较必须显式允许，并在机器报告中保留前后 ABI：
+
+```sh
+python3 tools/benchmark_io.py --build-dir build --output-root outputs/pmul_online \
+  --baseline-json outputs/io_refactor/io_summary.json --allow-data-abi-change
+```
+
+`--allow-data-abi-change` 只允许 `ntt_table_abi` 不同，其他参数、fixture 或 golden
+指纹不一致仍拒绝比较。默认行为继续要求完整参数一致。旧对照必须使用本次扩展
+之前的源码或归档产物；使用当前源码重新生成的是在线格式。
+
+本轮完整回归仍为 78/78 通过。补充覆盖模式编码 `0x2A287F5B`、imm8 的
+64/192/255、N128…65536、32 位模数、参数复用、原址/独立目的、参数长度与
+生命周期、三方案 SEAL 对拍。交接原文的 VCS 数字属于硬件组已有证据，本仓库
+执行的是主机回归和指令模型验证，尚未执行 RTL/板端全链路。

@@ -315,6 +315,17 @@ std::string discard(Operand object)
 std::string add(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPadd, d, a, b); }
 std::string subtract(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPsub, d, a, b); }
 std::string multiply(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPmul, d, a, b); }
+std::string multiply_online(Operand destination, Operand data, Operand parameters)
+{
+    if (destination == parameters || data == parameters)
+        throw std::invalid_argument("online PMUL parameters must differ from data and destination");
+    hpu::Instruction instruction;
+    instruction.mnemonic = hpu::Mnemonic::kPmul;
+    instruction.mode = 1;
+    emit(instruction, {data, parameters}, {destination});
+    const auto d = compatibility_slot(destination), a = compatibility_slot(data), p = compatibility_slot(parameters);
+    return d < 0 || a < 0 || p < 0 ? std::string{} : hpu::pmul_online(d, a, p);
+}
 std::string accumulate(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPmac, d, a, b); }
 std::string multiply_immediate(Operand d, Operand a, int i) { return arithmetic(hpu::Mnemonic::kPmul, d, a, a, i); }
 std::string accumulate_immediate(Operand d, Operand a, int i) { return arithmetic(hpu::Mnemonic::kPmac, d, a, a, i); }
@@ -354,6 +365,8 @@ std::string render_operator_ir(const OperatorProgram& program)
         if (op.tied_input) out << " tied_input=" << *op.tied_input;
         if (op.reuse) out << " reuse=%" << *op.reuse;
         const auto& inst = op.instruction;
+        if (inst.mnemonic == hpu::Mnemonic::kPmul && inst.mode)
+            out << " factor_mode=" << unsigned(inst.mode);
         switch (inst.mnemonic) {
         case hpu::Mnemonic::kPntt: case hpu::Mnemonic::kPintt:
             out << " stage=" << inst.idx0 << " mode=" << unsigned(inst.mode) << " flag=" << unsigned(inst.flag); break;

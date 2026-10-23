@@ -76,6 +76,8 @@ std::string to_string(const Instruction& instruction) {
                 oss << instruction.imm8;
             } else {
                 oss << format_pobj(instruction.psrc2);
+                if (instruction.mode != 0)
+                    oss << ", " << static_cast<int>(instruction.mode);
             }
             break;
 

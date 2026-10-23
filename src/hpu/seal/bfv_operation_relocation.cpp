@@ -234,13 +234,15 @@ void bind_transform_tables(OperationBindingBuilder& bindings, const std::string&
         return alternate.empty() ? canonical_twiddle_id(modulus_id, inverse, suffix)
                                  : alternate + "/" + suffix;
     };
-    if (!inverse) bindings.load_named_words(role + "/pre_twist", table_id("pre_twist"), degree);
+    if (!inverse) bindings.load_named_words(role + "/pre_twist", table_id("pre_twist"),
+                                            hpu::model::kOnlinePmulParameterWords);
     for (std::size_t stage = 0; stage < ntt_stage_count(degree); ++stage) {
         const auto suffix = "stage" + std::to_string(stage);
         bindings.load_named_words(role + "/" + suffix, table_id(suffix),
                                   hpu::model::kStageTwiddleParameterWords);
     }
-    if (inverse) bindings.load_named_words(role + "/post_untwist_scale", table_id("post_untwist_scale"), degree);
+    if (inverse) bindings.load_named_words(role + "/post_untwist_scale", table_id("post_untwist_scale"),
+                                           hpu::model::kOnlinePmulParameterWords);
 }
 
 void bind_transform_limb(OperationBindingBuilder& bindings, const std::string& input_id,

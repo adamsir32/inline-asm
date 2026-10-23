@@ -16,6 +16,11 @@ constexpr std::uint64_t kStageParameterLines = 2;
 constexpr std::uint64_t kMinNttPolynomialLines = 2;
 constexpr std::uint64_t kMaxNttPolynomialLines = 1024;
 
+bool is_online_pmul(const Instruction& instruction) {
+    return instruction.mnemonic == Mnemonic::kPmul
+        && instruction.imm8 < 0 && instruction.mode == 1;
+}
+
 std::string hex_word(std::uint32_t word) {
     std::ostringstream output;
     output << "0x" << std::uppercase << std::hex << std::setw(8)
@@ -85,7 +90,14 @@ void validate_fixed_spans(const std::vector<EncodedInstruction>& encoded,
             case Mnemonic::kPadd: case Mnemonic::kPsub:
             case Mnemonic::kPmul: case Mnemonic::kPmac: {
                 const auto length = lengths.at(op.psrc1);
-                if ((op.imm8 < 0 && length != lengths.at(op.psrc2)) ||
+                if (is_online_pmul(op)) {
+                    if (length < kMinNttPolynomialLines || length > kMaxNttPolynomialLines ||
+                        (length & (length - 1)) != 0 || lengths.at(op.psrc2) != 2 ||
+                        types.at(op.psrc1) == 1 || types.at(op.psrc2) == 1 ||
+                        (lengths.at(op.pdst) != 0 && types.at(op.pdst) == 1))
+                        throw std::invalid_argument(
+                            "fixed executable online PMUL requires power-of-two data and two non-modulus parameter lines");
+                } else if ((op.imm8 < 0 && length != lengths.at(op.psrc2)) ||
                     (op.mnemonic == Mnemonic::kPmac && lengths.at(op.pdst) != length))
                     throw std::invalid_argument("fixed executable arithmetic operand lengths differ");
                 lengths.at(op.pdst) = length;
@@ -203,6 +215,12 @@ void validate_executable_program(
             require_live(instruction.psrc1, index, "arithmetic source 1");
             if (instruction.imm8 < 0)
                 require_live(instruction.psrc2, index, "arithmetic source 2");
+            if (is_online_pmul(instruction) &&
+                (instruction.psrc2 == instruction.psrc1 || instruction.psrc2 == instruction.pdst ||
+                 modulus_table_object == instruction.pdst ||
+                 modulus_table_object == instruction.psrc1 ||
+                 modulus_table_object == instruction.psrc2))
+                throw std::runtime_error("online PMUL requires distinct non-modulus parameters and non-modulus data/destination");
             if (instruction.mnemonic == Mnemonic::kPmac)
                 require_live(instruction.pdst, index, "accumulator destination");
             live.at(instruction.pdst) = true;
@@ -355,7 +373,12 @@ std::string render_executable_source(
                 || instruction.mnemonic == Mnemonic::kPmul
                 || instruction.mnemonic == Mnemonic::kPmac) {
                 output << "    if (hpu_obj_len[" << instruction.psrc1 << "] == 0";
-                if (instruction.imm8 < 0)
+                if (is_online_pmul(instruction)) {
+                    const auto data = "hpu_obj_len[" + std::to_string(instruction.psrc1) + "]";
+                    output << " || " << data << " < 2 || " << data << " > 1024 || ("
+                           << data << " & (" << data << " - 1)) != 0 || hpu_obj_len["
+                           << instruction.psrc2 << "] != 2";
+                } else if (instruction.imm8 < 0)
                     output << " || hpu_obj_len[" << instruction.psrc1
                            << "] != hpu_obj_len[" << instruction.psrc2 << "]";
                 if (instruction.mnemonic == Mnemonic::kPmac)

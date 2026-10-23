@@ -116,6 +116,8 @@ std::string discard(Operand object);
 std::string add(Operand destination, Operand left, Operand right);
 std::string subtract(Operand destination, Operand left, Operand right);
 std::string multiply(Operand destination, Operand left, Operand right);
+// PMUL mode 01: right is a read-only two-line geometric-factor template.
+std::string multiply_online(Operand destination, Operand data, Operand parameters);
 std::string accumulate(Operand destination, Operand left, Operand right);
 std::string multiply_immediate(Operand destination, Operand left, int immediate);
 std::string accumulate_immediate(Operand destination, Operand left, int immediate);

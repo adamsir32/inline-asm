@@ -155,7 +155,8 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
             inverse_tables.stages.push_back(detail::read_stage_twiddles(
                 memory_, span, modulus, degree));
         }
-        inverse_tables.set_natural_post_scale(memory_.read(prepared.post_untwist_scale, degree));
+        inverse_tables.set_natural_post_scale(detail::read_online_pmul_factors(
+            memory_, prepared.post_untwist_scale, modulus, degree));
         return model.inverse(words, inverse_tables);
     }
 
@@ -165,7 +166,8 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
         forward_tables.push_back(detail::read_stage_twiddles(
             memory_, span, modulus, degree));
     }
-    const auto pre_twist = memory_.read(prepared.pre_twist, degree);
+    const auto pre_twist = detail::read_online_pmul_factors(
+        memory_, prepared.pre_twist, modulus, degree);
     Limb coefficients = words;
     for (std::size_t index = 0; index < degree; ++index) {
         if (coefficients[index] >= modulus) {
@@ -750,7 +752,8 @@ void BfvSoftwareExecutor::rotate(
                 inverse_tables.stages.push_back(detail::read_stage_twiddles(
                     memory_, span, modulus, degree));
             }
-            inverse_tables.set_natural_post_scale(memory_.read(fused.post_untwist_scale, degree));
+            inverse_tables.set_natural_post_scale(detail::read_online_pmul_factors(
+                memory_, fused.post_untwist_scale, modulus, degree));
             memory_.write(workspace.limbs[basis], model.inverse(transformed, inverse_tables));
         }
     }

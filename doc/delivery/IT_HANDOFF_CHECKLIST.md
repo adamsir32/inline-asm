@@ -20,7 +20,7 @@ RISC-V 编译、Nexus-AM 接入以及 RTL/板级执行由 IT 环境完成。
 DMA 清单当前为 15 列，末列 `cp`；`type_or_release` 对读/写分别表示 MOD/REL，
 `flag` 是 DLOAD bank mask。检查 CP 位没有截断完整的 rs2 字段。
 新应用包另声明 `dma_cache_policy=twiddle_loads_only`：按最终 memory manifest
-的 `kind=twiddle`，仅相应 DLOAD 的 CP=1；stage 参数与 pre/post 向量均包括在内，
+的 `kind=twiddle`，仅相应 DLOAD 的 CP=1；stage 参数与在线 pre/post 模板均包括在内，
 其他 DLOAD 和全部 DSTORE 的 CP=0。该规则包括编译器 reload，关闭资源优化也
 保持不变。`default_cp=0` 是底层接口默认值，不表示包内全部 DMA 的 CP 为 0。
 `preserve` 策略用于手工 CP 实验；较早 v1.2 包缺少策略字段时按 `preserve`
@@ -75,11 +75,26 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
 完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 
-当前 NTT 数据 ABI version=2，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
+当前 NTT 数据 ABI version=3，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
 每个 PNTT/PINTT 的参数 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
-PINTT stage 0；pre/post PMUL 向量仍为 N 个 word。旧完整表镜像不能直接交给
-在线生成 RTL，必须连同 spans、window、manifest 和校验值重新生成。
+PINTT stage 0。pre/post 使用 `online_pmul_format=hpu-pmul-online-k8-v1`，
+`online_pmul_parameter_lines=2`、`online_pmul_mode=1`、
+`online_pmul_parameter_bank_mask=32`，这些字段同时记录于 NTT 数据 ABI 和
+`memory/abi.json`。旧完整表镜像不能直接交给新模式，必须连同 spans、window、
+manifest 和校验值重新生成。
 物理普通 bank 的分配粒度继续由目标 allocator 决定。
+
+接入 [2026-10-22 在线 PMUL 扩展](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)
+还需核对：
+
+- I=0 时 PMUL 的 `[15:14]=01` 原样进入 HPU，示例 `p40,p40,p63` 编码
+  `0x2A287F5B`；I=1 时 64、192、255 仍作为完整 imm8。
+- PMUL 模板采用 **B=N/64**，与 NTT 的 N/128 区分；post 首元素允许 N^-1，
+  归一化仅执行一次；在线 PMUL 不增加 butterfly、shuffle 或 CPU 寄存器读取。
+- 参数和数据/目的不能同 ID，参数实际两行且全为普通模剩余数，不能引用模表。
+  默认 14 个 Bank 5 模板槽为 stage 与 pre/post 共享，不能各算 14 份。
+- 硬件组的局部 RTL 回归记录不等于 CPU/DMAC/NoC 整机 IT 证据；核侧若检查
+  PMUL 保留位，必须同步放行合法模式。交接原文中的测试链接属于硬件工作区。
 
 硬件组历史迁移记录提到过 HpuCmdMerge 背压越序问题；这不是当前版本已复现
 或已修复的结论。目标验收仍需确认命令合流在背压下保持程序顺序，并保存完整 IT
@@ -203,7 +218,7 @@ python3 test/target_dma_codegen_test.py \
 - 检查 DLOAD `[14]=MOD`、DSTORE `[14]=REL`，两者 `[13]=CP`，完整 rs2 位段保持 `[24:20]`。
 - 分别覆盖 MOD=0/1、REL=0/1 与 CP=0/1；确认 CP 每条命令锁存，不从旧对象继承。
 - 对 `twiddle_loads_only` 包核对每条 resolved DMA 与最终分配 kind：仅 twiddle
-  DLOAD 的 CP 为 1，全部 DSTORE 为 0；同时覆盖 stage 参数、pre/post 向量和
+  DLOAD 的 CP 为 1，全部 DSTORE 为 0；同时覆盖 stage 参数、在线 pre/post 模板和
   编译器插入的 reload。LLC 命中率、DDR 流量和耗时需单独测量，软件对拍不证明收益。
 - 在外部内存端观察 CP=0 的 ARCACHE/AWCACHE 均为 0x3；CP=1 时分别为 0x7/0xB。内部 SRAM 属性保持 0x3。
 - 需要评估收益时分别记录计算总耗时、随后重载和最终 DDR 写回。CP=1 不保证驻留，DMA 完成/B 响应不等于 DDR 已完成写回。

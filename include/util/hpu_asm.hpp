@@ -64,7 +64,8 @@ enum class DataType {
     seg = 0,
     poly = 1,
     mod_ctx = 2,
-    twiddle_parameters = 3
+    twiddle_parameters = 3,
+    online_pmul_parameters = 4
 };
 
 enum class DloadFlag {
@@ -81,7 +82,8 @@ inline constexpr unsigned dma_mod_bit(DataType role) {
 }
 
 inline constexpr unsigned dma_bank_mask(DataType role, DloadFlag flag) {
-    return role == DataType::twiddle_parameters && flag == DloadFlag::regular_bank
+    return (role == DataType::twiddle_parameters || role == DataType::online_pmul_parameters)
+        && flag == DloadFlag::regular_bank
         ? 0x20U : static_cast<unsigned>(flag);
 }
 
@@ -146,6 +148,14 @@ inline std::string pmul(int pdst, int psrc1, int psrc2) {
 inline std::string pmul_imm(int pdst, int psrc1, int cimm8) {
     std::ostringstream ss;
     ss << "        \"pmul " << pobj(pdst) << ", " << pobj(psrc1) << ", " << cimm8 << " \\n\\t\"\n";
+    return ss.str();
+}
+
+// K8 two-line template: src[j] * c * r^j mod q, without a transform/shuffle.
+inline std::string pmul_online(int pdst, int psrc1, int pparam) {
+    std::ostringstream ss;
+    ss << "        \"pmul " << pobj(pdst) << ", " << pobj(psrc1) << ", "
+       << pobj(pparam) << ", 1 \\n\\t\"\n";
     return ss.str();
 }
 

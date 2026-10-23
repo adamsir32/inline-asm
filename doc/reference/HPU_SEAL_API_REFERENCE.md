@@ -48,7 +48,7 @@ HPU `Evaluator` 的调用记录图，`compile()` 执行 host 验证与编译；�
 
 当前底层使用 [HPU ISA v1.2](HPU_PROGRAMMING_MANUAL.md)。本轮 DMA MOD/REL/CP
 更新不改变本手册的顶层 API。编译器根据最终内存分配的 `kind=twiddle`，自动为
-对应 DLOAD 设置 CP=1，覆盖 stage 参数和 pre/post 向量；其他 DLOAD 及全部
+对应 DLOAD 设置 CP=1，覆盖 stage 参数和在线 pre/post 模板；其他 DLOAD 及全部
 DSTORE 设置 CP=0。该策略也覆盖编译器插入的重载，编写应用无需手工设置 CP。
 已有应用重新编译并导出完整包即可，旧 `.inst32/.cmd26` 与 ELF 不能复用。
 底层手工 CP 接口和 LLC 提示的限制见

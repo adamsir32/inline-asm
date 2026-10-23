@@ -37,7 +37,7 @@ void check_transform_cache_policy()
     for (const auto& source : {generate_hpu_ntt_asm(8192, 0, 3, 4),
                                generate_hpu_intt_asm(8192, 0, 3, 4)}) {
         std::size_t table_loads = 0;
-        std::size_t stage_loads = 0;
+        std::size_t small_loads = 0, online_multiplies = 0;
         for (const auto& encoded : hpu::assemble_source(source)) {
             const auto& instruction = encoded.instruction;
             if (instruction.mnemonic == hpu::Mnemonic::kDload) {
@@ -50,16 +50,20 @@ void check_transform_cache_policy()
                     ++table_loads;
                     require(instruction.type == 0,
                             "twiddle load incorrectly selected the modulus table");
-                    if (instruction.dma_flag == 0x20) ++stage_loads;
-                    else require(instruction.dma_flag == 0,
-                                 "pre/post table changed SRAM placement");
+                    require(instruction.dma_flag == 0x20,
+                            "stage or online PMUL parameters did not select Bank 5");
+                    ++small_loads;
                 }
+            } else if (instruction.mnemonic == hpu::Mnemonic::kPmul) {
+                require(instruction.mode == 1 && instruction.imm8 < 0,
+                        "transform pre/post did not select online PMUL mode");
+                ++online_multiplies;
             } else if (instruction.mnemonic == hpu::Mnemonic::kDstore) {
                 require(instruction.cp == 0,
                         "transform result store requested LLC allocation");
             }
         }
-        require(table_loads == 14 && stage_loads == 13,
+        require(table_loads == 14 && small_loads == 14 && online_multiplies == 1,
                 "forward/inverse transform did not cache both stage and pre/post tables");
     }
 }

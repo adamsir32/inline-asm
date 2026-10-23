@@ -646,6 +646,127 @@ void configured_modulus_capacity()
             "oversized modulus table was accepted under the default reservation");
 }
 
+void online_pmul_templates_and_execution()
+{
+    for (std::size_t degree = 128; degree <= 65536; degree *= 2) {
+        const std::uint32_t q = degree % 1024 == 0 ? 4293918721U : 65537U;
+        const auto coefficient = hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), q);
+        const auto ratio = hpu::model::inverse_mod_prime(31, q);
+        const auto parameters = hpu::model::pack_online_pmul_parameters(coefficient, ratio, q, degree);
+        require(parameters.size() == 128 && parameters[0] == coefficient && coefficient != 1,
+                "online post template lost its N^-1 coefficient");
+        const auto factors = hpu::model::expand_online_pmul_factors(parameters, q, degree);
+        auto factor = coefficient;
+        std::vector<std::uint32_t> input(degree), once(degree), twice(degree);
+        for (std::size_t i = 0; i < degree; ++i) {
+            require(factors[i] == factor, "online factor recurrence differs from c*r^j");
+            input[i] = static_cast<std::uint32_t>((std::uint64_t(i) * i + 37 * i + 19) % q);
+            once[i] = static_cast<std::uint32_t>(std::uint64_t(input[i]) * factor % q);
+            twice[i] = static_cast<std::uint32_t>(std::uint64_t(once[i]) * factor % q);
+            factor = static_cast<std::uint32_t>(std::uint64_t(factor) * ratio % q);
+        }
+        if (degree == 8192) {
+            const auto step = hpu::model::pow_mod(ratio, 512, q);
+            for (std::size_t t = 0; t < 4; ++t)
+                require(parameters[71 + t] == step, "N8192 online PMUL needs four R entries");
+            require(parameters[75] == 1, "online PMUL template padding changed");
+        }
+        HpuMemImage image(8192);
+        const auto table = image.add("online/moduli", modulus_record(q), AllocationKind::modulus_table);
+        const auto data = image.add("online/input", input, AllocationKind::ciphertext);
+        const auto param = image.add("online/parameters", parameters, AllocationKind::twiddle);
+        const auto separate = image.reserve("online/separate", degree, AllocationKind::output);
+        const auto inplace = image.reserve("online/inplace", degree, AllocationKind::output);
+        const auto reused = image.reserve("online/reused", degree, AllocationKind::output);
+        const auto program = hpu::assemble_source(
+            "dload x10, x11, p63, 1, 0, 32\npmodld 0\n"
+            "dload x10, x11, p40, 0, 0, 0\n"
+            "dload x10, x11, p62, 0, 1, 32\n"
+            "pmul p41, p40, p62, 1\ndstore x10, x11, p41, 0, 0\n"
+            "pmul p40, p40, p62, 1\ndstore x10, x11, p40, 1, 0\n"
+            "pmul p41, p41, p62, 1\ndstore x10, x11, p41, 1, 0\n"
+            "pfree p62\npfree p63\npsync\n");
+        const std::vector<HpuMemSpan> spans{table.span, data.span, param.span,
+            separate.span, inplace.span, reused.span};
+        const auto execution = hpu::model::execute_instructions(program, spans, image);
+        require(hpu::model::compare_instruction_memory(execution,
+            {{"separate", separate.span, once}, {"inplace", inplace.span, once},
+             {"reused", reused.span, twice}}).verified,
+            "online PMUL failed independent/in-place/template-reuse coefficient oracle");
+        require(execution.report.forward_boundary_conversions == 0
+                    && execution.report.inverse_boundary_conversions == 0,
+                "online PMUL introduced an NTT boundary permutation");
+
+        // Execution must consume DMA parameters rather than regenerate a root
+        // from metadata: a changed U lane affects the corresponding coefficients.
+        auto changed = parameters;
+        changed[17] = (changed[17] + 1U) % q;
+        auto wrong_spans = spans;
+        wrong_spans[2] = image.add("online/changed", changed, AllocationKind::twiddle).span;
+        const auto wrong = hpu::model::execute_instructions(program, wrong_spans, image);
+        require(wrong.report.completed()
+                    && !hpu::model::compare_instruction_memory(wrong,
+                        {{"changed", separate.span, once}}).verified,
+                "online PMUL ignored the supplied U/V/R payload");
+    }
+
+    // Zero is a legal canonical factor, unlike the nonzero NTT root contract.
+    const auto zero = hpu::model::pack_online_pmul_parameters(0, 0, 65537, 128);
+    require(hpu::model::expand_online_pmul_factors(zero, 65537, 128)
+                == std::vector<std::uint32_t>(128, 0),
+            "online PMUL rejected canonical zero factors");
+}
+
+void online_pmul_operand_validation()
+{
+    HpuMemImage image(64);
+    const auto table = image.add("online-invalid/moduli", modulus_record(65537), AllocationKind::modulus_table);
+    const auto data = image.add("online-invalid/input", std::vector<std::uint32_t>(128, 1), AllocationKind::ciphertext);
+    const auto parameters = image.add("online-invalid/parameters",
+        hpu::model::pack_online_pmul_parameters(1, 3, 65537, 128), AllocationKind::twiddle);
+    const auto short_param = image.add("online-invalid/short", std::vector<std::uint32_t>(64, 1), AllocationKind::twiddle);
+    const auto long_param = image.add("online-invalid/long", std::vector<std::uint32_t>(192, 1), AllocationKind::twiddle);
+    const auto short_data = image.add("online-invalid/short-data", std::vector<std::uint32_t>(64, 1), AllocationKind::ciphertext);
+    const auto uneven_data = image.add("online-invalid/uneven-data", std::vector<std::uint32_t>(192, 1), AllocationKind::ciphertext);
+    const std::string loads = "dload x10, x11, p63, 1, 0, 32\npmodld 0\n"
+        "dload x10, x11, p40, 0, 0, 0\ndload x10, x11, p62, 0, 1, 32\n";
+    auto rejects = [&](const std::string& command, HpuMemSpan source, HpuMemSpan param) {
+        bool rejected = false;
+        try {
+            const auto execution = hpu::model::execute_instructions(
+                hpu::assemble_source(loads + command + "\npsync\n"), {table.span, source, param}, image);
+            rejected = !execution.report.completed();
+        } catch (const std::runtime_error&) {
+            // ID aliasing is statically illegal and rejected by the encoder.
+            rejected = true;
+        }
+        require(rejected, "online PMUL accepted invalid operands");
+    };
+    rejects("pmul p41, p40, p62, 1", data.span, short_param.span);
+    rejects("pmul p41, p40, p62, 1", data.span, long_param.span);
+    rejects("pmul p41, p40, p62, 1", short_data.span, parameters.span);
+    rejects("pmul p41, p40, p62, 1", uneven_data.span, parameters.span);
+    rejects("pmul p62, p40, p62, 1", data.span, parameters.span);
+    rejects("pmul p41, p40, p40, 1", data.span, parameters.span);
+    rejects("pmul p41, p40, p61, 1", data.span, parameters.span);
+    rejects("pmul p41, p40, p63, 1", data.span, parameters.span);
+    rejects("pmul p41, p63, p62, 1", data.span, parameters.span);
+    rejects("pmul p63, p40, p62, 1", data.span, parameters.span);
+
+    // I=1 owns all imm8 bits. 64, 192 and 255 must remain ordinary scalar
+    // PMULs even though the same bit positions encode object-mode selection.
+    const auto output = image.reserve("online-invalid/scalar-output", 128, AllocationKind::output);
+    for (unsigned immediate : {64U, 192U, 255U}) {
+        const auto program = hpu::assemble_source(loads + "pmul p40, p40, "
+            + std::to_string(immediate) + "\ndstore x10, x11, p40, 1, 0\npsync\n");
+        const auto execution = hpu::model::execute_instructions(program,
+            {table.span, data.span, parameters.span, output.span}, image);
+        require(hpu::model::compare_instruction_memory(execution,
+            {{"scalar", output.span, std::vector<std::uint32_t>(128, immediate)}}).verified,
+            "full imm8 PMUL was misdecoded as online/object mode");
+    }
+}
+
 } // namespace
 
 int main()
@@ -664,6 +785,8 @@ int main()
         packed_64_object_capacity();
         ordinary_twiddle_load_contract();
         configured_modulus_capacity();
+        online_pmul_templates_and_execution();
+        online_pmul_operand_validation();
         std::cout << "Instruction execution tests passed\n";
         return 0;
     } catch (const std::exception& error) {

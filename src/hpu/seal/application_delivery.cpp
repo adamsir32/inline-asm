@@ -89,7 +89,7 @@ ApplicationPackageRequest base_request(
         if (i) out << ',';
         out << key->parms().coeff_modulus()[i].value();
     }
-    out << "],\"ntt_table_abi\":{\"version\":2,"
+    out << "],\"ntt_table_abi\":{\"version\":3,"
            "\"coefficient_order\":\"natural\","
            "\"pre_twist_order\":\"natural\","
            "\"post_factor_order\":\"natural\","
@@ -97,6 +97,9 @@ ApplicationPackageRequest base_request(
            "\"stage_twiddle_format\":" << quoted(hpu::model::kStageTwiddleParameterFormat)
         << ",\"twiddle_chains\":" << hpu::model::kTwiddleChains
         << ",\"stage_parameter_lines\":" << hpu::model::kStageTwiddleParameterLines << ',' <<
+           "\"online_pmul_format\":" << quoted(hpu::model::kOnlinePmulParameterFormat)
+        << ",\"online_pmul_parameter_lines\":" << hpu::model::kOnlinePmulParameterLines
+        << ",\"online_pmul_mode\":1,\"online_pmul_parameter_bank_mask\":32," <<
            "\"canonical_ntt_layout\":\"reference_forward_layout\","
            "\"normalization\":\"explicit_post_pmul\","
            "\"twist_fused\":false},\"levels\":[";

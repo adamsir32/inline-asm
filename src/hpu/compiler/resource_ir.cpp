@@ -279,7 +279,9 @@ ResourceReport inspect_original(const std::vector<hpu::EncodedInstruction>& inst
         case hpu::Mnemonic::kPsub:
         case hpu::Mnemonic::kPmul:
         case hpu::Mnemonic::kPmac:
-            allocator.arithmetic(op.pdst, op.psrc1,
+            if (op.mnemonic == hpu::Mnemonic::kPmul && op.mode == 1)
+                allocator.online_multiply(op.pdst, op.psrc1, op.psrc2);
+            else allocator.arithmetic(op.pdst, op.psrc1,
                 op.imm8 < 0 ? std::optional<std::uint8_t>(op.psrc2) : std::nullopt,
                 op.mnemonic == hpu::Mnemonic::kPmac);
             break;
@@ -679,6 +681,8 @@ private:
             && op.instruction.mnemonic != hpu::Mnemonic::kPntt
             && op.instruction.mnemonic != hpu::Mnemonic::kPintt) {
             for (const auto source : op.uses) {
+                if (op.instruction.mnemonic == hpu::Mnemonic::kPmul && op.instruction.mode == 1
+                    && source != op.uses.front()) continue;
                 if (next_use(source) != kNoUse || !states_[source].slot
                     || program_.objects[source].type == 1) continue;
                 states_[destination].slot = states_[source].slot;
@@ -705,6 +709,8 @@ private:
         }
         allocate_physical([&] {
             if (stage) allocator_.ntt(instruction.pdst);
+            else if (instruction.mnemonic == hpu::Mnemonic::kPmul && instruction.mode == 1)
+                allocator_.online_multiply(instruction.pdst, instruction.psrc1, instruction.psrc2);
             else allocator_.arithmetic(instruction.pdst, instruction.psrc1,
                 instruction.imm8 < 0 ? std::optional<std::uint8_t>(instruction.psrc2) : std::nullopt,
                 instruction.mnemonic == hpu::Mnemonic::kPmac);

@@ -42,6 +42,8 @@ struct Instruction {
     int idx0 = -1;
     int idx1 = -1;
     int mod_id = -1;
+    // STG transform mode; for object PMUL, 1 selects online c*r^j factors.
+    // Immediate arithmetic keeps mode=0: bits[15:8] are the full imm8.
     std::uint8_t mode = 0;
     std::uint8_t flag = 0;
     std::uint16_t cfg = 0;

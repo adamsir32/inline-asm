@@ -160,6 +160,40 @@ void read_cost_and_result_replacement()
     require_capacity_fault([&] { fallback.ntt(0); });
 }
 
+void online_multiplier_parameters()
+{
+    BankAllocator allocator;
+    allocator.load(0, 128, 0, 1);
+    allocator.load(1, 2, 0, 2);
+    const auto result = allocator.online_multiply(6, 0, 1);
+    require(result.bank == 1 && result.base_line == 128,
+            "online parameters incorrectly contributed sustained read cost");
+    const auto original = *allocator.allocation(0);
+    const auto inplace = allocator.online_multiply(0, 0, 1);
+    require(inplace.bank == original.bank && inplace.base_line == original.base_line,
+            "online in-place result moved the source allocation");
+    allocator.load(63, 1, 1, 0x20);
+    allocator.load(2, 1, 0, 0x20);
+    allocator.load(3, 3, 0, 0x20);
+    auto rejects = [&](std::uint8_t dst, std::uint8_t src, std::uint8_t param) {
+        bool rejected = false;
+        try { allocator.online_multiply(dst, src, param); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "online PMUL accepted an invalid operand allocation");
+    };
+    rejects(1, 0, 1); // Parameter must differ from destination.
+    rejects(6, 1, 1); // Parameter must differ from source.
+    rejects(6, 0, 2); // Parameter must be exactly two lines.
+    rejects(6, 0, 63); // Modulus table cannot be a parameter.
+    rejects(6, 63, 1); // Modulus table cannot be data.
+    rejects(63, 0, 1); // Modulus table cannot be a destination.
+    rejects(6, 2, 1); // One-line data is outside the supported degree.
+    rejects(6, 3, 1); // Non-power-of-two data is unsupported.
+    require(allocator.allocation(6)->bank == result.bank
+                && allocator.allocation(6)->base_line == result.base_line,
+            "invalid online PMUL changed the destination mapping");
+}
+
 } // namespace
 
 int main()
@@ -168,6 +202,7 @@ int main()
         normal_capacity_and_fragmentation();
         bank5_and_atomic_loads();
         read_cost_and_result_replacement();
+        online_multiplier_parameters();
         std::cout << "Bank allocator tests passed\n";
         return 0;
     } catch (const std::exception& error) {

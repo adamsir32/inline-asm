@@ -161,10 +161,11 @@ BFV、CKKS、BGV 的新 builder 使用相同的自然系数表约定：
 
 ```text
 pre_twist[i] = psi^i mod q
-post_untwist_scale[i] = raw_inverse.post_scale[BR(i)] * psi^-i mod q
+post_untwist_scale[i] = N^-1 * psi^-i mod q
 ```
 
-`i` 为自然系数位置，`raw_inverse.post_scale` 已包含 lazy scale 抵消和 `N^-1`。
+`i` 为自然系数位置。原数学 oracle 的 `raw_inverse.post_scale[BR(i)]` 已包含
+lazy scale 抵消和 `N^-1`；目标 post 模板直接携带一次 `N^-1`，不重复归一化。
 modified-root INTT 使用该 root 的 raw inverse 表，并以 modified psi 代替 psi。
 各 stage 的完整数学 oracle 按 loader batch、batch 内 BF lane 顺序准备
 `N/2` 个因子，不对 stage 表做 BR，再压缩为两条 line 的 K=8 参数写入镜像。
@@ -172,7 +173,7 @@ NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
 
 Evaluator 前端默认的 `InstructionNttContract::natural_coefficient_boundaries` 在
 PNTT stage 0 的 raw stage 前做数学边界 BR，在最后 PINTT raw stage 后做数学边界
-BR；pre-twist 和 post-PMUL 仍显式执行。这是完整变换的功能软件契约，不声称复现
+BR；pre-twist 和 post-PMUL 通过在线模式显式执行。这是完整变换的功能软件契约，不声称复现
 RTL 每 stage 的地址。两个软件转换次数分别记录为
 `forward_boundary_conversions`、`inverse_boundary_conversions`，
 `hardware_contract_verified` 继续为 false。
@@ -187,7 +188,7 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 ```json
 {
   "ntt_table_abi": {
-    "version": 2,
+    "version": 3,
     "coefficient_order": "natural",
     "pre_twist_order": "natural",
     "post_factor_order": "natural",
@@ -195,6 +196,10 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
     "stage_twiddle_format": "hpu-twiddle-k8-v1",
     "twiddle_chains": 8,
     "stage_parameter_lines": 2,
+    "online_pmul_format": "hpu-pmul-online-k8-v1",
+    "online_pmul_parameter_lines": 2,
+    "online_pmul_mode": 1,
+    "online_pmul_parameter_bank_mask": 32,
     "canonical_ntt_layout": "reference_forward_layout",
     "normalization": "explicit_post_pmul",
     "twist_fused": false
@@ -205,12 +210,19 @@ RTL 每 stage 的地址。两个软件转换次数分别记录为
 当前 PNTT/PINTT 的 PPARAM 是固定 **128 个 u32 / 2 line / 512 B** 的 K=8 参数对象。
 第一条 line 是 64-lane 模板 U；第二条 line 保存 7 个 slot 初始化倍率 V、有效
 stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使用这个布局，
-PINTT stage 0 也必须加载参数。pre/post 因子仍是 N 个 word；64 对象指令字段按 v1.2 重新编码。
-精确字段与重构公式见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md)。
+PINTT stage 0 也必须加载参数。
+
+pre/post 使用另一种固定两行模板 `hpu-pmul-online-k8-v1`，由对象 PMUL 的
+`[15:14]=01` 解释为 `c*r^j`。两者都是 512 B，但 **PMUL 的 B=N/64，stage 的
+B=N/128**；PMUL post 的 U[0]=N^-1，不能套用要求首元素为 1 的 stage 校验。
+模板字段与指令位见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#31-pmul-在线-prepost-因子2026-10-22-追加)
+及 [硬件交接原文](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)。
 
 `memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
-`stage_parameter_lines`，供直接消费镜像的 IT 程序识别目标格式。package schema
-仍为 v1；其中 NTT 数据 ABI 的 version=2 与 package schema 是两个独立版本。
+`stage_parameter_lines` 及上述四个 `online_pmul_*` 字段，供直接消费镜像的 IT
+程序识别目标格式。package schema 仍为 v1；NTT 数据 ABI version=3、基础
+ISA v1.2 与 package schema 是分别维护的版本。旧版完整 pre/post 向量包仍按其
+原始声明校验；含在线 PMUL 的新包必须声明在线格式，完整重新生成镜像及指令。
 
 该对象描述 builder 生成的实际镜像，与回放时选择的 `ntt_contract` 分别记录；
 选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
@@ -388,17 +400,22 @@ golden，并单独检查优化前后输出等价。RTL/硬件验证字段仍不�
 | `mod_table_lines` | 4 | Bank 5 固定模表保留长度 |
 | `stage_parameter_mod` | 0 | stage 参数通过普通 DLOAD 装入 |
 | `stage_parameter_bank_mask` | 32 | 生成器显式选择 Bank 5 |
+| `online_pmul_format` | `hpu-pmul-online-k8-v1` | 在线 pre/post 因子模板格式 |
+| `online_pmul_parameter_lines` | 2 | 每个模板的实际长度 |
+| `online_pmul_mode` | 1 | I=0 时 PMUL 的 MODE2 |
+| `online_pmul_parameter_bank_mask` | 32 | 在线 PMUL 模板显式选择 Bank 5 |
 | `default_cp` | 0 | 底层 API 省略 CP 参数时不请求 LLC 分配 |
 | `dma_cache_policy` | `twiddle_loads_only` | 应用交付编译仅为 twiddle DLOAD 请求 LLC 分配 |
 
-默认模表最多 64 contexts，其余 14 个参数槽按两条 line 对齐。每个参数对象
-实际为两条 line，长度在 PNTT/PINTT 使用时检查；不存在 TYPE3 装入类型。
-MOD=0、mask=0 选择普通 bank；生成器为 stage 参数明确写出 mask=32。
+默认模表最多 64 contexts，其余 14 个参数槽由 stage 和在线 PMUL 模板共享，
+按两条 line 对齐。每个参数对象实际为两条 line，长度在计算使用时检查；
+不存在 TYPE3 装入类型。MOD=0、mask=0 选择普通 bank；生成器为两类参数
+明确写出 mask=32。
 DLOAD mask 不继承到结果，DSTORE REL=0 保留、REL=1 成功后释放。
 
 应用交付编译采用 `twiddle_loads_only`：根据最终 `memory_manifest.csv` 的
 `kind=twiddle` 将相应 DLOAD 的 CP 设为 1；包括两条 line 的 stage 参数和
-全长 pre/post 向量。其他 DLOAD 和全部 DSTORE 的 CP 为 0，编译器插入的
+在线 pre/post 模板。其他 DLOAD 和全部 DSTORE 的 CP 为 0，编译器插入的
 reload 也遵守该规则，关闭资源优化时同样执行。校验器按分配元数据核对清单、
 指令 CP 位和所声明的策略。应用编写者不需要更改 Evaluator 调用。
 

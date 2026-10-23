@@ -23,7 +23,7 @@ def main():
         descriptor = json.loads((package / "package.json").read_text())
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         table_abi = parameters["ntt_table_abi"]
-        assert table_abi["version"] == 2
+        assert table_abi["version"] == 3
         assert table_abi["coefficient_order"] == "natural"
         assert table_abi["pre_twist_order"] == "natural"
         assert table_abi["post_factor_order"] == "natural"
@@ -36,7 +36,13 @@ def main():
         memory_abi = json.loads((package / descriptor["memory_abi"]).read_text())
         assert memory_abi["default_cp"] == 0
         assert memory_abi["dma_cache_policy"] == "twiddle_loads_only"
-        for field in ("stage_twiddle_format", "twiddle_chains", "stage_parameter_lines"):
+        assert table_abi["online_pmul_format"] == "hpu-pmul-online-k8-v1"
+        assert table_abi["online_pmul_mode"] == 1
+        assert table_abi["online_pmul_parameter_lines"] == 2
+        assert table_abi["online_pmul_parameter_bank_mask"] == 32
+        for field in ("stage_twiddle_format", "twiddle_chains", "stage_parameter_lines",
+                      "online_pmul_format", "online_pmul_mode", "online_pmul_parameter_lines",
+                      "online_pmul_parameter_bank_mask"):
             assert memory_abi[field] == table_abi[field]
         image = (package / descriptor["image"]).read_bytes()
         with (package / descriptor["memory_manifest"]).open() as manifest:
@@ -58,7 +64,7 @@ def main():
         factors = [row for row in allocations if row["allocation_id"].endswith(
             ("/pre_twist", "/post_untwist_scale"))]
         assert factors
-        assert all(int(row["payload_words"]) == parameters["poly_modulus_degree"]
+        assert all(int(row["payload_words"]) == 128 and int(row["line_count"]) == 2
                    for row in factors)
         with (package / descriptor["dma_relocation_manifest"]).open() as manifest:
             dma = list(csv.DictReader(manifest))
@@ -76,8 +82,8 @@ def main():
             assert ((int(binding["word_hex"], 16) >> 13) & 1) == expected_cp
             if expected_cp:
                 loaded_twiddles.add(binding["allocation_id"])
-        # Exercise both the 512-byte stage parameters and the full pre/post
-        # vectors; metadata kind, rather than length or name, selects CP.
+        # Both stage and online pre/post templates are 512 bytes. Metadata
+        # kind, rather than their common length, selects CP.
         assert loaded_twiddles & {row["allocation_id"] for row in stages}
         assert loaded_twiddles & {row["allocation_id"] for row in factors}
         graph = json.loads((package / descriptor["operation_graph"]).read_text())

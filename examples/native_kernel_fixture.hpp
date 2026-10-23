@@ -61,16 +61,6 @@ inline std::vector<std::uint32_t> coefficients(std::size_t seed)
     return words;
 }
 
-inline std::size_t bit_reverse(std::size_t value)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 inline Fixture cmult_fixture()
 {
     HpuMemImage image(8192);
@@ -129,13 +119,9 @@ inline Fixture transform_fixture(bool inverse)
             inverse ? inverse_tables.stages[stage] : forward[stage], modulus, degree), AllocationKind::twiddle);
         tables.push_back(id);
     }
-    std::vector<std::uint32_t> factors(degree);
-    for (std::size_t i = 0; i < degree; ++i) {
-        factors[i] = inverse ? static_cast<std::uint32_t>(
-            static_cast<std::uint64_t>(inverse_tables.post_scale[bit_reverse(i)])
-            * hpu::model::pow_mod(inverse_psi, i, modulus) % modulus)
-            : hpu::model::pow_mod(psi, i, modulus);
-    }
+    const auto factors = hpu::model::pack_online_pmul_parameters(
+        inverse ? hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), modulus) : 1,
+        inverse ? inverse_psi : psi, modulus, degree);
     const std::string factor_id = inverse ? "tables/post" : "tables/pre";
     image.add(factor_id, factors, AllocationKind::twiddle);
     std::map<std::string, ResolvedDma> table_ports;

@@ -152,6 +152,11 @@ checkpoint 的诊断流实际 IO；`output_policy_saved_dma_bytes` 是仅收敛�
 原序基准，后续复用和调度收益以它为准。`removed_checkpoint_min_write_bytes` 另给出
 未导出 checkpoint 的最少写回量，不能与上述差值相加。
 
+比较在线 PMUL 接入前后的产物时，可显式增加 `--allow-data-abi-change`。它仅允许
+`ntt_table_abi` 不同，并在报告中记录前后 ABI；数学参数、fixture、输出集合及
+oracle 指纹仍须一致。默认不允许这项差异。追加实测见
+[PMUL 在线因子记录](../delivery/IO_OPTIMIZATION_RESULTS.md#6-pmul-在线因子扩展接入)。
+
 单个用例也可直接执行 `hpu_ckks_evaluator_example --degree 8192 --data-moduli 4
 --seed 0 --emit-dir PATH`，BFV/BGV 替换对应可执行文件即可。原始统计见包内
 `oracle/report.json.compiler_resources`；runner 不模拟 LLC 命中或周期，真实性能

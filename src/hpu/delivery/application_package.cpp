@@ -374,7 +374,11 @@ std::string render_abi_json(hpu::compiler::DmaCachePolicy policy)
         "  \"byte_order\": \"little-endian\",\n"
         "  \"stage_twiddle_format\": \"" << hpu::model::kStageTwiddleParameterFormat << "\",\n"
         "  \"twiddle_chains\": " << hpu::model::kTwiddleChains << ",\n"
-        "  \"stage_parameter_lines\": " << hpu::model::kStageTwiddleParameterLines << '\n' <<
+        "  \"stage_parameter_lines\": " << hpu::model::kStageTwiddleParameterLines << ",\n" <<
+        "  \"online_pmul_format\": \"" << hpu::model::kOnlinePmulParameterFormat << "\",\n"
+        "  \"online_pmul_parameter_lines\": " << hpu::model::kOnlinePmulParameterLines << ",\n"
+        "  \"online_pmul_mode\": 1,\n"
+        "  \"online_pmul_parameter_bank_mask\": 32\n" <<
         "}\n";
     return output.str();
 }
@@ -1703,6 +1707,17 @@ void validate_physical_artifacts(const std::filesystem::path& root)
         || extract_json_u64(abi, "stage_parameter_lines", abi_path)
             != hpu::model::kStageTwiddleParameterLines) {
         throw std::runtime_error("application package memory ABI has unsupported stage twiddle format");
+    }
+    const bool uses_online_pmul = std::any_of(assembled.begin(), assembled.end(), [](const auto& encoded) {
+        return encoded.instruction.mnemonic == hpu::Mnemonic::kPmul && encoded.instruction.mode == 1;
+    });
+    const auto online_format = extract_json_string(abi, "online_pmul_format", abi_path, false);
+    if ((uses_online_pmul || !online_format.empty()) &&
+        (online_format != hpu::model::kOnlinePmulParameterFormat
+         || extract_json_u64(abi, "online_pmul_parameter_lines", abi_path) != hpu::model::kOnlinePmulParameterLines
+         || extract_json_u64(abi, "online_pmul_mode", abi_path) != 1
+         || extract_json_u64(abi, "online_pmul_parameter_bank_mask", abi_path) != 32)) {
+        throw std::runtime_error("application package memory ABI has unsupported online PMUL format");
     }
     validate_program_source(
         std::filesystem::path(asm_path).stem().string(),
