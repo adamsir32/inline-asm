@@ -164,7 +164,7 @@ oracle 指纹仍须一致。默认不允许这项差异。追加实测见
 
 ### 默认生成与 NTT 软件契约
 
-默认编译使用 `InstructionNttContract::natural_coefficient_boundaries`，并要求
+默认编译使用 `InstructionNttContract::raw_bit_reversed_coefficients`，并要求
 SEAL、算子 SoftwareExecutor、最终指令模型逐字比较通过。正常生成使用下面的命令：
 
 ```bash
@@ -187,8 +187,9 @@ cmake --build build -j2 --target hpu_frontend_deployment_delivery
 前端目标与原有 `hpu_fhe_delivery` / `hpu_fhe_deployment_delivery` 分开，部署目录带
 `_n65536`。生成命令不预先保证某个规模通过；实际结果以当次测试日志和包内报告为准。
 
-新应用使用自然系数边界，twist、untwist 和归一化由显式 PMUL 完成。这是功能
-软件契约，不声称复现 RTL 每 stage 地址，host 对拍不改变硬件验证状态。
+新应用内部使用 BR 系数存储，导入/导出 SEAL 系数时保持自然序 API。twist、untwist、
+lazy-scale 修正和归一化由显式在线 PMUL 完成，raw stage 不再增加软件边界 BR。
+host 对拍不改变硬件验证状态。
 完整变换和表索引见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，
 镜像 ABI 与迁移要求见 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 
@@ -213,7 +214,8 @@ CLI 的 `--instruction-ntt-contract` 与 C++ 枚举对应如下：
 
 | CLI 值 | `InstructionNttContract` | 用途 |
 | --- | --- | --- |
-| `natural-coefficient-boundaries` | `natural_coefficient_boundaries` | 默认，新自然系数应用镜像 |
+| `raw-bit-reversed-coefficients` | `raw_bit_reversed_coefficients` | 默认，BR 系数和 BR pre/post 的新镜像 |
+| `natural-coefficient-boundaries` | `natural_coefficient_boundaries` | 历史自然系数镜像回放 |
 | `legacy-raw-stage` | `legacy_raw_stage` | 保留旧 raw stage，无整体边界 BR |
 
 回放既有 raw 镜像时，可以对原指令、原 DMA span 和原镜像显式选择旧契约：
@@ -225,8 +227,8 @@ const auto replay = hpu::model::execute_instructions(
     old_program, old_dma_spans, old_image, options);
 ```
 
-选择 profile 不重排表，也不修改 DMA、镜像或指令。新前端示例始终由新 builder
-准备自然表，给它选择旧 profile 可能比较失败；这不等于已回放一个旧镜像。
+选择 profile 不重排表，也不修改 DMA、镜像或指令。新前端示例由 builder 准备 BR 系数及 BR 因子，选择 natural profile 会发生重复
+重排；旧包应按原镜像 ABI 回放，迁移则重新生成完整包。
 历史 `test/reference/main.cpp` 固定 profile 算子包保留 BR 系数镜像约定。
 严格模式按所选契约比较全部 golden，失败即停止导出。
 

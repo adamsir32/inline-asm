@@ -48,7 +48,9 @@ inline Options options(int argc, char** argv)
         else if (arg == "--instruction-ntt-contract") {
             if (++i >= argc) throw std::invalid_argument("--instruction-ntt-contract requires a value");
             const std::string contract(argv[i]);
-            if (contract == "legacy-raw-stage")
+            if (contract == "raw-bit-reversed-coefficients")
+                result.compiler.instruction_ntt_contract = hpu::model::InstructionNttContract::raw_bit_reversed_coefficients;
+            else if (contract == "legacy-raw-stage")
                 result.compiler.instruction_ntt_contract = hpu::model::InstructionNttContract::legacy_raw_stage;
             else if (contract == "natural-coefficient-boundaries")
                 result.compiler.instruction_ntt_contract =

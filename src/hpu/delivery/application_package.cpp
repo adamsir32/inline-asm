@@ -151,6 +151,8 @@ std::string output_domain_name(OutputDomain domain)
     switch (domain) {
     case OutputDomain::coefficient:
         return "coefficient";
+    case OutputDomain::coefficient_bit_reversed:
+        return "coefficient_bit_reversed";
     case OutputDomain::canonical_ntt_physical:
         return "canonical_ntt_physical";
     }
@@ -1227,6 +1229,7 @@ std::vector<GoldenManifestRow> parse_golden_manifest(
         }
         row.modulus = static_cast<std::uint32_t>(modulus);
         if (fields[4] != "coefficient"
+            && fields[4] != "coefficient_bit_reversed"
             && fields[4] != "canonical_ntt_physical") {
             throw std::runtime_error(
                 "application package " + context + " has invalid domain '"

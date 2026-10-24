@@ -16,28 +16,25 @@ enum class InstructionExecutionStatus {
     unsupported_contract
 };
 
-// These are software execution contracts, not identified RTL revisions.
-// All consume the supplied DMA words and tables unchanged. The raw contract
-// preserves the loader/BF/P stages from the historical reference model; its
-// increasing-m forward chain requires bit-reversed coefficients before stage 0.
+// These are software execution contracts, not proof of an RTL test result.
+// The production ABI uses explicit bit-reversed coefficient-domain storage;
+// PNTT/PINTT execute only the supplied loader/BF/P stages, without a hidden
+// whole-polynomial boundary permutation. PMUL is always pointwise.
 enum class InstructionNttContract {
-    // Functional natural coefficient boundaries for complete transforms.
-    // Forward stage 0 enters the reference DIT layout; the last inverse stage
-    // leaves it. Twist and normalization remain explicit pointwise PMULs.
-    // Intermediate stages are the reference schedule, not a verified RTL trace.
+    // Compatibility profile for old natural-order functional images. Performs
+    // software-only boundary conversions and does not describe the RTL ABI.
     natural_coefficient_boundaries,
-    legacy_raw_stage
+    legacy_raw_stage,
+    raw_bit_reversed_coefficients
 };
 
 const char* instruction_ntt_contract_name(InstructionNttContract contract) noexcept;
 
 struct InstructionExecutionOptions {
-    // New application images use natural coefficient order at both transform
-    // boundaries. The raw profile remains available to replay historical images.
-    // Boundary permutations model functional behavior, not RTL address cycles.
-    // PMUL always consumes data and constants at the same physical index.
+    // New images store data and pre/post factors in bit-reversed coefficient
+    // order. Neither transforms nor pointwise PMUL repair their layout.
     InstructionNttContract ntt_contract =
-        InstructionNttContract::natural_coefficient_boundaries;
+        InstructionNttContract::raw_bit_reversed_coefficients;
     std::size_t regular_bank_count = 5;
     std::size_t regular_bank_lines = 1024;
     std::size_t mod_table_lines = 4;
@@ -46,7 +43,7 @@ struct InstructionExecutionOptions {
 struct InstructionExecutionReport {
     InstructionExecutionStatus status = InstructionExecutionStatus::invalid_program;
     InstructionNttContract ntt_contract =
-        InstructionNttContract::natural_coefficient_boundaries;
+        InstructionNttContract::raw_bit_reversed_coefficients;
     // A software replay cannot establish a hardware contract. Actual RTL or
     // target execution evidence must be tracked separately by the caller.
     bool hardware_contract_verified = false;

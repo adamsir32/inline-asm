@@ -300,7 +300,8 @@ ModUp/ModDown 的 N-word BConv/P-inverse 对象，并预留可复用 Q|P workspa
 
 变换路径会
 从同一个 HPU_MEM image 读取 pre-twist、每个 stage 和 INTT post-untwist/scale
-各自的两条 line K=8 参数。pre/post 用在线 PMUL 的 `c*r^j` 模板（B=N/64），
+各自的两条 line K=8 参数。系数中间值按 BR 存储，pre/post 用同索引的在线 PMUL
+U/V/R 模板（B=N/64），post 保留完整 lazy-scale 修正与归一化；
 stage 参数按硬件 stride-8 递推展开为 BF 因子（B=N/128），
 不会绕过实际镜像另生成 canonical 根表。精确格式见
 [在线 PMUL 交接](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md) 与

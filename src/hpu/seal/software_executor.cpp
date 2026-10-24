@@ -390,8 +390,6 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
     if (prepared.modulus != q) {
         throw std::invalid_argument("canonical NTT table modulus mismatch");
     }
-    hpu::model::HardwareNttModel model(
-        degree, q, hpu::model::pow_mod(prepared.canonical_psi, 2, q));
     if (inverse) {
         hpu::model::InverseNttTables inverse_tables;
         inverse_tables.stages.reserve(prepared.inverse_stages.size());
@@ -399,9 +397,15 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
             inverse_tables.stages.push_back(detail::read_stage_twiddles(
                 memory_, span, q, degree));
         }
-        inverse_tables.set_natural_post_scale(detail::read_online_pmul_factors(
-            memory_, prepared.post_untwist_scale, q, degree));
-        return model.inverse(words, inverse_tables);
+        const auto post = detail::read_online_pmul_factors(
+            memory_, prepared.post_untwist_scale, q, degree);
+        auto coefficients = detail::execute_transform_stages(
+            words, inverse_tables.stages, q, true);
+        for (std::size_t index = 0; index < degree; ++index) {
+            coefficients[index] = multiply_mod(
+                coefficients[index], post[index], q);
+        }
+        return coefficients;
     }
 
     std::vector<std::vector<std::uint32_t>> forward_tables;
@@ -420,7 +424,8 @@ std::vector<std::uint32_t> CkksSoftwareExecutor::transform_limb(
         coefficients[index] = multiply_mod(
             coefficients[index], pre_twist[index], q);
     }
-    return model.forward(coefficients, forward_tables);
+    return detail::execute_transform_stages(
+        std::move(coefficients), forward_tables, q, false);
 }
 
 void CkksSoftwareExecutor::key_switch(
@@ -765,19 +770,21 @@ void CkksSoftwareExecutor::rotate(
                 throw std::invalid_argument(
                     "modified-root Rotate table does not match k or canonical psi");
             }
-            hpu::model::HardwareNttModel model(
-                degree, q,
-                hpu::model::pow_mod(fused.modified_psi, 2, q));
             hpu::model::InverseNttTables inverse_tables;
             inverse_tables.stages.reserve(fused.inverse_stages.size());
             for (const auto& span : fused.inverse_stages) {
                 inverse_tables.stages.push_back(detail::read_stage_twiddles(
                     memory_, span, q, degree));
             }
-            inverse_tables.set_natural_post_scale(detail::read_online_pmul_factors(
-                memory_, fused.post_untwist_scale, q, degree));
-            const auto transformed = model.inverse(
-                memory_.read(source.limbs[basis], degree), inverse_tables);
+            const auto post = detail::read_online_pmul_factors(
+                memory_, fused.post_untwist_scale, q, degree);
+            auto transformed = detail::execute_transform_stages(
+                memory_.read(source.limbs[basis], degree),
+                inverse_tables.stages, q, true);
+            for (std::size_t index = 0; index < degree; ++index) {
+                transformed[index] = multiply_mod(
+                    transformed[index], post[index], q);
+            }
             memory_.write(workspace.limbs[basis], transformed);
         }
     }
@@ -922,8 +929,11 @@ HpuRnsPolynomial CkksSoftwareExecutor::export_component(
             throw std::logic_error("HPU modulus table differs from SEALContext");
         }
         result.moduli.push_back(modulus);
-        const auto limb = memory_.read(
+        auto limb = memory_.read(
             polynomial.limbs[basis], polynomial.degree);
+        if (object.domain == hpu::runtime::PolynomialDomain::coefficient) {
+            limb = hpu::model::bit_reverse_coefficients(limb);
+        }
         result.words.insert(result.words.end(), limb.begin(), limb.end());
     }
     return result;

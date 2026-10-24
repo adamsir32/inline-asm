@@ -97,8 +97,8 @@ void check(const seal::SEALContext& context, seal::Evaluator& evaluator,
             tables.stages.push_back(hpu::model::expand_stage_twiddles(
                 words(package.image, parameter_id), q, degree));
         }
-        tables.set_natural_post_scale(hpu::model::expand_online_pmul_factors(
-            words(package.image, prefix + "/post_untwist_scale"), q, degree));
+        tables.post_scale = hpu::model::expand_online_pmul_factors(
+            words(package.image, prefix + "/post_untwist_scale"), q, degree);
         for (std::size_t component = 0; component < 2; ++component) {
             const auto original = words(package.image,
                 mod_id("input/original/c" + std::to_string(component), basis));
@@ -107,6 +107,17 @@ void check(const seal::SEALContext& context, seal::Evaluator& evaluator,
                 hpu::model::negacyclic_inverse(original, q, psi), element, q);
             require(transformed_coeff == direct_coeff,
                     "BGV modified-root INTT does not implement Galois automorphism");
+            auto physical_coeff = original;
+            for (std::size_t stage = 0; stage < tables.stages.size(); ++stage) {
+                physical_coeff = hpu::model::execute_ntt_stage(
+                    physical_coeff, tables.stages[stage], q, stage, true);
+            }
+            for (std::size_t index = 0; index < degree; ++index) {
+                physical_coeff[index] = mul(
+                    physical_coeff[index], tables.post_scale[index], q);
+            }
+            require(physical_coeff == hpu::model::bit_reverse_coefficients(direct_coeff),
+                    "BGV raw Galois stages do not produce bit-reversed coefficients");
             const auto physical = hpu::model::negacyclic_forward(
                 transformed_coeff, q, psi);
             if (component == 1) rotated[basis] = physical;

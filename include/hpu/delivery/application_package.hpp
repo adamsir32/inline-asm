@@ -23,6 +23,8 @@ enum class SchemeKind { ckks, bfv, bgv };
 
 enum class OutputDomain {
     coefficient,
+    // Physical coefficient buffers use physical[j] = natural[BR_logN(j)].
+    coefficient_bit_reversed,
     canonical_ntt_physical
 };
 

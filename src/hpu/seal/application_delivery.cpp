@@ -89,10 +89,11 @@ ApplicationPackageRequest base_request(
         if (i) out << ',';
         out << key->parms().coeff_modulus()[i].value();
     }
-    out << "],\"ntt_table_abi\":{\"version\":3,"
-           "\"coefficient_order\":\"natural\","
-           "\"pre_twist_order\":\"natural\","
-           "\"post_factor_order\":\"natural\","
+    out << "],\"ntt_table_abi\":{\"version\":4,"
+           "\"coefficient_order\":\"bit_reversed\","
+           "\"external_coefficient_order\":\"natural\","
+           "\"pre_twist_order\":\"bit_reversed\","
+           "\"post_factor_order\":\"bit_reversed\","
            "\"stage_twiddle_order\":\"reference_loader_batch_lane\","
            "\"stage_twiddle_format\":" << quoted(hpu::model::kStageTwiddleParameterFormat)
         << ",\"twiddle_chains\":" << hpu::model::kTwiddleChains
@@ -159,7 +160,7 @@ void append_outputs(ApplicationPackageRequest& request,
             output.modulus_id = mod_id;
             output.modulus = words.moduli[limb];
             output.domain = request.scheme == SchemeKind::bfv
-                ? hpu::delivery::OutputDomain::coefficient
+                ? hpu::delivery::OutputDomain::coefficient_bit_reversed
                 : hpu::delivery::OutputDomain::canonical_ntt_physical;
             output.destination = allocation.span;
             output.word_count = words.degree;
@@ -279,6 +280,32 @@ ApplicationPackageRequest make_planned(
         const auto& binding = entry.binding;
         request.program.resource_dma.push_back({entry.instruction_index, binding.allocation_id,
             binding.span, binding.operation_index, binding.operation_id, binding.operation_dma_index});
+    }
+    // BFV plaintext kind alone cannot distinguish Add/Sub's BR coefficients
+    // from MultiplyPlain's canonical NTT lift. Preserve the planned type on
+    // immutable input ports before read reuse is considered.
+    if (scheme == SchemeKind::bfv && request.program.operator_program) {
+        auto typed = std::make_shared<hpu::resource::OperatorProgram>(
+            *request.program.operator_program);
+        typed->bind_ports(request.program.resource_dma);
+        for (const auto& operation : lowered.operations) {
+            for (const auto& input : operation.operation.inputs) {
+                const auto prefix = input.id + "/c0/mod";
+                for (auto& port : typed->ports) {
+                    const auto& allocation = image.allocation(port.binding->allocation_id);
+                    if (port.load && allocation.read_only
+                        && allocation.kind == hpu::runtime::AllocationKind::plaintext
+                        && allocation.id.rfind(prefix, 0) == 0
+                        && allocation.id.size() > prefix.size()
+                        && allocation.id.find_first_not_of("0123456789", prefix.size()) == std::string::npos) {
+                        port.layout = input.domain == hpu::runtime::PolynomialDomain::coefficient
+                            ? hpu::compiler::MemoryLayout::coefficient_bit_reversed
+                            : hpu::compiler::MemoryLayout::canonical_ntt_physical;
+                    }
+                }
+            }
+        }
+        request.program.operator_program = std::move(typed);
     }
     auto graph = stream();
     graph << "{\"operations\":[";

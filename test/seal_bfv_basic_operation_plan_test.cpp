@@ -88,7 +88,8 @@ void require_exact(const ::seal::Ciphertext& expected,
         for (std::size_t basis = 0; basis < polynomial.modulus_ids.size(); ++basis) {
             const std::uint8_t modulus_id = polynomial.modulus_ids[basis];
             const std::uint32_t modulus = registry.modulus_table[modulus_id];
-            const auto left_words = allocation_words(image, limb_id(left, component, modulus_id));
+            const auto left_words = hpu::model::bit_reverse_coefficients(
+                allocation_words(image, limb_id(left, component, modulus_id)));
             std::vector<std::uint32_t> right_words;
             const bool changes_component = operation != ExactOperation::add_plain &&
                                                    operation != ExactOperation::subtract_plain
@@ -100,7 +101,8 @@ void require_exact(const ::seal::Ciphertext& expected,
                             operation == ExactOperation::subtract_plain
                         ? 0
                         : component;
-                right_words = allocation_words(image, limb_id(*right, right_component, modulus_id));
+                right_words = hpu::model::bit_reverse_coefficients(
+                    allocation_words(image, limb_id(*right, right_component, modulus_id)));
             }
             for (std::size_t index = 0; index < degree; ++index) {
                 std::uint32_t actual = left_words[index];
@@ -152,7 +154,8 @@ void require_multiply_plain_exact(
             require(twiddles.modulus == modulus,
                     "BFV MultiplyPlain twiddle modulus is inconsistent");
             auto transformed = hpu::model::negacyclic_forward(
-                allocation_words(image, limb_id(ciphertext, component, modulus_id)), modulus,
+                hpu::model::bit_reverse_coefficients(
+                    allocation_words(image, limb_id(ciphertext, component, modulus_id))), modulus,
                 twiddles.canonical_psi);
             const auto plain_words = allocation_words(image, limb_id(plaintext, 0, modulus_id));
             for (std::size_t index = 0; index < degree; ++index) {

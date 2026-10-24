@@ -67,19 +67,18 @@ mapping for natural-input PNTT. The application boundary and independent CKKS
 KeySwitch rounding issues were repaired; their causes and software validation
 are recorded in [the dated NTT audit](../audits/HPU_NTT_CONTRACT_AUDIT_2026-10.md).
 
-New application images for all three schemes use natural coefficient
-boundaries and natural-indexed pre/post factors. The default instruction replay
-contract is `natural_coefficient_boundaries`: it adapts the reference stages at
-forward entry and inverse exit, while twist and normalization remain explicit
-PMULs. `InverseNttTables::set_natural_post_scale` adapts application post factors
-for this mathematical inverse API. Stage tables and canonical NTT physical
-layout retain the reference convention. These are functional software
-boundaries; per-stage RTL address and timing equivalence is a separate check.
+Since 2026-10-24, all three schemes store internal coefficient limbs as
+`physical[j] = natural[BR(j)]`. SEAL coefficient import/export remains natural;
+NTT-domain data keeps its canonical HPU physical layout. Explicit pre/post PMUL
+factors use the same BR coefficient indices. The post factors preserve the
+complete raw inverse scale correction and untwist, rather than assuming only
+N^-1. Exact K=8 packing checks every reconstructed factor.
 
-The inverse stage tables contain `w_bf = alpha / beta`. Application images
-include scale cancellation, normalization and untwist in the explicit natural
-post-PMUL factor. Its exact indexing and the legacy raw convention are specified
-in [the programming manual](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定).
+The default instruction contract `raw_bit_reversed_coefficients` executes raw
+stages without an additional boundary permutation. Natural coefficient replay
+is retained only as an explicit compatibility profile for historical images.
+See the [hardware layout correction](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md).
+Host comparison does not establish RTL timing or target execution evidence.
 
 The model also implements both modified-root automorphism identities from
 `toy_fhe_auto.py`. Both APIs return the canonical HPU NTT physical domain. The
@@ -92,10 +91,10 @@ words (two 256-byte lines) per stage, for every supported degree. Builders pack
 the original physical oracle tables into U/V/R parameters and verify their full
 reconstruction. Instruction and scheme executors expand the actual image
 parameters before invoking the original mathematical stage model. Explicit
-pre/post PMULs now use separate two-line `c*r^j` templates through object PMUL
+pre/post PMULs use separate two-line exact U/V/R templates for BR physical factors through object PMUL
 mode 1. Their batch count is N/64; stage twiddle templates use N/128. Both
 formats share the 14 default Bank 5 slots, while the frontend remains unchanged.
-NTT data ABI version 3 declares `hpu-pmul-online-k8-v1`; old full-table images
+NTT data ABI version 4 declares `hpu-pmul-online-k8-v1`; old full-table images
 must be regenerated. See the [online PMUL extension](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)
 and the earlier
 [hardware compiler migration contract](../reference/TWIDDLE_COMPILER_MIGRATION.md).

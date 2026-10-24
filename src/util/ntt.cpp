@@ -37,7 +37,7 @@ std::string generate_hpu_ntt_body_asm(
     asm_code << "        // modulus table is loaded by the enclosing complete program\n";
     // 假设调用方已经加载过密文模数
     // Negacyclic NTT = pointwise pre-twist followed by a cyclic NTT.
-    asm_code << "\n        // Negacyclic pre-twist: online PMUL by psi^i\n";
+    asm_code << "\n        // Negacyclic pre-twist: online PMUL by psi^BR(j)\n";
     asm_code << hpu::resource::read(
         twiddle_obj, hpu::DataType::online_pmul_parameters,
         table_port_prefix + "/pre_twist",
@@ -110,7 +110,7 @@ std::string generate_hpu_intt_body_asm(
     }
 
     // The PE butterfly does not implicitly normalize or apply the inverse twist.
-    asm_code << "\n        // INTT normalize and inverse-twist: online PMUL by N^-1 * psi^-i\n";
+    asm_code << "\n        // INTT post: online PMUL by full physical lazy-scale correction and inverse twist\n";
     asm_code << hpu::resource::read(
         twiddle_obj, hpu::DataType::online_pmul_parameters,
         table_port_prefix + "/post_untwist_scale",

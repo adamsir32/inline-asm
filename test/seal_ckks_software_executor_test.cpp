@@ -1,9 +1,11 @@
 #include "hpu/seal/application_image.hpp"
+#include "hpu/model/hardware_ntt.hpp"
 #include "hpu/seal/ckks_context.hpp"
 #include "hpu/seal/software_executor.hpp"
 #include "scheme/ckks/galois.hpp"
 
 #include <seal/seal.h>
+#include <seal/util/ntt.h>
 
 #include <algorithm>
 #include <cmath>
@@ -310,6 +312,31 @@ int main()
             bottom_rescaled_output, canonical_twiddles);
         executor.inverse_ntt(
             input_a, coefficient_scratch, canonical_twiddles);
+        // Compare inverse output directly with SEAL before attempting a
+        // roundtrip, so matching forward/inverse layout errors cannot cancel.
+        const auto* seal_tables =
+            bundle.context->get_context_data(cipher_a.parms_id())->small_ntt_tables();
+        for (std::size_t component = 0; component < cipher_a.size(); ++component) {
+            const auto exported = executor.export_component(coefficient_scratch, component);
+            for (std::size_t basis = 0; basis < cipher_a.coeff_modulus_size(); ++basis) {
+                const auto degree = spec.poly_modulus_degree;
+                std::vector<std::uint64_t> seal_coefficients(
+                    cipher_a.data(component) + basis * degree,
+                    cipher_a.data(component) + (basis + 1) * degree);
+                ::seal::util::inverse_ntt_negacyclic_harvey(
+                    seal_coefficients.data(), seal_tables[basis]);
+                const std::vector<std::uint32_t> natural(
+                    seal_coefficients.begin(), seal_coefficients.end());
+                if (!std::equal(natural.begin(), natural.end(),
+                                exported.words.begin() + basis * degree)
+                    || executor.memory().read(
+                        coefficient_scratch.components[component].limbs[basis], degree)
+                        != hpu::model::bit_reverse_coefficients(natural)) {
+                    throw std::runtime_error(
+                        "CKKS inverse NTT physical layout or natural export differs from SEAL");
+                }
+            }
+        }
         executor.forward_ntt(
             coefficient_scratch, restored_ntt, canonical_twiddles);
 

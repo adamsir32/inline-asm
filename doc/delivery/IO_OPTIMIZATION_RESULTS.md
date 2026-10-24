@@ -1,5 +1,11 @@
 # SSA 与 IO 优化实测记录
 
+> 历史记录：本文的自然系数边界/profile 验证采用当时的软件契约。2026-10-24 已切换为
+> BR 系数及 BR pre/post 的 raw stage ABI；旧产物及软件通过记录不代表修订后 RTL
+> 验收。布局以 [最新修订](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)
+> 和 [应用包说明](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界) 为准。
+
+
 日期：2026-10-23。本记录来自当前工作区的主机运行，产物保留生成时的源码 revision
 和工作区状态；正式发布时应从确定的提交重新生成。
 
@@ -156,3 +162,39 @@ python3 tools/benchmark_io.py --build-dir build --output-root outputs/pmul_onlin
 64/192/255、N128…65536、32 位模数、参数复用、原址/独立目的、参数长度与
 生命周期、三方案 SEAL 对拍。交接原文的 VCS 数字属于硬件组已有证据，本仓库
 执行的是主机回归和指令模型验证，尚未执行 RTL/板端全链路。
+
+## 7. 2026-10-24：BR 系数存储 ABI 回归
+
+按 [硬件组布局修订](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)
+将内部系数与在线 pre/post 因子一起改为 BR 物理布局。默认指令模型只执行 raw
+stage，不增加边界 BR；stage 参数、ISA、bank 规则及 CP 策略不变。数据 ABI
+升至 4，外部 SEAL 系数 API 仍为自然序。
+
+最新可复现用例仍为 N8192、Q4、P1、seed=0、只导出 y：
+
+```sh
+python3 tools/benchmark_io.py --build-dir build-ckks-delivery \
+  --output-root outputs/layout_br_n8192 --degree 8192 --data-moduli 4 --seed 0
+```
+
+| 方案 | DLOAD 字节 | DSTORE 字节 | 总 DMA 字节 |
+| --- | ---: | ---: | ---: |
+| CKKS | 7,617,792 | 196,608 | 7,814,400 |
+| BFV | 12,751,616 | 983,040 | 13,734,656 |
+| BGV | 3,849,472 | 589,824 | 4,439,296 |
+
+三方案均通过 SEAL、SoftwareExecutor、最终编码指令以及优化等价检查。
+`ntt_contract=raw_bit_reversed_coefficients`，正逆边界转换次数均为 0。
+与既有 `outputs/pmul_online/` 的同 seed 数学参数逐项核对后，CKKS/BGV 的 6 个
+输出 limb 字节不变；BFV 的 6 个 limb 经 BR 解码后与旧自然序 golden 逐字一致。
+总 DMA 字节与上一节在线模板版本相同，本次布局修正不增加目标数据搬运。
+
+注意 BFV 的物理 golden 指纹已改变：现有 benchmark 的旧包严格比较会拒绝
+这种原始指纹差异；`--allow-data-abi-change` 不豁免 golden 校验。上面的旧新数学
+一致性核对显式解码了 BFV 布局，没有跳过数值比较。
+
+完整 CTest 回归 78/78 通过，另验证最新原生应用包回归。新增覆盖 N128～65536
+的 pre/post exact packing、手册 N1024 参数、独立正向求值、独立逆向输入、乘以 X
+及稠密 O(N²) 环卷积。统一生成目标重新生成并校验了 `outputs/isa12/` 下的 14 个
+Evaluator、Plan、原生算子应用包；该目录可能还包含此前单独生成的其他包，接收
+时须逐包确认 ABI=4。本轮没有运行修订后的 VCS、ELF 或板端执行。

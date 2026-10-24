@@ -127,6 +127,8 @@ const char* instruction_ntt_contract_name(InstructionNttContract contract) noexc
         return "legacy_raw_stage";
     case InstructionNttContract::natural_coefficient_boundaries:
         return "natural_coefficient_boundaries";
+    case InstructionNttContract::raw_bit_reversed_coefficients:
+        return "raw_bit_reversed_coefficients";
     }
     return "unknown";
 }
@@ -170,6 +172,7 @@ InstructionExecutionResult execute_instructions(
 
     try {
         if (options.ntt_contract != InstructionNttContract::legacy_raw_stage
+            && options.ntt_contract != InstructionNttContract::raw_bit_reversed_coefficients
             && options.ntt_contract != InstructionNttContract::natural_coefficient_boundaries)
             throw UnsupportedContract("unknown instruction NTT software contract");
         if (instructions.empty() || options.regular_bank_count == 0

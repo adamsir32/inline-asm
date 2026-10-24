@@ -509,7 +509,7 @@ const auto compiled = app.compile("my_application", options);
 | `capacity_lines` | `1ULL << 24` | 数据构建阶段的行数上限，1 line=256B；实际包按使用量收紧窗口 |
 | `optimize_resources` | `true` | 比较原序、读取复用、依赖重排候选，按 DMA 字节/次数/指令数选择 |
 | `require_instruction_verification` | `true` | 最终指令模型与 golden 不匹配时停止编译 |
-| `instruction_ntt_contract` | `natural_coefficient_boundaries` | 新应用的默认 host NTT 功能契约 |
+| `instruction_ntt_contract` | `raw_bit_reversed_coefficients` | BR 系数镜像的 raw stage 回放，不额外重排 |
 
 选择 NoOpt 使用 `optimize_resources=false`，使用统一 SSA 后端生成原序基准，不承诺
 保留历史手写 DMA、PFREE 或 DDR 布局。保留失败指令报告使用
@@ -519,8 +519,8 @@ const auto compiled = app.compile("my_application", options);
 关闭资源优化时，交付编译仍按同一规则设置 CP：仅 twiddle DLOAD 为 1，
 其他 DMA 为 0。缓存策略与资源优化分别处理，不改变顶层编译选项或数学结果。
 
-当前新应用使用自然系数边界与显式 twist/untwist PMUL。`legacy_raw_stage`
-用于回放旧 raw 镜像，选择它不转换镜像或表，也不改变硬件 ABI。完整约定和
+当前新应用内部使用 BR 系数与同索引的在线 pre/post 因子；外部 SEAL 接口保持自然序。
+默认 raw stage 无隐含 BR；历史 profile 只供兼容回放，不转换镜像或表。完整约定和
 诊断 CLI 见 [前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
 
 ### 8.1 IO 对照与示例参数
@@ -582,7 +582,8 @@ BFV/BGV 解码预期按模 t 计算。自动对拍不能替代作者的独立公
 | `oracle/report.json` | 功能对拍、最终指令验证、资源报告及优化等价状态 |
 | `semantic/decoded.json` | 可选的用例数学验证报告 |
 
-BFV golden 是自然顺序系数域；CKKS/BGV 是 canonical HPU NTT 物理布局。
+BFV golden 的 domain 为 `coefficient_bit_reversed`；CKKS/BGV 是 canonical HPU NTT 物理布局。
+目标读回直接按物理 word 比较；需要自然系数时，对每个 BFV limb 单独 BR 解码。
 golden 按导出节点、密文分量和模数 limb 拆分，仅这些结果保留目标读回空间。
 计算图中 `exported=false` 的节点只有逻辑引用，没有保证可读的最终 DDR 地址；
 `exported=true` 的节点通过 `golden_object_id` 关联 golden manifest。

@@ -65,13 +65,14 @@ void require_mod_switch_exact(const ::seal::Ciphertext& expected,
     const std::uint32_t half = q_last >> 1U;
     const int dropped_id = source.keyswitch_layout.q_mod_ids.back();
     for (std::size_t component = 0; component < 2; ++component) {
-        const auto dropped = allocation_words(image, input.id + "/c" + std::to_string(component) +
-                                                         "/mod" + std::to_string(dropped_id));
+        const auto dropped = hpu::model::bit_reverse_coefficients(allocation_words(
+            image, input.id + "/c" + std::to_string(component) + "/mod" +
+                       std::to_string(dropped_id)));
         for (std::size_t basis = 0; basis < destination.q_moduli.size(); ++basis) {
             const std::uint32_t q = destination.q_moduli[basis];
             const int q_id = destination.keyswitch_layout.q_mod_ids[basis];
-            const auto retained = allocation_words(
-                image, input.id + "/c" + std::to_string(component) + "/mod" + std::to_string(q_id));
+            const auto retained = hpu::model::bit_reverse_coefficients(allocation_words(
+                image, input.id + "/c" + std::to_string(component) + "/mod" + std::to_string(q_id)));
             const std::uint32_t inverse = hpu::model::inverse_mod_prime(q_last % q, q);
             for (std::size_t index = 0; index < degree; ++index) {
                 const std::uint32_t rounded_last = static_cast<std::uint32_t>(

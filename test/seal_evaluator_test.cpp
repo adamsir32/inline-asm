@@ -171,7 +171,7 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     require(full.verified(), "nonlinear graph software verification failed");
     require(full.package().outputs.size() == changed.size() * context->get_context_data(changed.parms_id())->parms().coeff_modulus().size(),
         "unmarked nonlinear nodes or duplicate metadata views were exported");
-    require(full.instruction_verified(), "natural-boundary nonlinear graph instruction verification failed");
+    require(full.instruction_verified(), "BR coefficient nonlinear graph instruction verification failed");
     require(full.oracle_result(square).size() == 3 && full.oracle_result(relined).size() == 2,
         "tensor/relinearization shapes were lost");
     const auto repeat = nonlinear.compile("frontend_nonlinear", diagnostic);
@@ -184,11 +184,11 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
         CompileOptions strict_nonlinear;
         const auto strict_result = nonlinear.compile("frontend_nonlinear", strict_nonlinear);
         require(strict_result.instruction_verified(), "strict nonlinear graph verification failed");
-        CompileOptions legacy = diagnostic;
-        legacy.instruction_ntt_contract = hpu::model::InstructionNttContract::legacy_raw_stage;
-        const auto raw = nonlinear.compile("frontend_nonlinear", legacy);
-        require(!raw.instruction_verified(), "legacy raw replay silently adopted new natural boundaries");
-        require(raw.package().oracle_report_json.find("\"ntt_contract\":\"legacy_raw_stage\"")
+        CompileOptions natural = diagnostic;
+        natural.instruction_ntt_contract = hpu::model::InstructionNttContract::natural_coefficient_boundaries;
+        const auto raw = nonlinear.compile("frontend_nonlinear", natural);
+        require(!raw.instruction_verified(), "natural replay silently accepted explicit BR coefficient boundaries");
+        require(raw.package().oracle_report_json.find("\"ntt_contract\":\"natural_coefficient_boundaries\"")
                     != std::string::npos
                 && raw.package().oracle_report_json.find("\"hardware_contract_verified\":false")
                     != std::string::npos,

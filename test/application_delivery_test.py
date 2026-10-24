@@ -85,7 +85,7 @@ def main():
             assert len(exported) == 1 and exported[0]["output"] == graph["final_output"]
         image = (package / descriptor["image"]).read_bytes()
         for limb in golden:
-            assert limb["domain"] == ("coefficient" if scheme == "bfv" else "canonical_ntt_physical")
+            assert limb["domain"] == ("coefficient_bit_reversed" if scheme == "bfv" else "canonical_ntt_physical")
             begin = int(limb["line_offset"]) * 256
             length = int(limb["line_count"]) * 256
             assert not any(image[begin:begin + length]), "golden was preloaded into startup image"

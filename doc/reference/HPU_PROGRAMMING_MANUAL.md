@@ -98,25 +98,31 @@ for b = 0…B-1:
 ### 3.1 PMUL 在线 pre/post 因子（2026-10-22 追加）
 
 pre-twist、post-untwist/scale 继续由独立 PMUL 执行，不融合进 PNTT/PINTT。
-因子序列为 `c*r^j mod q` 时，使用在线 PMUL 的两条 line 模板替代 N-word 向量。
-先将全部 128 个 u32 填 1，再设置以下字段；每个值是 `[0,q)` 内的普通模剩余数。
+硬件 MODE=1 接受两行 U/V/R 模板；自然序 `c*r^j` 只是它的一种用法。
+**2026-10-24 修订：**NTT 系数数据及 pre/post 因子统一按 BR 物理位置准备：
+`x[j]=a[BR(j)]`、`pre[j]=psi^BR(j)`。post 从完整 raw inverse 后乘表生成，
+保留 lazy-scale 抵消、N^-1 与 untwist，不假设只有 `N^-1*psi^-i`。
+
+设待表达物理向量为 F，B=N/64。模板先填 1，再设置：
 
 | 位置 | 内容 |
 |---|---|
-| line 0，word `ell=0…63` | `U[ell]=c*r^ell mod q` |
-| line 1，word `a-1`，`1<=a<=min(7,B-1)` | `V[a]=r^(64*a) mod q`，`V[0]=1` 隐含 |
-| line 1，word `7+t`，`0<=t<T` | `R[t]=r^512 mod q` |
+| line 0，word `ell=0…63` | `U[ell]=F[ell]` |
+| line 1，word `s-1`，`1<=s<min(8,B)` | `V[s]=F[64*s]/F[0] mod q`，V[0] 隐含为 1 |
+| line 1，word `7+t`，`0<=t<max(0,log2(B)-3)` | `R[t]=F[512*2^t]/F[512*(2^t-1)] mod q` |
 
-这里 **`B=N/64`，`T=max(0,log2(B)-3)`**；stage twiddle 的 B 是 N/128，
-两种模板不能共用校验公式。N8192 的 line 1 word 0…6 放 V[1…7]，word 7…10
-都放 `r^512`，word 11…63 为 1。post 的 U[0] 可以不是 1。
+exact packer 要求 F 为非零规范模剩余数，**完整展开必须逐字等于 F**；不支持的向量
+报错。不能只换 c/ratio，也不能套用长度 N/2、首元素为 1 的 stage packer。
+每个 PMUL batch 使用 64 系数，B=N/64；stage 的 B=N/128。BR 因子仍只占 512 B。
 
-- pre：`c=1,r=psi`；post：`c=N^-1,r=psi^-1`。post 已包含归一化，不能再乘一次 N 的逆。
-- 每条 PMUL 重新初始化递推状态，不修改参数对象，不执行 butterfly 或 shuffle。
-- 数据实际长度为 2…1024 line 的二次幂，参数实际长度必须为 2 line，参数 ID 不同于数据源和目的；三者都不能是模表对象。
-- 参数使用 `DLOAD MOD=0,mask=0x20` 放入 Bank 5，与 stage 模板共享生命周期和容量。
-  10 份 pre/post 占 20 line，加默认模表后只余 8 line，即 4 个 stage 参数槽。
-- 非几何序列的普通 PMUL 向量仍使用原向量模式；只需乘 N 的逆时可以继续使用原有安排。
+- 每条 PMUL 重新初始化递推状态，不修改参数，不执行 butterfly 或 shuffle。
+- 数据长度为 2…1024 line 的二次幂，参数长度 2 line，参数 ID 不同于数据及目的。
+- 参数以 `MOD=0,mask=0x20` 放 Bank 5，与 stage 共用默认 14 个模板槽。
+- 对外自然系数接口仅在导入/导出做 BR；内部 INTT→系数运算→NTT 保留 BR。
+- 未可压缩的普通向量使用 MODE=0。ISA、stage 参数、CP 策略不因本次布局修订改变。
+
+完整推导与硬件组离线验证范围见 [布局修订原文](HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)。
+原 [在线 PMUL 交接](PMUL_ONLINE_COMPILER_HANDOFF.md) 中自然等比构造保留作通用例子。
 
 ## 4. 32-bit 指令编码
 
@@ -142,7 +148,7 @@ I=0 时，MODE=00 是原向量模式；**只有 PMUL 允许 MODE=01 在线因子
 `padd/psub/pmul pdst,psrc1,psrc2`：逐系数模运算。`pmac` 的 pdst 还必须已有有效累加值。兼容长度的 padd/psub/pmul 允许覆盖既有目的对象；新目的对象由硬件分配。
 
 本项目在线语法为 `pmul pdst,psrc1,pparam,1`，生成器为 `hpu::pmul_online()`。
-计算 `dst[j]=src[j]*c*r^j mod q`，允许 `dst=src` 或独立目的。
+按 U/V/R 递推 F 并计算 `dst[j]=src[j]*F[j] mod q`，允许 `dst=src` 或独立目的。
 例如 `pmul p40,p40,p63,1` 编码为 **`0x2A287F5B`**，计算类 cmd26 仍为 `inst>>7`。
 
 ### 4.2 NTT/INTT stage
@@ -319,7 +325,7 @@ HPU 本地 CSR FAULT_STATUS 的对象号扩展为 `[9:4]`；VALID=[0]，IS_LOAD=
 - stage 与在线 pre/post 参数实际均为两条 line，应用交付编译使用 `MOD=0, CP=1, mask=0x20`，共用默认 14 个 Bank 5 参数槽。参数对象可以按需重载，也可以同时保留多个。参数长度在计算使用时检查，普通 DLOAD 没有专用 wire TYPE。
 - 应用交付编译采用 `dma_cache_policy=twiddle_loads_only`：按最终分配的 `kind=twiddle` 为相应 DLOAD 设置 CP=1，其他 DLOAD 与全部 DSTORE 设置 CP=0。该步骤覆盖编译器插入的 reload，NoOpt 模式也执行；仅请求 twiddle 的 LLC 读分配，不保证 LLC 中没有其他数据，也不保证驻留。
 - 底层 API 的省略参数默认仍为 CP=0，资源编译器默认 `preserve` 保留显式 CP，供手工实验；可在 `resource::read/publish` 或 `hpu::dload/dstore` 中指定 `CachePolicy::allocate`。包内 `dma_cache_policy` 声明实际策略，`default_cp=0` 只声明底层默认值。CP 不参与数学结果、SRAM 区间分配或对象生命周期，不继承上次命令；功能指令模型检查其编码，但不模拟 LLC 命中、替换或写回时间。
-- 算子仍采用独立 pre-twist 和 post-untwist/scale PMUL。系数域边界为自然顺序；NTT 域按 HPU 物理排列与 SEAL 转换后对拍。PNTT 的内部 shuffle 由功能模型模拟，不额外向指令流添加输入位反转。
+- 算子采用独立 pre/post PMUL，内部系数与因子均为 BR 存储，NTT 域保持 canonical physical。默认 `raw_bit_reversed_coefficients` 逐条执行 raw stage，无隐含边界 BR；外部 SEAL 系数接口仍为自然序。不能依赖 PNTT 自动完成整体输入 BR。
 - 编译器和逐指令模型共用 `runtime::BankAllocator`；按正常完成顺序预测物理 bank/区间，不模拟 DMA 周期。容量与数学对拍通过不代表周期性能或 CPU/SoC 已验证。
 - 本项目生成器仍在完整程序末尾统一发出 PSYNC，避免在内部算子重复通知 CPU；ISA 本身允许等待此前操作完成，PSYNC 不隐式释放对象。
 - 目标侧代码在最终布局完成后生成。DMA offset 逐条装入 x10；x11 首次设置后仅在长度变化时更新。DSTORE 长度来自 OBJ.len，生成代码检查 span 长度一致。

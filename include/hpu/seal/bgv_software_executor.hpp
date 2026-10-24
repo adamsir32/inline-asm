@@ -16,6 +16,7 @@ namespace hpu::seal_adapter {
 // image consumed by codegen and relocation. The executor reads prepared
 // plaintexts, ciphertexts, keys, constants, and twiddles from the image and
 // never calls seal::Evaluator; modified-SEAL remains an independent oracle.
+// Internal coefficient workspaces use bit-reversed physical positions.
 class BgvSoftwareExecutor {
 public:
     BgvSoftwareExecutor(

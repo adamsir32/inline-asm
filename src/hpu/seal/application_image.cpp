@@ -116,7 +116,7 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
         const std::string prefix = "constants/twiddle/canonical/mod"
             + std::to_string(basis);
 
-        const auto pre_twist = hpu::model::pack_online_pmul_parameters(
+        const auto pre_twist = hpu::model::pack_bit_reversed_online_pmul_parameters(
             1, psi, prepared.modulus, degree);
         prepared.pre_twist = image_.add(
             prefix + "/ntt/pre_twist", pre_twist,
@@ -139,10 +139,11 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
                 hpu::model::pack_stage_twiddles(inverse.stages[stage], prepared.modulus, degree),
                 hpu::runtime::AllocationKind::twiddle, true).span);
         }
-        const auto post = hpu::model::pack_online_pmul_parameters(
-            hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), prepared.modulus),
-            hpu::model::inverse_mod_prime(psi, prepared.modulus),
-            prepared.modulus, degree);
+        const auto post = hpu::model::pack_online_pmul_factors(
+            hpu::model::inverse_post_factors(
+                inverse, hpu::model::inverse_mod_prime(psi, prepared.modulus),
+                prepared.modulus),
+            prepared.modulus);
         prepared.post_untwist_scale = image_.add(
             prefix + "/intt/post_untwist_scale", post,
             hpu::runtime::AllocationKind::twiddle, true).span;
@@ -641,13 +642,10 @@ CkksApplicationImageBuilder::add_fused_automorphism_twiddles(
                     tables[basis].post_untwist_scale.size()),
                 hpu::runtime::AllocationKind::twiddle, true).span);
         }
-        // Modified-root inverse transforms use the same geometric online
-        // post factor, with the Galois-specific inverse root.
-        const auto degree = tables[basis].post_untwist_scale.size();
-        const auto post = hpu::model::pack_online_pmul_parameters(
-            hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), prepared.modulus),
-            hpu::model::inverse_mod_prime(prepared.modified_psi, prepared.modulus),
-            prepared.modulus, degree);
+        // Preserve the generator's complete lazy-scale and untwist factor
+        // in the raw inverse transform's bit-reversed coefficient positions.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            tables[basis].post_untwist_scale, prepared.modulus);
         prepared.post_untwist_scale = image_.add(
             prefix + "/post_untwist_scale",
             post,

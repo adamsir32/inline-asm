@@ -381,27 +381,30 @@ SEAL oracle 独立使用导入输入和图操作计算。逐指令模型解码 `
 
 ### 8.2 NTT 软件契约
 
-`execute_ntt_stage` 执行供应表所指定的一个 raw loader/BF/P stage。逐指令层提供
-两个功能软件契约：
+`execute_ntt_stage` 执行供应表指定的一个 raw loader/BF/P stage。默认生产镜像采用
+`physical[j]=natural[BR(j)]` 的系数域布局，NTT 域保留既有 canonical physical 布局。
+自然系数仅在 SEAL 导入/导出边界转换，内部系数计算始终按同一 BR 索引对齐。
 
 | `InstructionNttContract` | 行为 |
 | --- | --- |
-| `natural_coefficient_boundaries` | 默认；PNTT stage 0 的 raw stage 前做数学边界 BR，最后一个 PINTT raw stage 后做数学边界 BR，完整变换以自然位置读写系数 |
-| `legacy_raw_stage` | 保留旧 loader/BF/P stage，不增加整体边界转换；正向入口使用 BR 系数 |
+| `raw_bit_reversed_coefficients` | 默认；原样执行 raw stage，显式 BR 系数与 pre/post 因子，不增加隐含 BR |
+| `natural_coefficient_boundaries` | 历史自然镜像回放；正向入口/逆向出口增加软件边界 BR |
+| `legacy_raw_stage` | 历史 raw stage 回放；无整体 BR |
 
-两个契约都逐位置执行 PMUL，原样消费 DMA 和表。默认契约中的 BR 为软件数学
-边界转换，不额外编码 BR 指令。三方案 builder 与 SoftwareExecutor 使用相同的
-自然系数 pre/post 索引，twist、untwist 和归一化由显式 PMUL 完成。
+三个 profile 都逐位置执行 PMUL，不因切换 profile 转换镜像。
+BR 数据及 BR 因子一起前移到软件打包阶段，等价于自然序预乘后再 BR；因子乘法本身
+不能置换系数。post 由完整 raw inverse 后乘表生成，保留 lazy-scale 与归一化。
+修订依据见 [2026-10-24 布局适配](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)。
 
 当前 stage DMA 使用固定 512 B 的 K=8 在线生成参数。镜像构建时，公共
 `pack_stage_twiddles` 从完整物理 oracle 表提取 U/V/R 并重构全表校验；逐指令层和
 算子 SoftwareExecutor 从实际 DMA 参数调用 `expand_stage_twiddles`，再交给原
 raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生产 src2 payload。
 独立 pre/post PMUL 使用 `hpu-pmul-online-k8-v1` 两行几何模板，由对象模式
-`MODE=1` 递推 `c*r^j`；B=N/64，不同于 stage 的 N/128。post 含一次 N^-1，
+`MODE=1` 按 U/V/R 递推 BR 物理因子；B=N/64，不同于 stage 的 N/128。post 保留完整 lazy-scale 修正和一次归一化，
 不再加载完整 pre/post 向量。stage 与 PMUL 模板共享默认 14 个 Bank 5 槽，
 在线 PMUL 参数只在启动时读取，不计入结果放置的持续读成本。
-前端 API 与 pre/post 数学边界保持不变；当前使用六位对象编码，参数以 MOD=0、
+前端 API 保持不变，内部系数及 pre/post 索引改为 BR；当前使用六位对象编码，参数以 MOD=0、
 显式 mask=0x20 放入 Bank 5；普通 bank 按 128-line 单元分配。应用交付编译在
 最终布局确定后按 `AllocationKind::twiddle` 设置 DMA：twiddle DLOAD 为 CP=1，
 其他 DLOAD 与全部 DSTORE 为 CP=0，覆盖 stage 参数、在线 pre/post 模板和编译器
@@ -413,7 +416,7 @@ raw stage 数学模型。完整表 API 保留为离线 oracle，不再作为生�
 [编程手册的变换契约](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，
 数据 ABI 与旧包迁移见
 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
-选择回放契约不修改镜像、DMA 或指令，新自然镜像使用 legacy profile 可能比较失败。
+选择回放契约不修改镜像、DMA 或指令；新 BR 镜像使用 natural profile 会重复重排。
 
 完整往返正确不能单独证明正向谱正确；验证应包含独立求值或 SEAL oracle，检查
 canonical 与 modified-root 路径。实际测试规模和结果以测试日志、各包报告为准。

@@ -146,15 +146,19 @@ int main()
                 twiddles.modulus, spec.poly_modulus_degree);
             const auto inverse_psi = hpu::model::inverse_mod_prime(
                 twiddles.canonical_psi, twiddles.modulus);
-            const auto inverse_n = hpu::model::inverse_mod_prime(
-                static_cast<std::uint32_t>(spec.poly_modulus_degree), twiddles.modulus);
+            std::vector<std::uint32_t> exponents(spec.poly_modulus_degree);
+            for (std::size_t index = 0; index < exponents.size(); ++index) {
+                exponents[index] = static_cast<std::uint32_t>(index);
+            }
+            exponents = hpu::model::bit_reverse_coefficients(exponents);
             for (std::size_t index = 0; index < pre.size(); ++index) {
                 require(pre[index] == hpu::model::pow_mod(
-                            twiddles.canonical_psi, index, twiddles.modulus) &&
+                            twiddles.canonical_psi, exponents[index], twiddles.modulus) &&
                             post[index] == static_cast<std::uint32_t>(
-                                (static_cast<std::uint64_t>(inverse_n) * hpu::model::pow_mod(
-                                    inverse_psi, index, twiddles.modulus)) % twiddles.modulus),
-                        "CKKS online-PMUL template changed pre/post factors");
+                                (static_cast<std::uint64_t>(inverse.post_scale[index]) *
+                                 hpu::model::pow_mod(inverse_psi, exponents[index],
+                                                     twiddles.modulus)) % twiddles.modulus),
+                        "CKKS online-PMUL template lost bit-reversed pre/post factors");
             }
             for (std::size_t stage = 0; stage < forward.size(); ++stage) {
                 require(hpu::model::expand_stage_twiddles(
@@ -176,13 +180,17 @@ int main()
                 twiddles.modulus, spec.poly_modulus_degree);
             const auto inverse_psi = hpu::model::inverse_mod_prime(
                 twiddles.modified_psi, twiddles.modulus);
-            const auto inverse_n = hpu::model::inverse_mod_prime(
-                static_cast<std::uint32_t>(spec.poly_modulus_degree), twiddles.modulus);
+            std::vector<std::uint32_t> exponents(spec.poly_modulus_degree);
+            for (std::size_t index = 0; index < exponents.size(); ++index) {
+                exponents[index] = static_cast<std::uint32_t>(index);
+            }
+            exponents = hpu::model::bit_reverse_coefficients(exponents);
             for (std::size_t index = 0; index < post.size(); ++index) {
                 require(post[index] == static_cast<std::uint32_t>(
-                            (static_cast<std::uint64_t>(inverse_n) * hpu::model::pow_mod(
-                                inverse_psi, index, twiddles.modulus)) % twiddles.modulus),
-                        "CKKS Galois online-PMUL template lost its modified root");
+                            (static_cast<std::uint64_t>(inverse.post_scale[index]) *
+                             hpu::model::pow_mod(inverse_psi, exponents[index],
+                                                 twiddles.modulus)) % twiddles.modulus),
+                        "CKKS Galois online-PMUL template lost its physical correction");
             }
             for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage) {
                 require(hpu::model::expand_stage_twiddles(

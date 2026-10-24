@@ -73,7 +73,7 @@ void arithmetic_and_dma()
     const std::vector<HpuMemSpan> spans{table.span, a.span, b.span, output.span};
     const auto result = hpu::model::execute_instructions(instructions, spans, image);
     require(result.report.completed(), "encoded arithmetic execution failed");
-    require(result.report.ntt_contract == InstructionNttContract::natural_coefficient_boundaries
+    require(result.report.ntt_contract == InstructionNttContract::raw_bit_reversed_coefficients
                 && result.report.forward_boundary_conversions == 0
                 && !result.report.hardware_contract_verified,
             "software completion was confused with hardware contract verification");
@@ -181,7 +181,7 @@ void supplied_stages(std::size_t degree)
 
     HpuMemImage image(4096);
     const auto table = image.add("moduli", modulus_record(kModulus), AllocationKind::modulus_table);
-    const auto data = image.add("input", input, AllocationKind::ciphertext);
+    const auto data = image.add("input", hpu::model::bit_reverse_coefficients(input), AllocationKind::ciphertext);
     std::vector<HpuMemSpan> spans{table.span, data.span};
     std::ostringstream body;
     body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n";
@@ -196,8 +196,9 @@ void supplied_stages(std::size_t degree)
     const auto instructions = hpu::assemble_source(body.str());
     const auto execution = hpu::model::execute_instructions(instructions, spans, image);
     require(execution.report.completed(), "supplied forward instruction chain failed");
-    require(execution.report.forward_boundary_conversions == 1,
-            "natural forward contract did not report its boundary conversion");
+    require(execution.report.forward_boundary_conversions == 0
+                && execution.report.ntt_contract == InstructionNttContract::raw_bit_reversed_coefficients,
+            "raw forward contract introduced a hidden boundary conversion");
     require(execution.report.peak_regular_banks == 2, "transform output region was not accounted");
     require(hpu::model::compare_instruction_memory(execution, {{"output", output.span, expected_forward}}).verified,
             "encoded stages ignored actual supplied twiddles/input permutation");
@@ -323,7 +324,7 @@ void forward_twist_layout_contract()
         require(result.report.ntt_contract == contract && !result.report.hardware_contract_verified,
                 "contract selection or hardware status was not preserved");
         require(result.report.forward_boundary_conversions
-                    == (contract != InstructionNttContract::legacy_raw_stage ? 1U : 0U),
+                    == (contract == InstructionNttContract::natural_coefficient_boundaries ? 1U : 0U),
                 "forward contract applied an unreported boundary conversion");
         require(result.report.message.find(hpu::model::instruction_ntt_contract_name(contract))
                     != std::string::npos,
@@ -333,7 +334,7 @@ void forward_twist_layout_contract()
     };
     require(run(natural, natural_twist, InstructionNttContract::natural_coefficient_boundaries) == expected,
             "natural coefficient boundaries disagree with the independent monomial oracle");
-    require(run(physical, physical_twist, InstructionNttContract::legacy_raw_stage) == expected,
+    require(run(physical, physical_twist, InstructionNttContract::raw_bit_reversed_coefficients) == expected,
             "physical coefficients/twist disagree with monomial oracle");
     require(run(natural, natural_twist, InstructionNttContract::legacy_raw_stage) != expected,
             "raw stage contract silently performed a natural coefficient conversion");
@@ -348,11 +349,11 @@ void forward_twist_layout_contract()
 void inverse_boundary_contract()
 {
     // Construct the monomial spectrum directly, rather than by round-tripping
-    // the implementation under test. The legacy raw profile retains the raw
+    // the implementation under test. The production raw profile retains the raw
     // inverse result c[BR(p)]; the mathematical API returns c[p].
-    constexpr std::size_t degree = 128;
-    constexpr std::uint32_t q = 65537;
-    constexpr std::uint32_t psi = 282;
+    constexpr std::size_t degree = 1024;
+    constexpr std::uint32_t q = 134072321;
+    constexpr std::uint32_t psi = 58811;
     hpu::model::HardwareNttModel model(degree, q, hpu::model::pow_mod(psi, 2, q));
     const auto layout = model.forward_layout();
     const auto tables = model.inverse_twiddles();
@@ -370,7 +371,7 @@ void inverse_boundary_contract()
             "mathematical inverse does not return the independent natural-order monomial");
     require(physical != natural, "inverse contract probe does not distinguish the two layouts");
 
-    HpuMemImage image(128);
+    HpuMemImage image(256);
     const auto moduli = image.add("moduli", modulus_record(q), AllocationKind::modulus_table);
     const auto input = image.add("input", spectrum, AllocationKind::ciphertext);
     std::vector<HpuMemSpan> spans{moduli.span, input.span};
@@ -380,14 +381,14 @@ void inverse_boundary_contract()
         spans.push_back(image.add("inverse/" + std::to_string(s), hpu::model::pack_stage_twiddles(tables.stages[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 0, 0, 32\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
-    spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
+    spans.push_back(image.add("post", hpu::model::pack_online_pmul_factors(post, q), AllocationKind::twiddle).span);
     const auto output = image.reserve("output", degree, AllocationKind::output);
     spans.push_back(output.span);
-    body << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+    body << "dload x10, x11, p1, 0, 1, 32\npmul p0, p0, p1, 1\npfree p1\n"
          << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     const auto instructions = hpu::assemble_source(body.str());
     hpu::model::InstructionExecutionOptions options;
-    options.ntt_contract = InstructionNttContract::legacy_raw_stage;
+    options.ntt_contract = InstructionNttContract::raw_bit_reversed_coefficients;
     const auto execution = hpu::model::execute_instructions(instructions, spans, image, options);
     require(hpu::model::compare_instruction_memory(execution, {{"physical", output.span, physical}}).verified,
             "raw PINTT/post did not produce the independent physical-order monomial");
@@ -399,7 +400,7 @@ void inverse_boundary_contract()
             "raw inverse execution invented a boundary conversion or hardware proof");
 }
 
-void natural_negacyclic_convolution(std::size_t degree)
+void raw_online_negacyclic_convolution(std::size_t degree)
 {
     constexpr std::uint32_t q = 65537;
     const auto psi = hpu::model::pow_mod(3, (q - 1U) / (2 * degree), q);
@@ -437,15 +438,19 @@ void natural_negacyclic_convolution(std::size_t degree)
         }
     }
     HpuMemImage image(1024);
+    const auto physical_input = hpu::model::bit_reverse_coefficients(input);
+    const auto physical_pre = hpu::model::bit_reverse_coefficients(pre);
+    const auto physical_post = hpu::model::bit_reverse_coefficients(post);
+    const auto physical_squared = hpu::model::bit_reverse_coefficients(squared);
     const auto moduli = image.add("moduli", modulus_record(q), AllocationKind::modulus_table);
-    const auto data = image.add("input", input, AllocationKind::ciphertext);
-    const auto pre_factor = image.add("pre", pre, AllocationKind::twiddle);
+    const auto data = image.add("input", physical_input, AllocationKind::ciphertext);
+    const auto pre_factor = image.add("pre", hpu::model::pack_online_pmul_factors(physical_pre, q), AllocationKind::twiddle);
     const auto ntt_output = image.reserve("ntt/output", degree, AllocationKind::output);
     const auto output = image.reserve("square/output", degree, AllocationKind::output);
     std::vector<HpuMemSpan> spans{moduli.span, data.span, pre_factor.span};
     std::ostringstream body;
     body << "dload x10, x11, p4, 1, 0, 32\npmodld 0\ndload x10, x11, p0, 0, 0, 0\n"
-         << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n";
+         << "dload x10, x11, p1, 0, 1, 32\npmul p0, p0, p1, 1\npfree p1\n";
     for (std::size_t s = 0; s < forward.size(); ++s) {
         spans.push_back(image.add("ntt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(forward[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 0, 0, 32\npntt p0, p1, " << s << ", 0, 0\npfree p1\n";
@@ -457,28 +462,28 @@ void natural_negacyclic_convolution(std::size_t degree)
         spans.push_back(image.add("intt/stage/" + std::to_string(s), hpu::model::pack_stage_twiddles(inverse.stages[s], q, degree), AllocationKind::twiddle).span);
         body << "dload x10, x11, p1, 0, 0, 32\npintt p0, p1, " << s << ", 0, 0\npfree p1\n";
     }
-    spans.push_back(image.add("post", post, AllocationKind::twiddle).span);
+    spans.push_back(image.add("post", hpu::model::pack_online_pmul_factors(physical_post, q), AllocationKind::twiddle).span);
     spans.push_back(output.span);
-    body << "dload x10, x11, p1, 0, 0, 0\npmul p0, p0, p1\npfree p1\n"
+    body << "dload x10, x11, p1, 0, 1, 32\npmul p0, p0, p1, 1\npfree p1\n"
          << "dstore x10, x11, p0, 1, 0\npfree p4\npsync\n";
     const auto program = hpu::assemble_source(body.str());
     const auto execution = hpu::model::execute_instructions(program, spans, image);
     require(hpu::model::compare_instruction_memory(execution,
-        {{"odd-root evaluations", ntt_output.span, spectrum}, {"schoolbook square", output.span, squared}}).verified,
-        "natural boundary instruction stream differs from independent polynomial or convolution oracle");
-    require(execution.report.forward_boundary_conversions == 1
-                && execution.report.inverse_boundary_conversions == 1
+        {{"odd-root evaluations", ntt_output.span, spectrum}, {"schoolbook square", output.span, physical_squared}}).verified,
+        "raw online instruction stream differs from independent polynomial or convolution oracle");
+    require(execution.report.forward_boundary_conversions == 0
+                && execution.report.inverse_boundary_conversions == 0
                 && !execution.report.hardware_contract_verified,
-            "natural transform boundaries or hardware evidence were reported incorrectly");
+            "raw transform boundaries or hardware evidence were reported incorrectly");
     std::vector<std::uint32_t> misplaced_post(degree);
     for (std::size_t p = 0; p < degree; ++p)
-        misplaced_post[p] = post[bit_reverse(p, degree)];
+        misplaced_post[p] = post[p];
     auto wrong_spans = spans;
     wrong_spans[wrong_spans.size() - 2] =
-        image.add("misplaced_post", misplaced_post, AllocationKind::twiddle).span;
+        image.add("misplaced_post", hpu::model::pack_online_pmul_factors(misplaced_post, q), AllocationKind::twiddle).span;
     const auto wrong = hpu::model::execute_instructions(program, wrong_spans, image);
     require(wrong.report.completed()
-                && !hpu::model::compare_instruction_memory(wrong, {{"square", output.span, squared}}).verified,
+                && !hpu::model::compare_instruction_memory(wrong, {{"square", output.span, physical_squared}}).verified,
             "instruction model silently repaired a post factor with the wrong coefficient order");
 }
 
@@ -779,8 +784,9 @@ int main()
         pre_twist_is_pointwise();
         forward_twist_layout_contract();
         inverse_boundary_contract();
-        natural_negacyclic_convolution(128);
-        natural_negacyclic_convolution(256);
+        raw_online_negacyclic_convolution(128);
+        raw_online_negacyclic_convolution(256);
+        raw_online_negacyclic_convolution(1024);
         stage_parameter_context_switches();
         packed_64_object_capacity();
         ordinary_twiddle_load_contract();

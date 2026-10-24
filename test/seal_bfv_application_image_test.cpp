@@ -84,7 +84,8 @@ void require_fused_automorphism(
     const std::size_t degree = input.components.front().degree;
     require(!tables.empty(), "BFV fused automorphism tables are empty");
     const auto& table = tables.front();
-    const auto coefficients = span_words(image, input.components.front().limbs.front(), degree);
+    const auto coefficients = hpu::model::bit_reverse_coefficients(
+        span_words(image, input.components.front().limbs.front(), degree));
     const auto canonical_ntt =
         hpu::model::negacyclic_forward(coefficients, table.modulus, table.canonical_psi);
     hpu::model::HardwareNttModel model(
@@ -99,9 +100,9 @@ void require_fused_automorphism(
     }
     require(table.post_untwist_scale.line_count == hpu::model::kOnlinePmulParameterLines,
             "BFV fused post factor must use two online-PMUL parameter lines");
-    inverse.set_natural_post_scale(hpu::model::expand_online_pmul_factors(
+    inverse.post_scale = hpu::model::expand_online_pmul_factors(
         span_words(image, table.post_untwist_scale, hpu::model::kOnlinePmulParameterWords),
-        table.modulus, degree));
+        table.modulus, degree);
     const auto actual = model.inverse(canonical_ntt, inverse);
     const auto expected =
         hpu::model::automorphism_coefficients(coefficients, galois_element, table.modulus);
@@ -208,14 +209,17 @@ int main()
                 twiddles.modulus, spec.poly_modulus_degree);
             const auto inverse_psi = hpu::model::inverse_mod_prime(
                 twiddles.canonical_psi, twiddles.modulus);
-            const auto inverse_n = hpu::model::inverse_mod_prime(
-                static_cast<std::uint32_t>(spec.poly_modulus_degree), twiddles.modulus);
+            std::vector<std::uint32_t> natural_pre(spec.poly_modulus_degree);
+            for (std::size_t index = 0; index < natural_pre.size(); ++index) {
+                natural_pre[index] = hpu::model::pow_mod(
+                    twiddles.canonical_psi, index, twiddles.modulus);
+            }
+            const auto expected_pre = hpu::model::bit_reverse_coefficients(natural_pre);
+            const auto expected_post = hpu::model::inverse_post_factors(
+                inverse, inverse_psi, twiddles.modulus);
             for (std::size_t index = 0; index < pre.size(); ++index) {
-                require(pre[index] == hpu::model::pow_mod(
-                            twiddles.canonical_psi, index, twiddles.modulus) &&
-                            post[index] == multiply_mod(inverse_n, hpu::model::pow_mod(
-                                inverse_psi, index, twiddles.modulus), twiddles.modulus),
-                        "BFV online-PMUL parameters changed pre/post factors");
+                require(pre[index] == expected_pre[index] && post[index] == expected_post[index],
+                        "BFV online-PMUL parameters lost physical pre/post layout or lazy scaling");
             }
             for (std::size_t stage = 0; stage < forward.size(); ++stage) {
                 require(twiddles.forward_stages[stage].line_count ==
@@ -262,8 +266,8 @@ int main()
                 expected_input[index] = static_cast<std::uint32_t>(
                     ciphertext.data(0)[basis * spec.poly_modulus_degree + index]);
             }
-            require(input_words == expected_input,
-                    "BFV coefficient-domain ciphertext image differs from SEAL");
+            require(input_words == hpu::model::bit_reverse_coefficients(expected_input),
+                    "BFV coefficient-domain ciphertext image is not per-limb bit reversed SEAL");
         }
 
         ::seal::Evaluator evaluator(*bundle.context);
@@ -280,7 +284,8 @@ int main()
                 expected_delta[index] = static_cast<std::uint32_t>((after + q - before) % q);
             }
             require(allocation_words(builder.image(), "plain/add_subtract/c0/mod" +
-                                                          std::to_string(basis)) == expected_delta,
+                                                          std::to_string(basis)) ==
+                        hpu::model::bit_reverse_coefficients(expected_delta),
                     "prepared BFV Add/Sub plaintext differs from SEAL Delta*m");
         }
 

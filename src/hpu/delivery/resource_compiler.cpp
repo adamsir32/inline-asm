@@ -123,7 +123,7 @@ std::string compile_application_resources(
         if (allocation.kind == Kind::ciphertext && allocation.read_only)
             options.buffer_layouts.emplace(allocation.id,
                 request.scheme == hpu::delivery::SchemeKind::bfv
-                    ? Layout::coefficient_natural : Layout::canonical_ntt_physical);
+                    ? Layout::coefficient_bit_reversed : Layout::canonical_ntt_physical);
         else if (allocation.kind == Kind::evaluation_key
             || (allocation.kind == Kind::plaintext
                 && request.scheme != hpu::delivery::SchemeKind::bfv))
@@ -136,7 +136,9 @@ std::string compile_application_resources(
         const auto& allocation = containing_allocation(image, output.destination);
         options.required_outputs.insert(allocation.id);
         const auto layout = output.domain == hpu::delivery::OutputDomain::coefficient
-            ? Layout::coefficient_natural : Layout::canonical_ntt_physical;
+            ? Layout::coefficient_natural
+            : output.domain == hpu::delivery::OutputDomain::coefficient_bit_reversed
+                ? Layout::coefficient_bit_reversed : Layout::canonical_ntt_physical;
         const auto inserted = options.buffer_layouts.emplace(allocation.id, layout);
         if (!inserted.second && inserted.first->second != layout)
             throw std::invalid_argument("conflicting output buffer layouts: " + allocation.id);
@@ -153,6 +155,21 @@ std::string compile_application_resources(
     }
     auto source = *request.program.operator_program;
     if (!dma.empty()) source.bind_ports(dma);
+    // Immutable inputs have one layout for their entire lifetime. Mutable
+    // transform scratch crosses domains and must not receive a permanent tag.
+    for (auto& port : source.ports) {
+        if (!port.binding || !port.load) continue;
+        const auto& allocation = image.allocation(port.binding->allocation_id);
+        if (!allocation.read_only) continue;
+        if (port.layout != Layout::unspecified) {
+            const auto inserted = options.buffer_layouts.emplace(allocation.id, port.layout);
+            if (!inserted.second && inserted.first->second != port.layout)
+                throw std::invalid_argument("conflicting input buffer layouts: " + allocation.id);
+        } else {
+            const auto found = options.buffer_layouts.find(allocation.id);
+            if (found != options.buffer_layouts.end()) port.layout = found->second;
+        }
+    }
     const auto compile_candidate = [&](const hpu::resource::OperatorProgram& native,
                                        bool optimized, const char* name) {
         auto candidate_options = options;

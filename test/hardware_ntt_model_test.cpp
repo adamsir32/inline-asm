@@ -312,6 +312,101 @@ void test_hardware_migration_checkpoint()
             "IT stage eleven differs from hardware migration checkpoints");
 }
 
+void test_bit_reversed_online_parameters()
+{
+    for (std::size_t degree = 128; degree <= 65536; degree <<= 1U) {
+        const auto psi = psi_for(degree);
+        const auto omega = multiply_mod(psi, psi, kModulus);
+        const hpu::model::HardwareNttModel model(degree, kModulus, omega);
+        const auto inverse = model.inverse_twiddles();
+        std::vector<std::uint32_t> natural(degree);
+        auto value = 1U;
+        for (auto& factor : natural) {
+            factor = value;
+            value = multiply_mod(value, psi, kModulus);
+        }
+        const auto physical = hpu::model::bit_reverse_coefficients(natural);
+        require(hpu::model::bit_reverse_coefficients(physical) == natural,
+                "coefficient layout conversion is not involutive");
+        const auto packed = hpu::model::pack_bit_reversed_online_pmul_parameters(
+            1, psi, kModulus, degree);
+        require(packed == hpu::model::pack_online_pmul_factors(physical, kModulus)
+                    && hpu::model::expand_online_pmul_factors(packed, kModulus, degree) == physical,
+                "bit-reversed pre factors differ from the complete mathematical vector");
+        const auto post = hpu::model::inverse_post_factors(
+            inverse, hpu::model::inverse_mod_prime(psi, kModulus), kModulus);
+        const auto post_parameters = hpu::model::pack_online_pmul_factors(post, kModulus);
+        require(post_parameters[0] == inverse.post_scale[0] && post_parameters[0] != 1
+                    && hpu::model::expand_online_pmul_factors(post_parameters, kModulus, degree) == post,
+                "inverse post packing lost scale correction or changed the complete vector");
+
+        // Test every lane rather than just line starts: a single irregular
+        // factor outside U must be rejected by complete recurrence validation.
+        auto irregular = physical;
+        irregular[64 + 17] = irregular[64 + 17] == kModulus - 1 ? 1 : irregular[64 + 17] + 1;
+        require_invalid([&] { hpu::model::pack_online_pmul_factors(irregular, kModulus); },
+                        "exact online packing skipped full-vector reconstruction");
+    }
+    constexpr std::uint32_t q = 134072321;
+    constexpr std::uint32_t psi = 58811;
+    constexpr std::size_t degree = 1024;
+    const auto packed = hpu::model::pack_bit_reversed_online_pmul_parameters(1, psi, q, degree);
+    require(packed[1] == hpu::model::pow_mod(psi, 512, q) && packed[71] == psi,
+            "N1024 layout handoff U[1]/R[0] checkpoint differs");
+    const std::vector<unsigned> v_exponents{8, 4, 12, 2, 10, 6, 14};
+    for (std::size_t i = 0; i < v_exponents.size(); ++i)
+        require(packed[64 + i] == hpu::model::pow_mod(psi, v_exponents[i], q),
+                "N1024 layout handoff V exponent differs");
+    auto invalid = std::vector<std::uint32_t>(128, 1);
+    invalid[19] = 0;
+    require_invalid([&] { hpu::model::pack_online_pmul_factors(invalid, q); },
+                    "exact factor packing accepted a zero factor");
+    invalid[19] = q;
+    require_invalid([&] { hpu::model::pack_online_pmul_factors(invalid, q); },
+                    "exact factor packing accepted a noncanonical factor");
+    invalid.resize(192, 1);
+    require_invalid([&] { hpu::model::pack_online_pmul_factors(invalid, q); },
+                    "exact factor packing accepted a non-power-of-two degree");
+    require_invalid([&] { hpu::model::bit_reverse_coefficients({}); },
+                    "coefficient bit reversal accepted an empty polynomial");
+    require_invalid([&] { hpu::model::bit_reverse_coefficients({1, 2, 3}); },
+                    "coefficient bit reversal accepted an invalid degree");
+}
+
+void test_raw_multiply_by_x()
+{
+    constexpr std::size_t degree = 1024;
+    constexpr std::uint32_t q = 134072321;
+    constexpr std::uint32_t psi = 58811;
+    const hpu::model::HardwareNttModel model(degree, q, multiply_mod(psi, psi, q));
+    const auto forward = model.forward_twiddles();
+    const auto inverse = model.inverse_twiddles();
+    const auto layout = model.forward_layout();
+    std::vector<std::uint32_t> input(degree), expected(degree);
+    for (std::size_t i = 0; i < degree; ++i)
+        input[i] = static_cast<std::uint32_t>((i * i + 17 * i + 3) % q);
+    for (std::size_t i = 1; i < degree; ++i) expected[i] = input[i - 1];
+    expected[0] = input.back() == 0 ? 0 : q - input.back();
+    auto words = hpu::model::bit_reverse_coefficients(input);
+    const auto pre = hpu::model::expand_online_pmul_factors(
+        hpu::model::pack_bit_reversed_online_pmul_parameters(1, psi, q, degree), q, degree);
+    for (std::size_t i = 0; i < degree; ++i) words[i] = multiply_mod(words[i], pre[i], q);
+    for (std::size_t stage = 0; stage < forward.size(); ++stage)
+        words = hpu::model::execute_ntt_stage(words, forward[stage], q, stage);
+    // X evaluated at every independent odd root. No forward transform of a
+    // second input and no round-trip oracle can conceal a layout mismatch.
+    for (std::size_t i = 0; i < degree; ++i)
+        words[i] = multiply_mod(words[i], hpu::model::pow_mod(psi, 2 * layout[i] + 1, q), q);
+    for (std::size_t stage = 0; stage < inverse.stages.size(); ++stage)
+        words = hpu::model::execute_ntt_stage(words, inverse.stages[stage], q, stage, true);
+    const auto post = hpu::model::expand_online_pmul_factors(
+        hpu::model::pack_online_pmul_factors(hpu::model::inverse_post_factors(
+            inverse, hpu::model::inverse_mod_prime(psi, q), q), q), q, degree);
+    for (std::size_t i = 0; i < degree; ++i) words[i] = multiply_mod(words[i], post[i], q);
+    require(hpu::model::bit_reverse_coefficients(words) == expected,
+            "raw BR-layout NTT/INTT multiply-by-X differs from signed coefficient shift");
+}
+
 } // namespace
 
 int main()
@@ -337,6 +432,8 @@ int main()
         test_stage_parameters(65536, 4293918721U, 5);
         test_stage_parameter_validation();
         test_hardware_migration_checkpoint();
+        test_bit_reversed_online_parameters();
+        test_raw_multiply_by_x();
         std::cout << "HPU NTT model tests passed, including N=65536 and fused automorphism\n";
         return 0;
     } catch (const std::exception& error) {

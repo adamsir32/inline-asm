@@ -119,9 +119,10 @@ inline Fixture transform_fixture(bool inverse)
             inverse ? inverse_tables.stages[stage] : forward[stage], modulus, degree), AllocationKind::twiddle);
         tables.push_back(id);
     }
-    const auto factors = hpu::model::pack_online_pmul_parameters(
-        inverse ? hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), modulus) : 1,
-        inverse ? inverse_psi : psi, modulus, degree);
+    const auto factors = inverse
+        ? hpu::model::pack_online_pmul_factors(
+            hpu::model::inverse_post_factors(inverse_tables, inverse_psi, modulus), modulus)
+        : hpu::model::pack_bit_reversed_online_pmul_parameters(1, psi, modulus, degree);
     const std::string factor_id = inverse ? "tables/post" : "tables/pre";
     image.add(factor_id, factors, AllocationKind::twiddle);
     std::map<std::string, ResolvedDma> table_ports;
@@ -139,10 +140,11 @@ inline Fixture transform_fixture(bool inverse)
         const auto output_id = "output/" + std::to_string(i);
         const auto natural = coefficients(i + 1);
         auto spectrum = hpu::model::negacyclic_forward(natural, modulus, psi);
-        image.add(input_id, inverse ? spectrum : natural, AllocationKind::constant);
+        const auto physical_coefficients = hpu::model::bit_reverse_coefficients(natural);
+        image.add(input_id, inverse ? spectrum : physical_coefficients, AllocationKind::constant);
         image.reserve(output_id, degree, AllocationKind::output);
         outputs.insert(output_id);
-        expected.emplace_back(output_id, inverse ? natural : spectrum);
+        expected.emplace_back(output_id, inverse ? physical_coefficients : spectrum);
         r::input(data, binding(image, input_id), hpu::DataType::poly);
         const auto prefix = "transform/" + std::to_string(i) + (inverse ? "/inverse" : "/forward");
         if (inverse) generate_hpu_intt_body_asm(degree, data, table, false, prefix);
@@ -176,7 +178,7 @@ inline hpu::delivery::ApplicationPackageRequest package_request(
     request.initial_image = &fixture.image;
     request.program.stem = stem;
     request.program.operator_program = std::make_shared<r::OperatorProgram>(fixture.program);
-    const auto domain = kernel == "intt" ? hpu::delivery::OutputDomain::coefficient
+    const auto domain = kernel == "intt" ? hpu::delivery::OutputDomain::coefficient_bit_reversed
                                          : hpu::delivery::OutputDomain::canonical_ntt_physical;
     for (std::size_t i = 0; i < fixture.expected.size(); ++i) {
         const auto& output = fixture.expected[i];
@@ -187,11 +189,19 @@ inline hpu::delivery::ApplicationPackageRequest package_request(
     }
     request.parameters_json = "{\"poly_modulus_degree\":8192,\"test_layer\":\"native_ring_arithmetic\","
         "\"encrypted\":false,\"seal_differential_oracle\":false,\"deterministic_seed\":1,"
+        "\"ntt_table_abi\":{\"version\":4,\"coefficient_order\":\"bit_reversed\","
+        "\"external_coefficient_order\":\"natural\",\"pre_twist_order\":\"bit_reversed\","
+        "\"post_factor_order\":\"bit_reversed\",\"stage_twiddle_order\":\"reference_loader_batch_lane\","
+        "\"stage_twiddle_format\":\"hpu-twiddle-k8-v1\",\"twiddle_chains\":8,\"stage_parameter_lines\":2,"
+        "\"online_pmul_format\":\"hpu-pmul-online-k8-v1\",\"online_pmul_parameter_lines\":2,"
+        "\"online_pmul_mode\":1,\"online_pmul_parameter_bank_mask\":32,"
+        "\"canonical_ntt_layout\":\"reference_forward_layout\",\"normalization\":\"explicit_post_pmul\","
+        "\"twist_fused\":false},"
         "\"modulus_context_count\":" + std::string(kernel == "cmult" ? "4" : "1")
         + ",\"context_moduli\":" + std::string(kernel == "cmult"
             ? "[65537,65537,65537,65537]" : "[65537]")
         + ",\"input_domain\":\"" + std::string(kernel == "ntt"
-            ? "coefficient_natural" : "canonical_ntt_physical") + "\"}\n";
+            ? "coefficient_bit_reversed" : "canonical_ntt_physical") + "\"}\n";
     request.operation_graph_json = "{\"operation\":\"" + kernel
         + "\",\"ir\":\"bound_native_ssa\",\"observable_output_limbs\":"
         + std::to_string(request.outputs.size()) + "}\n";

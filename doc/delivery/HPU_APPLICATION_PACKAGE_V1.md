@@ -132,8 +132,8 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
   目标行范围、有效 word 数、padding 和校验和。每个 `AllocationKind::output`
   恰有一个 golden limb。前端只导出全部标记结果，无标记则导出最后计算结果；
   Plan 默认只导出最终结果。内部 scratch 的 dstore 不必有独立 golden。`step_<index>` 与计算图中的 `golden_object_id` 相连。
-- BFV golden 为 `coefficient`；CKKS/BGV 为 `canonical_ntt_physical`。
-  新应用包的系数域使用自然系数位置。所有 word 均为 `[0,q)` 的 residue，文件补零到完整 HPU line。
+- BFV golden 为 `coefficient_bit_reversed`；CKKS/BGV 为 `canonical_ntt_physical`。
+  新应用包的系数域按每个 limb 独立 BR 存放。所有 word 均为 `[0,q)` 的 residue，文件补零到完整 HPU line。
 - `parameters.json` 保存 N、plain modulus、安全等级、key-context 模数及各 level
   的 `parms_id`、Q 和 chain index。`operation_graph.json` 保存节点、输入引用、
   输出、level、scale/correction factor。节点的 `operation_index` 从 0 连续编号，
@@ -157,41 +157,45 @@ BGV 图接口和完整分支示例见 [BGV 应用说明](../examples/BGV_COMPOSE
 
 ### 新应用镜像的 NTT 表与软件边界
 
-BFV、CKKS、BGV 的新 builder 使用相同的自然系数表约定：
+自 2026-10-24 起，BFV、CKKS、BGV 统一采用 **BR 系数存储 ABI**。对每个
+多项式、每个模数分量分别转换：`physical[j] = natural[BR_logN(j)]`。
+对外 SEAL 系数接口仍使用自然序；NTT 域保持既有 canonical HPU physical 布局。
 
 ```text
-pre_twist[i] = psi^i mod q
-post_untwist_scale[i] = N^-1 * psi^-i mod q
+pre_hw[j]  = psi^BR(j) mod q
+post_hw[j] = raw_inverse.post_scale[j] * psi^(-BR(j)) mod q
+NTT : BR coefficient -> online pre PMUL -> raw PNTT stages -> canonical NTT
+INTT: canonical NTT -> raw PINTT stages -> online post PMUL -> BR coefficient
 ```
 
-`i` 为自然系数位置。原数学 oracle 的 `raw_inverse.post_scale[BR(i)]` 已包含
-lazy scale 抵消和 `N^-1`；目标 post 模板直接携带一次 `N^-1`，不重复归一化。
-modified-root INTT 使用该 root 的 raw inverse 表，并以 modified psi 代替 psi。
-各 stage 的完整数学 oracle 按 loader batch、batch 内 BF lane 顺序准备
-`N/2` 个因子，不对 stage 表做 BR，再压缩为两条 line 的 K=8 参数写入镜像。
-NTT 域的数据、明文和评估密钥保持 canonical HPU physical 顺序。
+post 从完整正确的 raw inverse 后乘表出发，保留 lazy-scale 抵消和一次归一化；
+modified-root INTT 使用对应 root 的完整表。不得只假设 post 等于 `N^-1*psi^-i`。
+pre/post 完整物理向量由 `pack_online_pmul_factors` 压缩，必须验证全量展开一致；
+无法精确压缩的参数直接报错。stage 表及其原有 loader/BF lane 顺序保持不变。
 
-Evaluator 前端默认的 `InstructionNttContract::natural_coefficient_boundaries` 在
-PNTT stage 0 的 raw stage 前做数学边界 BR，在最后 PINTT raw stage 后做数学边界
-BR；pre-twist 和 post-PMUL 通过在线模式显式执行。这是完整变换的功能软件契约，不声称复现
-RTL 每 stage 的地址。两个软件转换次数分别记录为
-`forward_boundary_conversions`、`inverse_boundary_conversions`，
-`hardware_contract_verified` 继续为 false。
+默认 `InstructionNttContract::raw_bit_reversed_coefficients` 只执行 raw stage，
+**不在 stage0 或末级额外 BR**。报告中的两个 `*_boundary_conversions` 均为 0。
+内部 INTT→系数运算→NTT 沿用 BR，无需 CPU/DDR 中途转换。
+`natural_coefficient_boundaries` 和 `legacy_raw_stage` 仅供显式兼容回放，切换 profile
+不会转换镜像；新 BR 镜像使用 natural profile 会重复重排。
+修订依据与硬件证据范围见 [布局适配原文](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)。
+主机通过不代表 RTL/硬件通过，`hardware_contract_verified` 继续为 false。
 
-`legacy_raw_stage` 可回放历史 raw 镜像。选择 profile 不修改数据、DMA 或指令，
-新自然镜像使用 legacy profile 可能
-比较失败。`test/reference/main.cpp` 仅保留为内部历史数学差分 fixture；其 BR 数据
-不能当作应用包镜像，原直接汇编交付入口已经移除。
+BFV 和原生 INTT 的 `golden_manifest.csv.domain=coefficient_bit_reversed`：目标读回
+物理 word 可直接逐字比较 golden；需要自然系数时，对每个 limb 解码 BR。
+`coefficient` 保留表示历史自然系数输出。golden 的数学值仍来自独立 oracle，
+只有交付时的排列转换；CKKS/BGV 的 NTT 输出不变。
 
 新应用包的 `metadata/parameters.json` 记录实际的 NTT 数据 ABI：
 
 ```json
 {
   "ntt_table_abi": {
-    "version": 3,
-    "coefficient_order": "natural",
-    "pre_twist_order": "natural",
-    "post_factor_order": "natural",
+    "version": 4,
+    "coefficient_order": "bit_reversed",
+    "external_coefficient_order": "natural",
+    "pre_twist_order": "bit_reversed",
+    "post_factor_order": "bit_reversed",
     "stage_twiddle_order": "reference_loader_batch_lane",
     "stage_twiddle_format": "hpu-twiddle-k8-v1",
     "twiddle_chains": 8,
@@ -213,23 +217,22 @@ stride-8 进位倍率 R，剩余 word 填 1。所有 N（包括 N=128）都使�
 PINTT stage 0 也必须加载参数。
 
 pre/post 使用另一种固定两行模板 `hpu-pmul-online-k8-v1`，由对象 PMUL 的
-`[15:14]=01` 解释为 `c*r^j`。两者都是 512 B，但 **PMUL 的 B=N/64，stage 的
-B=N/128**；PMUL post 的 U[0]=N^-1，不能套用要求首元素为 1 的 stage 校验。
+`[15:14]=01` 按 U/V/R 递推完整物理因子，不要求相邻 word 等比。两者都是 512 B，但 **PMUL 的 B=N/64，stage 的
+B=N/128**；PMUL post 的 U[0] 允许不为 1，不能套用要求首元素为 1 的 stage 校验。
 模板字段与指令位见 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#31-pmul-在线-prepost-因子2026-10-22-追加)
 及 [硬件交接原文](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md)。
 
 `memory/abi.json` 同时记录 `stage_twiddle_format`、`twiddle_chains` 和
 `stage_parameter_lines` 及上述四个 `online_pmul_*` 字段，供直接消费镜像的 IT
-程序识别目标格式。package schema 仍为 v1；NTT 数据 ABI version=3、基础
+程序识别目标格式。package schema 仍为 v1；NTT 数据 ABI version=4、基础
 ISA v1.2 与 package schema 是分别维护的版本。旧版完整 pre/post 向量包仍按其
 原始声明校验；含在线 PMUL 的新包必须声明在线格式，完整重新生成镜像及指令。
 
-该对象描述 builder 生成的实际镜像，与回放时选择的 `ntt_contract` 分别记录；
-选择旧回放 profile 不会改变这个 ABI 对象或镜像数据。旧应用包即使同为 package
-schema v1，也不能仅凭 schema 版本判为自然表；若缺少此对象，应按原生成版本和
-镜像约定回放。迁移到新自然边界时应重新生成完整应用包，包括镜像、golden、元数据
-和校验清单，不能只补写 `ntt_table_abi` 或改 profile 字段。历史数学 fixture 不得
-混入新生成的自然镜像包。
+该对象描述实际镜像布局，与回放 `ntt_contract` 分别记录。Package schema V1、
+ISA v1.2、K=8 模板格式和 DMA 清单列数保持不变；数据 ABI 升至 4。
+旧 version=3 的自然系数镜像不能直接用于当前 raw 执行路径。迁移时必须从源码重新
+生成完整 image、golden、DMA spans、wrapper 和校验清单，不能只改元数据或 profile。
+未声明 ABI 的历史包须按原生成版本回放。
 
 旧完整 stage 表即使通过包结构和 checksum 验证，也不代表兼容在线生成 RTL。
 当前 target 无完整表执行分支，必须重新生成镜像、DMA spans、sidecar 和 checksum；
@@ -248,7 +251,7 @@ factor，并转换为对应的 HPU 物理布局。指定导出结果的转换值
 | 方案 | golden 物理域 | 额外 host 软件模型检查 |
 | --- | --- | --- |
 | CKKS | canonical NTT physical | `CkksSoftwareExecutor` 的逐算子输出必须与 SEAL 逐字相等，状态 `pass` |
-| BFV | coefficient | `BfvSoftwareExecutor` 的逐算子输出必须与 SEAL 逐字相等，状态 `pass` |
+| BFV | bit-reversed coefficient | `BfvSoftwareExecutor` 的逐算子输出必须与 SEAL 逐字相等，状态 `pass` |
 | BGV | canonical NTT physical | `BgvSoftwareExecutor` 的逐算子输出必须与 SEAL 逐字相等，状态 `pass` |
 
 三种方案都从初始 HPU_MEM 镜像执行独立 host 软件模型，并将每个 plan 输出的每个
@@ -260,7 +263,7 @@ RNS limb 与 SEAL oracle 转换后的 HPU 物理 word 比较。报告中的 `mod
 Evaluator 前端还记录 `host_instruction_model` 和资源优化前后的一致性比较。
 默认严格编译要求最终编码指令的软件回放与 golden 一致；显式诊断模式才允许保存
 带失败记录的指令模型报告。实际通过规模以当次日志和包内报告为准，不能沿用旧
-raw profile 或旧镜像的测试结果来声明新自然边界契约通过。
+旧 profile 或旧镜像的测试结果来声明新的 BR 数据 ABI 已通过。
 
 所有包都记录 `instruction_execution_verified=false`、`rtl_verified=false`、
 `hardware_verified=false`。软件数学模型逐字通过不代表编码指令已经在 RTL/HPU 上执行。

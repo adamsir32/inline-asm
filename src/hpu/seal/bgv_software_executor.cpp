@@ -151,10 +151,16 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::inverse_ntt(
         tables.stages.push_back(detail::read_stage_twiddles(
             memory_, item.span, modulus, degree_));
     }
-    tables.set_natural_post_scale(detail::read_online_pmul_factors(
+    const auto post = detail::read_online_pmul_factors(
         memory_, allocation(twiddle_prefix + "/intt/post_untwist_scale").span,
-        modulus, degree_));
-    return model.inverse(words, tables);
+        modulus, degree_);
+    auto coefficients = detail::execute_transform_stages(
+        words, tables.stages, modulus, true);
+    for (std::size_t index = 0; index < degree_; ++index) {
+        coefficients[index] = multiply_mod(
+            coefficients[index], post[index], modulus);
+    }
+    return coefficients;
 }
 
 BgvSoftwareExecutor::Limb BgvSoftwareExecutor::forward_ntt(
@@ -191,7 +197,8 @@ BgvSoftwareExecutor::Limb BgvSoftwareExecutor::forward_ntt(
         prepared[index] = multiply_mod(
             prepared[index], pre_twist[index], modulus);
     }
-    return model.forward(prepared, stages);
+    return detail::execute_transform_stages(
+        std::move(prepared), stages, modulus, false);
 }
 
 void BgvSoftwareExecutor::execute_plain(
@@ -451,10 +458,11 @@ void BgvSoftwareExecutor::execute_rotation(
                 context_.key_context_data()->small_ntt_tables()[basis]
                     .get_root());
             const auto expected_coefficients =
-                hpu::model::automorphism_coefficients(
-                    hpu::model::negacyclic_inverse(
-                        original, modulus, psi),
-                    element, modulus);
+                hpu::model::bit_reverse_coefficients(
+                    hpu::model::automorphism_coefficients(
+                        hpu::model::negacyclic_inverse(
+                            original, modulus, psi),
+                        element, modulus));
             if (coefficients != expected_coefficients) {
                 throw std::runtime_error(
                     "BGV fused Galois twiddles disagree with the plan step");

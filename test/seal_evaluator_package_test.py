@@ -23,10 +23,11 @@ def main():
         descriptor = json.loads((package / "package.json").read_text())
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         table_abi = parameters["ntt_table_abi"]
-        assert table_abi["version"] == 3
-        assert table_abi["coefficient_order"] == "natural"
-        assert table_abi["pre_twist_order"] == "natural"
-        assert table_abi["post_factor_order"] == "natural"
+        assert table_abi["version"] == 4
+        assert table_abi["coefficient_order"] == "bit_reversed"
+        assert table_abi["external_coefficient_order"] == "natural"
+        assert table_abi["pre_twist_order"] == "bit_reversed"
+        assert table_abi["post_factor_order"] == "bit_reversed"
         assert table_abi["stage_twiddle_order"] == "reference_loader_batch_lane"
         assert table_abi["stage_twiddle_format"] == "hpu-twiddle-k8-v1"
         assert table_abi["twiddle_chains"] == 8
@@ -108,11 +109,11 @@ def main():
         assert report["optimization_equivalence_verified"] is True
         assert report["host_instruction_model"]["required"] is False
         assert report["host_instruction_model_verified"] == report["host_instruction_model"]["verified"]
-        assert report["host_instruction_model"]["ntt_contract"] == "natural_coefficient_boundaries"
+        assert report["host_instruction_model"]["ntt_contract"] == "raw_bit_reversed_coefficients"
         assert report["host_instruction_model_verified"] is True
         assert report["host_instruction_model"]["hardware_contract_verified"] is False
-        assert report["host_instruction_model"]["forward_boundary_conversions"] > 0
-        assert report["host_instruction_model"]["inverse_boundary_conversions"] > 0
+        assert report["host_instruction_model"]["forward_boundary_conversions"] == 0
+        assert report["host_instruction_model"]["inverse_boundary_conversions"] == 0
         assert report["compiler_resources"]["ir_source"] == "operator"
         assert report["compiler_resources"]["peak_regular_banks"] <= 5
         assert report["compiler_resources"]["peak_object_slots"] <= 64

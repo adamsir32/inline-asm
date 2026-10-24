@@ -169,7 +169,7 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
         prepared.canonical_psi = narrow(root, "BFV NTT root exceeds the HPU uint32 ABI");
         const std::string prefix = "constants/twiddle/canonical/mod" + std::to_string(index);
 
-        const auto pre_twist = hpu::model::pack_online_pmul_parameters(
+        const auto pre_twist = hpu::model::pack_bit_reversed_online_pmul_parameters(
             1, prepared.canonical_psi, current_modulus, degree);
         prepared.pre_twist = image_
                                  .add(prefix + "/ntt/pre_twist", pre_twist,
@@ -197,10 +197,14 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
                                                        hpu::runtime::AllocationKind::twiddle, true)
                                                   .span);
         }
-        const auto post = hpu::model::pack_online_pmul_parameters(
-            hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), current_modulus),
-            hpu::model::inverse_mod_prime(prepared.canonical_psi, current_modulus),
-            current_modulus, degree);
+        // Preserve every raw inverse-stage normalization factor before
+        // applying the inverse twist at physical (bit-reversed) positions.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            hpu::model::inverse_post_factors(
+                inverse,
+                hpu::model::inverse_mod_prime(prepared.canonical_psi, current_modulus),
+                current_modulus),
+            current_modulus);
         prepared.post_untwist_scale = image_
                                           .add(prefix + "/intt/post_untwist_scale", post,
                                                hpu::runtime::AllocationKind::twiddle, true)
@@ -409,11 +413,10 @@ BfvApplicationImageBuilder::add_fused_automorphism_twiddles(
                          hpu::runtime::AllocationKind::twiddle, true)
                     .span);
         }
-        const auto degree = tables[basis].post_untwist_scale.size();
-        const auto post = hpu::model::pack_online_pmul_parameters(
-            hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), prepared.modulus),
-            hpu::model::inverse_mod_prime(prepared.modified_psi, prepared.modulus),
-            prepared.modulus, degree);
+        // The fused table generator already supplies the complete raw-stage
+        // physical post factor, including lazy scaling and modified untwist.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            tables[basis].post_untwist_scale, prepared.modulus);
         prepared.post_untwist_scale =
             image_
                 .add(prefix + "/post_untwist_scale", post,

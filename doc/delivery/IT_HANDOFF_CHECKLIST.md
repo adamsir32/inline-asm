@@ -51,7 +51,7 @@ cmake --build build-ckks-delivery --target hpu_frontend_delivery -j6
 
 Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `compiler_resources`。
 `compiler_resources.ir_source=operator` 表示资源 IR 由算子直接生成。
-默认编译采用 `natural_coefficient_boundaries`，要求 host 逐指令结果与 golden 一致；
+默认编译采用 `raw_bit_reversed_coefficients`，要求 host 逐指令结果与 golden 一致；
 正常生成使用 `hpu_frontend_delivery`。显式诊断目标
 `hpu_frontend_diagnostic_delivery` 才允许导出带指令模型差异记录的联调包。
 诊断包的 `overall_status=pass` 表示必选的 SEAL 与算子软件模型检查通过，
@@ -59,23 +59,22 @@ Evaluator 和现有 Plan 导出的包都包含 `host_instruction_model` 和 `com
 `host_instruction_model_verified` 和 `optimization_equivalence_verified`。
 前端的命令及当前验证边界见 [Evaluator 前端入门](../getting-started/HPU_EVALUATOR_FRONTEND.md)。
 
-新应用 builder 为三个方案统一保存自然系数位置。完整变换的软件契约见
-[编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)，表 ABI 和迁移
-要求见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
-该契约不声称复现 RTL 每 stage 地址。接收时记录
-`forward_boundary_conversions`、`inverse_boundary_conversions` 及
-`hardware_contract_verified=false`。
+新 builder 的三方案内部系数存储均为 `physical[j]=natural[BR(j)]`，pre/post 因子
+按相同物理索引打包。NTT 域排列不变。raw stage 不增加整体边界 BR；接收时确认
+`forward_boundary_conversions=0`、`inverse_boundary_conversions=0`，并记录
+`hardware_contract_verified=false`。BFV 与原生 INTT 的 golden domain 是
+`coefficient_bit_reversed`，直接按物理 word 比较；解码自然系数需每个 limb 单独 BR。
 
-`legacy_raw_stage` 用于回放历史 raw 镜像。选择 profile 不修改镜像或指令；
-新自然镜像使用 legacy profile 可能比较失败。
-`test/reference/main.cpp` 的历史数学 fixture 仍含 BR 系数数据，不能套用新应用
-镜像约定，也不是当前公开交付格式。旧直接汇编交付入口已经移除。
+`natural_coefficient_boundaries` 和 `legacy_raw_stage` 仅为历史包兼容 profile，
+选择 profile 不转换镜像。新 BR 镜像不应使用 natural profile。
+修订原文见 [2026-10-24 布局适配](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)。
+目标端仍需依次验收独立 NTT、INTT、NTT→PMUL→INTT 环乘法，再扩展组合算子。
 
 新包的数据 ABI 位于 `metadata/parameters.json.ntt_table_abi`，它描述镜像而非
-回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断为自然表；迁移时重新生成
+回放 profile。缺少该字段的旧包不能仅凭 schema v1 判断其系数布局；迁移时重新生成
 完整包，不手工补字段替代数据转换。字段明细见 [应用包 V1](HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界)。
 
-当前 NTT 数据 ABI version=3，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
+当前 NTT 数据 ABI version=4，stage 参数格式为 `hpu-twiddle-k8-v1`、K=8。
 每个 PNTT/PINTT 的参数 DLOAD 必须为 **2 line / 512 B**，包括 N=128 和
 PINTT stage 0。pre/post 使用 `online_pmul_format=hpu-pmul-online-k8-v1`，
 `online_pmul_parameter_lines=2`、`online_pmul_mode=1`、
@@ -89,8 +88,8 @@ manifest 和校验值重新生成。
 
 - I=0 时 PMUL 的 `[15:14]=01` 原样进入 HPU，示例 `p40,p40,p63` 编码
   `0x2A287F5B`；I=1 时 64、192、255 仍作为完整 imm8。
-- PMUL 模板采用 **B=N/64**，与 NTT 的 N/128 区分；post 首元素允许 N^-1，
-  归一化仅执行一次；在线 PMUL 不增加 butterfly、shuffle 或 CPU 寄存器读取。
+- PMUL 模板采用 **B=N/64**，与 NTT 的 N/128 区分；BR pre/post 必须全量展开相等，
+  post 保留完整 lazy-scale 修正，归一化仅执行一次；在线 PMUL 不增加 butterfly、shuffle 或 CPU 寄存器读取。
 - 参数和数据/目的不能同 ID，参数实际两行且全为普通模剩余数，不能引用模表。
   默认 14 个 Bank 5 模板槽为 stage 与 pre/post 共享，不能各算 14 份。
 - 硬件组的局部 RTL 回归记录不等于 CPU/DMAC/NoC 整机 IT 证据；核侧若检查
@@ -278,5 +277,5 @@ N=65536 配置也必须完成 oracle 对拍、包校验和目标执行证据。�
 `capacity_lines` 配置内存与目标超时；当前示例会把容量收紧到实际 `used_lines`，
 不再要求目标分配构建时的预留上限。软件生成成功仍不代表平台已支持相应窗口。
 部署包可以单独归档，也可以加入默认八包归档；保存归档 SHA-256 和完整案例清单。
-新自然边界 profile 的 N=65536 结果以当次测试与包报告为准，本文列出生成入口和
+新 BR 数据 ABI 的 N=65536 结果以当次测试与包报告为准，本文列出生成入口和
 验收要求，不将历史 raw profile 的通过结果视为新 profile 已通过。

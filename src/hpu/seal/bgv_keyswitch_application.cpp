@@ -69,7 +69,7 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
     const std::string prefix = mod_id("constants/twiddle/canonical", modulus_id);
     hpu::model::HardwareNttModel model(
         degree, modulus, hpu::model::pow_mod(psi, 2, modulus));
-    const auto pre_twist = hpu::model::pack_online_pmul_parameters(
+    const auto pre_twist = hpu::model::pack_bit_reversed_online_pmul_parameters(
         1, psi, modulus, degree);
     image.add(prefix + "/ntt/pre_twist", pre_twist,
               hpu::runtime::AllocationKind::twiddle);
@@ -85,9 +85,10 @@ void add_twiddles(hpu::runtime::HpuMemImage& image, std::size_t degree,
                   hpu::model::pack_stage_twiddles(inverse.stages[stage], modulus, degree),
                   hpu::runtime::AllocationKind::twiddle);
     }
-    const auto post = hpu::model::pack_online_pmul_parameters(
-        hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), modulus),
-        hpu::model::inverse_mod_prime(psi, modulus), modulus, degree);
+    const auto post = hpu::model::pack_online_pmul_factors(
+        hpu::model::inverse_post_factors(
+            inverse, hpu::model::inverse_mod_prime(psi, modulus), modulus),
+        modulus);
     image.add(prefix + "/intt/post_untwist_scale", post,
               hpu::runtime::AllocationKind::twiddle);
 }
@@ -104,12 +105,9 @@ void add_galois_twiddles(hpu::runtime::HpuMemImage& image,
                           tables[basis].post_untwist_scale.size()),
                       hpu::runtime::AllocationKind::twiddle);
         }
-        const auto degree = tables[basis].post_untwist_scale.size();
-        const auto natural_post = hpu::model::pack_online_pmul_parameters(
-            hpu::model::inverse_mod_prime(static_cast<std::uint32_t>(degree), tables[basis].modulus),
-            hpu::model::inverse_mod_prime(tables[basis].modified_psi, tables[basis].modulus),
-            tables[basis].modulus, degree);
-        image.add(prefix + "/post_untwist_scale", natural_post,
+        const auto physical_post = hpu::model::pack_online_pmul_factors(
+            tables[basis].post_untwist_scale, tables[basis].modulus);
+        image.add(prefix + "/post_untwist_scale", physical_post,
                   hpu::runtime::AllocationKind::twiddle);
     }
 }

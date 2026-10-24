@@ -15,6 +15,7 @@
 | 核对 NTT 软件契约及验证边界 | [HPU 编程手册](reference/HPU_PROGRAMMING_MANUAL.md) → [项目架构的验证说明](architecture/HPU_ARCHITECTURE.md#8-验证路径与证据边界) |
 | 查看硬件规范符合性记录 | [2026-08 符合性审计](audits/HPU_SPEC_COMPLIANCE_AUDIT_2026-08.md) |
 | 对接 K=8 在线 twiddle 参数格式 | [硬件组编译器迁移说明](reference/TWIDDLE_COMPILER_MIGRATION.md) |
+| 核对 BR 系数及在线 pre/post 布局修订 | [2026-10-24 布局适配原文](reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md) → [应用包 ABI](delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界) |
 | 对接在线 pre/post PMUL 与两行模板 | [PMUL 硬件交接原文](reference/PMUL_ONLINE_COMPILER_HANDOFF.md) → [编程手册](reference/HPU_PROGRAMMING_MANUAL.md#31-pmul-在线-prepost-因子2026-10-22-追加) |
 
 ## 目录说明
@@ -36,6 +37,7 @@
 - [HPU_SEAL_API_REFERENCE.md](reference/HPU_SEAL_API_REFERENCE.md)：面向应用程序员的手册，包含完整程序、自定义构建目标、顶层 API、三方案规则、golden 与诊断排查。
 - [HPU_LOW_LEVEL_API_REFERENCE.md](reference/HPU_LOW_LEVEL_API_REFERENCE.md)：供维护适配层、显式 Plan、镜像构建器、软件执行器和算子生成接口时查询。
 - [HPU_PROGRAMMING_MANUAL.md](reference/HPU_PROGRAMMING_MANUAL.md)：HPU ISA v1.2 及 2026-10-22 在线 PMUL 扩展的指令编码、MOD/REL/CP、对象生命周期和 DMA 约定。
+- [HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md](reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)：硬件组 2026-10-24 修订原文；明确系数与 pre/post 因子共同 BR、exact packing 和 raw stage 验收范围，优先于旧自然边界说明。
 - [PMUL_ONLINE_COMPILER_HANDOFF.md](reference/PMUL_ONLINE_COMPILER_HANDOFF.md)：硬件组在线因子 PMUL 交接原文，包含模式位、固定 512 B 模板及分配成本；原文路径和测试记录属于硬件仓库。
 - [TWIDDLE_COMPILER_MIGRATION.md](reference/TWIDDLE_COMPILER_MIGRATION.md)：硬件组提供的 stage twiddle K=8 ABI、512 B 参数布局、DMA 迁移与目标验收要求；其中旧 pre/post 全长向量说明已由 PMUL 在线交接更新。硬件仓库路径和附属报告需到相应硬件工作区查看。
 
