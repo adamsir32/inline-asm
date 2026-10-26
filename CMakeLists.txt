@@ -61,6 +61,7 @@ target_include_directories(hpu_hardware_model
 target_link_libraries(hpu_hardware_model PUBLIC hpu_encode hpu_runtime_core)
 
 add_library(hpu_runtime_core STATIC
+        src/hpu/runtime/bank_allocator.cpp
         src/hpu/runtime/application.cpp
         src/hpu/runtime/memory_image.cpp
         src/hpu/runtime/software_executor.cpp
@@ -72,6 +73,7 @@ target_include_directories(hpu_runtime_core
 
 add_library(hpu_compiler_core STATIC
         src/hpu/compiler/resource_ir.cpp
+        src/hpu/compiler/ssa_optimization.cpp
         src/hpu/compiler/operator_resources.cpp)
 target_include_directories(hpu_compiler_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(hpu_compiler_core PUBLIC hpu_runtime_core hpu_encode)
@@ -150,15 +152,40 @@ target_include_directories(hpu_fhe_codegen
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(hpu_fhe_codegen PUBLIC hpu_compiler_core)
-
-add_executable(inline_asm_codegen
-        src/main.cpp
-)
-target_link_libraries(inline_asm_codegen
-        PRIVATE
-        hpu_fhe_codegen
-        hpu_test_config
-)
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE HPU_PACKAGE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE HPU_PACKAGE_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT HPU_PACKAGE_REVISION)
+    set(HPU_PACKAGE_REVISION "unknown")
+    set(HPU_PACKAGE_TREE "unknown")
+elseif(HPU_PACKAGE_STATUS)
+    set(HPU_PACKAGE_TREE "dirty-at-configure")
+else()
+    set(HPU_PACKAGE_TREE "clean-at-configure")
+endif()
+add_executable(hpu_native_kernel_application_example examples/native_kernel_application.cpp)
+target_link_libraries(hpu_native_kernel_application_example PRIVATE hpu_fhe_codegen hpu_delivery_core hpu_hardware_model)
+target_compile_definitions(hpu_native_kernel_application_example PRIVATE
+    HPU_DELIVERY_REVISION="${HPU_PACKAGE_REVISION}"
+    HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}")
+set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
+    "Directory for scheme-neutral application packages")
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(hpu_native_kernel_delivery)
+    foreach(kernel cmult ntt intt)
+        add_custom_target(native_${kernel}_delivery
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_application_package.py
+                --example $<TARGET_FILE:hpu_native_kernel_application_example>
+                --validator $<TARGET_FILE:hpu_validate_package>
+                --output ${HPU_APPLICATION_OUTPUT_ROOT}/native_${kernel}_n8192
+                --example-arg=--case --example-arg=${kernel}
+            DEPENDS hpu_native_kernel_application_example hpu_validate_package
+            VERBATIM)
+        add_dependencies(hpu_native_kernel_delivery native_${kernel}_delivery)
+    endforeach()
+endif()
 
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
@@ -183,6 +210,15 @@ if(BUILD_TESTING)
     add_executable(hpu_compiler_resources_test test/compiler_resources_test.cpp)
     target_link_libraries(hpu_compiler_resources_test PRIVATE hpu_compiler_core hpu_hardware_model)
     add_test(NAME hpu_compiler_resources_test COMMAND hpu_compiler_resources_test)
+    add_executable(hpu_ssa_optimization_test test/ssa_optimization_test.cpp)
+    target_link_libraries(hpu_ssa_optimization_test PRIVATE hpu_compiler_core hpu_hardware_model)
+    add_test(NAME hpu_ssa_optimization_test COMMAND hpu_ssa_optimization_test)
+    add_executable(hpu_native_io_optimization_test test/native_io_optimization_test.cpp)
+    target_link_libraries(hpu_native_io_optimization_test PRIVATE hpu_fhe_codegen hpu_compiler_core hpu_hardware_model hpu_delivery_core)
+    add_test(NAME hpu_native_io_optimization_test COMMAND hpu_native_io_optimization_test)
+    add_executable(hpu_bank_allocator_test test/bank_allocator_test.cpp)
+    target_link_libraries(hpu_bank_allocator_test PRIVATE hpu_runtime_core)
+    add_test(NAME hpu_bank_allocator_test COMMAND hpu_bank_allocator_test)
     add_executable(hpu_instruction_executor_test test/instruction_executor_test.cpp)
     target_link_libraries(hpu_instruction_executor_test PRIVATE hpu_hardware_model hpu_runtime_core)
     add_test(NAME hpu_instruction_executor_test COMMAND hpu_instruction_executor_test)
@@ -340,8 +376,8 @@ if(BUILD_TESTING)
             invalid_bfv_num_b)
         add_test(
                 NAME hpu_config_rejects_${INVALID_CONFIG}
-                COMMAND inline_asm_codegen
-                        asm
+                COMMAND hpu_reference_vectors
+                        ${CMAKE_CURRENT_BINARY_DIR}/config_reject_${INVALID_CONFIG}
                         --config ${CMAKE_CURRENT_SOURCE_DIR}/test/config/${INVALID_CONFIG}.conf
         )
         set_tests_properties(
@@ -535,21 +571,16 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
         "Directory for scheme-neutral application packages")
-    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE HPU_PACKAGE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND git status --porcelain WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE HPU_PACKAGE_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(NOT HPU_PACKAGE_REVISION)
-        set(HPU_PACKAGE_REVISION "unknown")
-        set(HPU_PACKAGE_TREE "unknown")
-    elseif(HPU_PACKAGE_STATUS)
-        set(HPU_PACKAGE_TREE "dirty-at-configure")
-    else()
-        set(HPU_PACKAGE_TREE "clean-at-configure")
-    endif()
     target_compile_definitions(hpu_seal_ckks_codegen PRIVATE
         HPU_DELIVERY_REVISION="${HPU_PACKAGE_REVISION}"
         HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}")
+    add_custom_target(hpu_io_benchmark
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark_io.py
+            --build-dir ${CMAKE_BINARY_DIR}
+            --output-root ${HPU_APPLICATION_OUTPUT_ROOT}/io_benchmark
+        DEPENDS hpu_ckks_evaluator_example hpu_bfv_evaluator_example hpu_bgv_evaluator_example hpu_validate_package
+        COMMENT "Benchmarking N=8192, Q=4, P=1 application DMA IO"
+        VERBATIM)
     add_custom_target(hpu_ckks_delivery)
     add_custom_target(hpu_bfv_delivery)
     add_custom_target(hpu_bgv_delivery)
@@ -617,7 +648,6 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         DEPENDS hpu_bfv_sealpir_2d_concentrated_example hpu_validate_package
         COMMENT "Generating concentrated two-package BFV SealPIR delivery: small profile"
         VERBATIM)
-    add_dependencies(hpu_bfv_delivery bfv_sealpir_2d_concentrated_small_delivery)
 
     # Full generation is explicit because it records the complete 86x85 graph and
     # produces large ST artifacts even though only two packages are emitted.
@@ -640,7 +670,6 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         DEPENDS hpu_bfv_apsi_concentrated_example hpu_validate_package
         COMMENT "Generating one-package APSI-compatible BFV PSI delivery: small profile"
         VERBATIM)
-    add_dependencies(hpu_bfv_delivery bfv_apsi_concentrated_small_delivery)
 
     # The medium profile retains the official APSI 1M-1024-com table,
     # source-power and Paterson-Stockmeyer structure. It is explicit because it
@@ -1083,53 +1112,18 @@ if(BUILD_TESTING AND HPU_ENABLE_LEGACY_FIXED_PROFILE_TESTS)
             LABELS "legacy-fixed-profile")
 endif()
 
-set(HPU_DELIVERY_TEST_DEPENDENCIES)
-if(BUILD_TESTING)
-    list(APPEND HPU_DELIVERY_TEST_DEPENDENCIES
-        hpu_encode_self_test
-        hpu_scheme_encode_self_test)
-endif()
-
-add_custom_target(hpu_delivery
-        COMMAND $<TARGET_FILE:inline_asm_codegen>
-                both
-                --config ${HPU_TEST_CONFIG}
-        COMMAND $<TARGET_FILE:inline_asm_encode_outputs>
-                --config ${HPU_TEST_CONFIG}
-        COMMAND $<TARGET_FILE:hpu_reference_vectors>
-                ${CMAKE_CURRENT_SOURCE_DIR}/outputs/ciphertext_multiply/test_data
-                ${CMAKE_CURRENT_SOURCE_DIR}/outputs
-                --config ${HPU_TEST_CONFIG}
-        COMMAND ${CMAKE_COMMAND}
-                -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/delivery/check_delivery.cmake
-        DEPENDS
-        inline_asm_codegen
-        inline_asm_encode_outputs
-        hpu_reference_vectors
-        ${HPU_DELIVERY_TEST_DEPENDENCIES}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Generating legacy fixed-profile HPU/reference demo deliverables"
-)
-
+# Mathematical fixtures are internal oracle inputs. All target programs use
+# the application package pipeline; no direct-ASM delivery target remains.
 if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE)
-    add_custom_target(hpu_delivery_with_seal
-        COMMAND $<TARGET_FILE:hpu_seal_differential_test>
-                --outputs-root ${CMAKE_CURRENT_SOURCE_DIR}/outputs
-                --report-dir ${CMAKE_CURRENT_BINARY_DIR}/seal_oracle
-        DEPENDS
-        hpu_delivery
-        hpu_seal_differential_test
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Running legacy fixture delivery and the SEAL three-scheme oracle"
-    )
-
+    set(HPU_ORACLE_FIXTURE_ROOT "${CMAKE_CURRENT_BINARY_DIR}/seal_reference_fixture")
     if(BUILD_TESTING)
         add_test(
-            NAME hpu_seal_oracle_prepare_delivery
-            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_CURRENT_BINARY_DIR}
-                    --target hpu_delivery)
-        set_tests_properties(hpu_seal_oracle_prepare_delivery PROPERTIES
+            NAME hpu_seal_oracle_prepare_reference
+            COMMAND hpu_reference_vectors
+                    ${HPU_ORACLE_FIXTURE_ROOT}/ciphertext_multiply/test_data
+                    ${HPU_ORACLE_FIXTURE_ROOT}
+                    --config ${HPU_TEST_CONFIG})
+        set_tests_properties(hpu_seal_oracle_prepare_reference PROPERTIES
             FIXTURES_SETUP HPU_SEAL_ORACLE_FIXTURE
             RUN_SERIAL TRUE
             TIMEOUT 300
@@ -1138,7 +1132,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE)
         add_test(
             NAME hpu_seal_differential_oracle
             COMMAND hpu_seal_differential_test
-                    --outputs-root ${CMAKE_CURRENT_SOURCE_DIR}/outputs
+                    --outputs-root ${HPU_ORACLE_FIXTURE_ROOT}
                     --report-dir ${CMAKE_CURRENT_BINARY_DIR}/seal_oracle)
         set_tests_properties(hpu_seal_differential_oracle PROPERTIES
             FIXTURES_REQUIRED HPU_SEAL_ORACLE_FIXTURE
@@ -1150,7 +1144,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE)
             NAME hpu_seal_oracle_rejects_corrupted_fixture
             COMMAND ${CMAKE_COMMAND}
                     -DORACLE=$<TARGET_FILE:hpu_seal_differential_test>
-                    -DSOURCE_OUTPUTS=${CMAKE_CURRENT_SOURCE_DIR}/outputs
+                    -DSOURCE_OUTPUTS=${HPU_ORACLE_FIXTURE_ROOT}
                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}/seal_oracle_corruption
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/seal_oracle_corruption_test.cmake)
         set_tests_properties(hpu_seal_oracle_rejects_corrupted_fixture PROPERTIES

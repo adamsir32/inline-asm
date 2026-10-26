@@ -84,10 +84,14 @@ int main()
                        "kernel accepted a released dstore source");
         require_throws([&] { application.release_object("ct0"); },
                        "pfree accepted an already released dstore source");
-        application.load_object("ct0", 7);
+        application.load_object("ct0", 63);
         application.run_kernel("reload", {"ct0"});
+        application.store_object("ct0", false);
+        require(application.object("ct0").resident_slot == 63,
+                "DSTORE REL=0 did not retain the high object slot");
+        application.run_kernel("after_retained_store", {"ct0"});
         application.store_object("ct0");
-        require_throws([&] { application.load_object("ct0", 8); },
+        require_throws([&] { application.load_object("ct0", 64); },
                        "object slot outside ISA range was accepted");
         application.finish();
         require(application.finished(), "application did not finish");

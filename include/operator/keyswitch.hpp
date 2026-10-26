@@ -10,7 +10,8 @@ std::string generate_hpu_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "keyswitch");
 
 // SEAL singleton-digit KeySwitch with rounded single-P ModDown. The core
 // accepts coefficient-domain inputs and returns coefficient-domain outputs;
@@ -20,7 +21,8 @@ std::string generate_hpu_rounded_single_p_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "keyswitch");
 
 // SEAL BFV KeySwitch specialization. Inputs and outputs are in coefficient
 // form. Evaluation-key products accumulate in NTT form, cross back through
@@ -29,7 +31,8 @@ std::string generate_hpu_bfv_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "keyswitch");
 
 std::string generate_hpu_keyswitch_body_asm(
     int N,
@@ -37,7 +40,8 @@ std::string generate_hpu_keyswitch_body_asm(
     int num_p,
     int dnum,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "keyswitch");
 
 std::string generate_hpu_keyswitch_asm(
     int N,

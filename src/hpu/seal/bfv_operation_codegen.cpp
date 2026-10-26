@@ -237,7 +237,8 @@ BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
     result.operations.reserve(plan.steps().size());
     if (manage_modulus_table) {
         result.body_asm +=
-            hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank);
+            hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
+                                "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (const auto& step : plan.steps()) {
         BfvLoweredOperation lowered;
@@ -251,9 +252,6 @@ BfvLoweredProgram lower_bfv_operation_plan(const BfvOperationPlan& plan,
         recording.append(*lowered.operator_program);
         result.body_asm += lowered.body_asm;
         result.operations.push_back(std::move(lowered));
-    }
-    if (manage_modulus_table) {
-        result.body_asm += hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         result.body_asm += hpu::resource::finish_program();

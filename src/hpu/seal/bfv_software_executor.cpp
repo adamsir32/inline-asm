@@ -146,17 +146,20 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
     if (prepared.modulus != modulus) {
         throw std::invalid_argument("BFV canonical twiddle modulus mismatch");
     }
-    hpu::model::HardwareNttModel model(degree, modulus,
-                                       hpu::model::pow_mod(prepared.canonical_psi, 2, modulus));
     if (inverse) {
-        hpu::model::InverseNttTables inverse_tables;
-        inverse_tables.stages.reserve(prepared.inverse_stages.size());
+        std::vector<std::vector<std::uint32_t>> inverse_tables;
+        inverse_tables.reserve(prepared.inverse_stages.size());
         for (const auto& span : prepared.inverse_stages) {
-            inverse_tables.stages.push_back(detail::read_stage_twiddles(
+            inverse_tables.push_back(detail::read_stage_twiddles(
                 memory_, span, modulus, degree));
         }
-        inverse_tables.set_natural_post_scale(memory_.read(prepared.post_untwist_scale, degree));
-        return model.inverse(words, inverse_tables);
+        auto coefficients = detail::execute_transform_stages(words, inverse_tables, modulus, true);
+        const auto post = detail::read_online_pmul_factors(
+            memory_, prepared.post_untwist_scale, modulus, degree);
+        for (std::size_t index = 0; index < degree; ++index) {
+            coefficients[index] = multiply_mod(coefficients[index], post[index], modulus);
+        }
+        return coefficients;
     }
 
     std::vector<std::vector<std::uint32_t>> forward_tables;
@@ -165,7 +168,8 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
         forward_tables.push_back(detail::read_stage_twiddles(
             memory_, span, modulus, degree));
     }
-    const auto pre_twist = memory_.read(prepared.pre_twist, degree);
+    const auto pre_twist = detail::read_online_pmul_factors(
+        memory_, prepared.pre_twist, modulus, degree);
     Limb coefficients = words;
     for (std::size_t index = 0; index < degree; ++index) {
         if (coefficients[index] >= modulus) {
@@ -174,7 +178,8 @@ BfvSoftwareExecutor::transform_limb(const Limb& words, std::size_t degree, std::
         coefficients[index] =
             multiply_mod(coefficients[index], pre_twist[index], modulus);
     }
-    return model.forward(coefficients, forward_tables);
+    return detail::execute_transform_stages(
+        std::move(coefficients), forward_tables, modulus, false);
 }
 
 BfvSoftwareExecutor::RnsPolynomial
@@ -742,16 +747,20 @@ void BfvSoftwareExecutor::rotate(
             const auto coefficients = memory_.read(source.limbs[basis], degree);
             const auto transformed =
                 transform_limb(coefficients, degree, modulus_id, canonical_tables, false);
-            hpu::model::HardwareNttModel model(
-                degree, modulus, hpu::model::pow_mod(fused.modified_psi, 2, modulus));
-            hpu::model::InverseNttTables inverse_tables;
-            inverse_tables.stages.reserve(fused.inverse_stages.size());
+            std::vector<std::vector<std::uint32_t>> inverse_tables;
+            inverse_tables.reserve(fused.inverse_stages.size());
             for (const auto& span : fused.inverse_stages) {
-                inverse_tables.stages.push_back(detail::read_stage_twiddles(
+                inverse_tables.push_back(detail::read_stage_twiddles(
                     memory_, span, modulus, degree));
             }
-            inverse_tables.set_natural_post_scale(memory_.read(fused.post_untwist_scale, degree));
-            memory_.write(workspace.limbs[basis], model.inverse(transformed, inverse_tables));
+            auto rotated = detail::execute_transform_stages(
+                transformed, inverse_tables, modulus, true);
+            const auto post = detail::read_online_pmul_factors(
+                memory_, fused.post_untwist_scale, modulus, degree);
+            for (std::size_t index = 0; index < degree; ++index) {
+                rotated[index] = multiply_mod(rotated[index], post[index], modulus);
+            }
+            memory_.write(workspace.limbs[basis], rotated);
         }
     }
 
@@ -800,7 +809,10 @@ HpuRnsPolynomial BfvSoftwareExecutor::export_component(const PreparedBfvRnsObjec
     result.modulus_ids = polynomial.modulus_ids;
     result.moduli = level.q_moduli;
     for (const auto& limb : polynomial.limbs) {
-        const auto words = memory_.read(limb, polynomial.degree);
+        auto words = memory_.read(limb, polynomial.degree);
+        if (object.domain == hpu::runtime::PolynomialDomain::coefficient) {
+            words = hpu::model::bit_reverse_coefficients(words);
+        }
         result.words.insert(result.words.end(), words.begin(), words.end());
     }
     return result;

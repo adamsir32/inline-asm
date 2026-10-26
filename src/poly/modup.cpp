@@ -56,7 +56,8 @@ std::string generate_hpu_modup_contexts_body_asm(
     const std::vector<int>& p_contexts,
     const std::vector<int>& source_contexts,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
     if (!valid_contexts(q_contexts, p_contexts, source_contexts)) {
@@ -80,11 +81,14 @@ std::string generate_hpu_modup_contexts_body_asm(
     for (int context : source_contexts) {
         asm_code << "        /* Copy Q context " << context
                  << " (global MOD_ID " << context << ") */\n";
-        asm_code << hpu::resource::read(copied_value, hpu::DataType::poly);
-        asm_code << hpu::resource::publish(copied_value, 1);
+        asm_code << hpu::resource::read(copied_value, hpu::DataType::poly,
+            port_prefix + "/copy/input/mod" + std::to_string(context));
+        asm_code << hpu::resource::output(copied_value,
+            port_prefix + "/copy/output/mod" + std::to_string(context));
     }
     asm_code << generate_hpu_bconv_contexts_body_asm(
-        source_contexts, target_contexts, false, manage_modulus_table);
+        source_contexts, target_contexts, false, manage_modulus_table,
+        port_prefix + "/bconv");
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }
@@ -97,7 +101,8 @@ std::string generate_hpu_modup_body_asm(
     int num_q_digit,
     int q_offset,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
     if (!valid_modup_config(num_q, num_p, num_q_digit, q_offset)) {
@@ -119,7 +124,7 @@ std::string generate_hpu_modup_body_asm(
     }
     return generate_hpu_modup_contexts_body_asm(
         q_contexts, p_contexts, source_contexts,
-        append_psync, manage_modulus_table);
+        append_psync, manage_modulus_table, port_prefix);
 }
 
 std::string generate_hpu_modup_asm(

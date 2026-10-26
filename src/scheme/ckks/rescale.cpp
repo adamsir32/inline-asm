@@ -31,14 +31,16 @@ std::string transform_components(
     asm_code << "        /* --- " << label << " --- */\n";
     for (int component = 0; component < component_count; ++component) {
         for (int basis = 0; basis < basis_count; ++basis) {
+            const auto prefix = std::string("rescale/") + (inverse ? "inverse" : "forward")
+                + "/c" + std::to_string(component) + "/mod" + std::to_string(basis);
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(polynomial_object, hpu::DataType::poly);
+            asm_code << hpu::resource::read(polynomial_object, hpu::DataType::poly, prefix + "/input");
             asm_code << (inverse
                 ? generate_hpu_intt_body_asm(
-                    N, polynomial_object, twiddle_object, false)
+                    N, polynomial_object, twiddle_object, false, prefix + "/table")
                 : generate_hpu_ntt_body_asm(
-                    N, polynomial_object, twiddle_object, false));
-            asm_code << hpu::resource::publish(polynomial_object, 1);
+                    N, polynomial_object, twiddle_object, false, prefix + "/table"));
+            asm_code << hpu::resource::output(polynomial_object, prefix + "/output");
         }
     }
     return asm_code.str();
@@ -116,7 +118,7 @@ std::string generate_rescale_ntt_body_asm(
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(
             modulus_table_object,
-            hpu::DataType::mod_ctx,
+            hpu::DataType::mod_ctx, "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     asm_code << transform_components(
@@ -128,9 +130,6 @@ std::string generate_rescale_ntt_body_asm(
         N, num_q - 1, num_components, false,
         num_components == 2 ? "Rescaled c0/c1: coefficient domain -> canonical HPU NTT"
                             : "Rescaled c0/c1/c2: coefficient domain -> canonical HPU NTT");
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(modulus_table_object);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }

@@ -117,7 +117,7 @@ void check_keyswitch_splice(
                     "BGV KeySwitch key/twiddle changed during plan composition");
         }
     }
-    const auto middle_count = standalone.instructions.size() - 3;
+    const auto middle_count = standalone.instructions.size() - 2;
     bool found = false;
     for (std::size_t index = 0;
          index + middle_count <= combined.instructions.size(); ++index) {
@@ -204,7 +204,7 @@ void check_modswitch_splice(
                     "BGV ModSwitch constants changed during composition");
         }
     }
-    const auto middle_count = standalone.instructions.size() - 3;
+    const auto middle_count = standalone.instructions.size() - 2;
     bool found = false;
     for (std::size_t index = 0;
          index + middle_count <= combined.instructions.size(); ++index) {
@@ -700,7 +700,7 @@ int main()
             multiply_psync += encoded.instruction.mnemonic == hpu::Mnemonic::kPsync;
             multiply_modtable_load +=
                 encoded.instruction.mnemonic == hpu::Mnemonic::kDload &&
-                encoded.instruction.obj_id == 4 && encoded.instruction.type == 2;
+                encoded.instruction.obj_id == 4 && encoded.instruction.type == 1;
         }
         require(multiply_psync == 1 && multiply_modtable_load == 1 &&
                     multiply_package.spans().size() == multiply_package.dma.size(),

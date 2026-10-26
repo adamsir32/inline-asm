@@ -23,6 +23,7 @@ struct BgvModSwitchDmaBinding {
     std::uint8_t flag = 0;
     std::string allocation_id;
     hpu::runtime::HpuMemSpan span;
+    std::uint8_t cp = 0;
 };
 
 // A single SEAL-facing BGV ModSwitch with fully prepared HPU_MEM and resolved

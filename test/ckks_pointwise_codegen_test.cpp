@@ -35,16 +35,15 @@ void require_common_shape(
     if (count(program, arithmetic) != static_cast<std::size_t>(arithmetic_count)) {
         throw std::runtime_error("unexpected pointwise arithmetic instruction count");
     }
-    if (count(program, "dload x10, x11, p4, 2, 1") != 1
-        || count(program, "pfree p4") != 1
+    if (count(program, "dload x10, x11, p4, 1, 0, 32") != 1
+        || count(program, "pfree p4") != 0
         || count(program, "psync") != 1) {
         throw std::runtime_error("modulus-table or terminal synchronization lifecycle failed");
     }
     const auto last_store = program.rfind("dstore ");
-    const auto table_free = program.rfind("pfree p4");
     const auto sync = program.rfind("psync");
-    if (last_store == std::string::npos || table_free <= last_store || sync <= table_free) {
-        throw std::runtime_error("result must be stored before table release and psync");
+    if (last_store == std::string::npos || sync <= last_store) {
+        throw std::runtime_error("result must be declared before psync");
     }
 }
 
@@ -102,7 +101,7 @@ int main()
                 num_q, false, false),
         };
         for (const auto& nested : nested_programs) {
-            if (nested.find("dload x10, x11, p4, 2, 1") != std::string::npos
+            if (nested.find("dload x10, x11, p4, 1, 0, 32") != std::string::npos
                 || nested.find("pfree p4") != std::string::npos
                 || nested.find("psync") != std::string::npos) {
                 throw std::runtime_error(

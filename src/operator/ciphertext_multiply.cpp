@@ -16,7 +16,8 @@ std::string generate_basis_ntt_body_asm(
     int N,
     int num_q,
     int num_components,
-    const std::string& label)
+    const std::string& label,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -26,18 +27,20 @@ std::string generate_basis_ntt_body_asm(
 
     asm_code << "        /* --- " << label << ": coefficient -> NTT domain --- */\n";
     asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+                           port_prefix + "/modulus_table",
                            hpu::DloadFlag::small_bank);
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* " << label << " component_" << component << " */\n";
         for (int i = 0; i < num_q; ++i) {
+            const auto prefix = port_prefix + "/c" + std::to_string(component)
+                + "/mod" + std::to_string(i);
             asm_code << "        /* q_" << i << " */\n";
             asm_code << hpu::resource::select_modulus(i);
-            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
-            asm_code << generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false);
-            asm_code << hpu::resource::publish(POBJ_POLY, 1);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly, prefix + "/input");
+            asm_code << generate_hpu_ntt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false, prefix + "/table");
+            asm_code << hpu::resource::output(POBJ_POLY, prefix + "/output");
         }
     }
-    asm_code << hpu::resource::discard(POBJ_MOD_CTX);
 
     return asm_code.str();
 }
@@ -46,7 +49,8 @@ std::string generate_basis_intt_body_asm(
     int N,
     int num_q,
     int num_components,
-    const std::string& label)
+    const std::string& label,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -56,18 +60,20 @@ std::string generate_basis_intt_body_asm(
 
     asm_code << "        /* --- " << label << ": NTT -> coefficient domain --- */\n";
     asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+                           port_prefix + "/modulus_table",
                            hpu::DloadFlag::small_bank);
     for (int component = 0; component < num_components; ++component) {
         asm_code << "        /* " << label << " component_" << component << " */\n";
         for (int i = 0; i < num_q; ++i) {
+            const auto prefix = port_prefix + "/c" + std::to_string(component)
+                + "/mod" + std::to_string(i);
             asm_code << "        /* q_" << i << " */\n";
             asm_code << hpu::resource::select_modulus(i);
-            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly);
-            asm_code << generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false);
-            asm_code << hpu::resource::publish(POBJ_POLY, 1);
+            asm_code << hpu::resource::read(POBJ_POLY, hpu::DataType::poly, prefix + "/input");
+            asm_code << generate_hpu_intt_body_asm(N, POBJ_POLY, POBJ_TWIDDLE, false, prefix + "/table");
+            asm_code << hpu::resource::output(POBJ_POLY, prefix + "/output");
         }
     }
-    asm_code << hpu::resource::discard(POBJ_MOD_CTX);
 
     return asm_code.str();
 }
@@ -79,7 +85,8 @@ std::string generate_hpu_ciphertext_multiply_body_asm(
     int num_q,
     int num_p,
     int dnum,
-    bool append_psync)
+    bool append_psync,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -89,17 +96,19 @@ std::string generate_hpu_ciphertext_multiply_body_asm(
     }
 
     asm_code << "        /* CIPHERTEXT MULTIPLY: ctA(2) * ctB(2) -> ctOut(2) with relinearization */\n";
-    asm_code << generate_basis_ntt_body_asm(N, num_q, 2, "ctA");
-    asm_code << generate_basis_ntt_body_asm(N, num_q, 2, "ctB");
+    asm_code << generate_basis_ntt_body_asm(N, num_q, 2, "ctA", port_prefix + "/left/forward");
+    asm_code << generate_basis_ntt_body_asm(N, num_q, 2, "ctB", port_prefix + "/right/forward");
     asm_code << "        /* --- Tensor product in NTT domain: (a0,a1)*(b0,b1)->(t0,t1,t2) --- */\n";
     asm_code << generate_hpu_cmult_body_asm(num_q, false);
-    asm_code << generate_basis_intt_body_asm(N, num_q, 3, "tensor product");
+    asm_code << generate_basis_intt_body_asm(N, num_q, 3, "tensor product", port_prefix + "/tensor/inverse");
     asm_code << generate_hpu_relinearization_body_asm(
         N,
         num_q,
         num_p,
         dnum,
-        false);
+        false,
+        true,
+        port_prefix + "/relinearize");
 
     if (append_psync) {
         asm_code << hpu::resource::finish_program();

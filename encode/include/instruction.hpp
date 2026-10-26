@@ -33,7 +33,7 @@ struct Instruction {
 
     // Semantic object operands reused by AR3 and STG encodings. For
     // pntt/pintt, pdst is pdata and psrc1 is ptwiddle; encode_stg maps them
-    // to the STG-specific duplicated-pdata and OP2 fields.
+    // to the STG-specific PDATA6 and PPARAM6 fields.
     int pdst = -1;
     int psrc1 = -1;
     int psrc2 = -1;
@@ -42,6 +42,8 @@ struct Instruction {
     int idx0 = -1;
     int idx1 = -1;
     int mod_id = -1;
+    // STG transform mode; for object PMUL, 1 selects online c*r^j factors.
+    // Immediate arithmetic keeps mode=0: bits[15:8] are the full imm8.
     std::uint8_t mode = 0;
     std::uint8_t flag = 0;
     std::uint16_t cfg = 0;
@@ -50,7 +52,11 @@ struct Instruction {
     int rs1 = -1;
     int rs2 = -1;
     std::uint8_t obj_id = 0;
+    // DMA MOD (DLOAD) or REL (DSTORE), encoded in bit 14.
     std::uint8_t type = 0;
+    // Per-command LLC allocation hint, independent of MOD/REL and bank mask.
+    std::uint8_t cp = 0;
+    // DLOAD bank mask (0 means MOD-dependent default); DSTORE must be zero.
     std::uint8_t dma_flag = 0;
 };
 

@@ -23,7 +23,8 @@ std::string generate_hpu_bconv_contexts_body_asm(
     const std::vector<int>& source_contexts,
     const std::vector<int>& target_contexts,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -48,6 +49,7 @@ std::string generate_hpu_bconv_contexts_body_asm(
     if (manage_modulus_table) {
         asm_code << "        // dload the runtime-relocated complete modulus table\n";
         asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+                               port_prefix + "/modulus_table",
                                hpu::DloadFlag::small_bank);
     }
 
@@ -58,14 +60,17 @@ std::string generate_hpu_bconv_contexts_body_asm(
         asm_code << hpu::resource::select_modulus(source_contexts[j]);
 
         asm_code << "        // dload source limb and runtime-relocated qhat inverse\n";
-        asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly);
+        const auto source = std::to_string(source_contexts[j]);
+        asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly,
+                                      port_prefix + "/source/mod" + source);
+        asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly,
+                                      port_prefix + "/inverse/mod" + source);
 
         asm_code << hpu::resource::multiply(POBJ_TMP_A, POBJ_TMP_A, POBJ_TMP_B);
-        asm_code << hpu::resource::discard(POBJ_TMP_B);
 
         asm_code << "        // dstore x_j to runtime-bound scratch span\n";
-        asm_code << hpu::resource::publish(POBJ_TMP_A, 1);
+        asm_code << hpu::resource::output(POBJ_TMP_A,
+                                        port_prefix + "/normalized/mod" + source);
     }
 
     // ==========================================
@@ -80,25 +85,25 @@ std::string generate_hpu_bconv_contexts_body_asm(
 
         for (std::size_t j = 0; j < source_contexts.size(); ++j) {
             asm_code << "        // dload x_j and qhat_modp_j_i from runtime-bound spans\n";
-            asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly);
-            asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly);
+            const auto source = std::to_string(source_contexts[j]);
+            const auto target = std::to_string(target_contexts[i]);
+            asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly,
+                port_prefix + "/accumulate/to" + target + "/source/mod" + source);
+            asm_code << hpu::resource::read(POBJ_TMP_B, hpu::DataType::poly,
+                port_prefix + "/factor/to" + target + "/from" + source);
 
             if (j == 0) {
                 asm_code << hpu::resource::multiply(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
             } else {
                 asm_code << hpu::resource::accumulate(POBJ_ACC, POBJ_TMP_A, POBJ_TMP_B);
             }
-            asm_code << hpu::resource::discard(POBJ_TMP_A);
-            asm_code << hpu::resource::discard(POBJ_TMP_B);
         }
         
         asm_code << "        // dstore accumulator to the resolved target span\n";
-        asm_code << hpu::resource::publish(POBJ_ACC, 1);
+        asm_code << hpu::resource::output(POBJ_ACC,
+            port_prefix + "/output/mod" + std::to_string(target_contexts[i]));
     }
 
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
-    }
 
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -112,7 +117,8 @@ std::string generate_hpu_bconv_body_asm(
     int num_p,
     int q_offset,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     if (num_p <= 0 || q_offset < 0
         || !hpu::has_mod_context_capacity(num_q, num_p, q_offset)) {
@@ -133,7 +139,8 @@ std::string generate_hpu_bconv_body_asm(
         source_contexts,
         target_contexts,
         append_psync,
-        manage_modulus_table);
+        manage_modulus_table,
+        port_prefix);
 }
 
 std::string generate_hpu_bconv_asm(

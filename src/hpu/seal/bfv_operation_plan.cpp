@@ -425,12 +425,12 @@ void BfvOperationPlan::validate_canonical_twiddles(const BfvLevelDescriptor& lev
     contexts.erase(std::unique(contexts.begin(), contexts.end()), contexts.end());
     for (int modulus_id : contexts) {
         const std::string prefix = "constants/twiddle/canonical/mod" + std::to_string(modulus_id);
-        require_twiddle(prefix + "/ntt/pre_twist", degree);
+        require_twiddle(prefix + "/ntt/pre_twist", hpu::model::kOnlinePmulParameterWords);
         for (std::size_t stage = 0; stage < stages; ++stage) {
             require_twiddle(prefix + "/ntt/stage" + std::to_string(stage), hpu::model::kStageTwiddleParameterWords);
             require_twiddle(prefix + "/intt/stage" + std::to_string(stage), hpu::model::kStageTwiddleParameterWords);
         }
-        require_twiddle(prefix + "/intt/post_untwist_scale", degree);
+        require_twiddle(prefix + "/intt/post_untwist_scale", hpu::model::kOnlinePmulParameterWords);
     }
 }
 
@@ -695,7 +695,7 @@ PreparedBfvRnsObject BfvOperationPlan::append_galois(
                                        "BFV Galois fused twiddle stage");
         }
         validate_twiddle_resource(image_builder_.image(), table.id + "/post_untwist_scale",
-                                   table.post_untwist_scale, degree,
+                                   table.post_untwist_scale, hpu::model::kOnlinePmulParameterWords,
                                    "BFV Galois fused post-untwist table");
         fused_ids.push_back(table.id);
     }

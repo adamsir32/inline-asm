@@ -1,4 +1,6 @@
 #include "hpu/delivery/resource_compiler.hpp"
+#include "hpu/compiler/ssa_optimization.hpp"
+#include <tuple>
 #include "executable.hpp"
 #include "assembler.hpp"
 
@@ -68,7 +70,7 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
     program.instructions = resources.instructions;
     std::vector<hpu::ExecutableDmaSpan> fixed_spans;
     std::ostringstream manifest, assembly;
-    manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+    manifest << "instruction_index,dma_index,operation_index,operation_id,operation_dma_index,direction,object_slot,type_or_release,flag,allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     std::map<std::string, std::size_t> operation_indices;
     program.ordered_dma_spans.clear();
     program.resource_dma = resources.dma;
@@ -86,7 +88,7 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
                  << (load ? "dload" : "dstore") << ',' << unsigned(inst.obj_id) << ',' << unsigned(inst.type)
                  << ',' << (load ? unsigned(inst.dma_flag) : 0) << ',' << csv_field(dma.allocation_id)
                  << ',' << dma.span.line_offset << ',' << dma.span.line_count << ','
-                 << hpu::format_word_hex(encoded.word) << ',' << csv_field(encoded.normalized_asm) << '\n';
+                 << hpu::format_word_hex(encoded.word) << ',' << csv_field(encoded.normalized_asm) << ',' << unsigned(inst.cp) << '\n';
         program.ordered_dma_spans.push_back(dma.span);
     }
     program.source = hpu::render_fixed_executable_source(
@@ -109,12 +111,10 @@ std::string compile_application_resources(
     execution_options.ntt_contract = instruction_ntt_contract;
     std::optional<hpu::model::InstructionExecutionResult> baseline_execution;
     std::vector<hpu::runtime::HpuMemSpan> baseline_output_spans;
-    if (optimize) {
-        baseline_execution = hpu::model::execute_instructions(
-            request.program.instructions, request.program.ordered_dma_spans, image, execution_options);
-        for (const auto& output : request.outputs) baseline_output_spans.push_back(output.destination);
-    }
     hpu::compiler::CompileOptions options;
+    options.dma_cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
+    options.automatic_lifetimes = true;
+    options.prune_unused_buffers = true;
     options.optimization = optimize ? hpu::compiler::OptimizationMode::optimized
                                    : hpu::compiler::OptimizationMode::no_opt;
     using Layout = hpu::compiler::MemoryLayout;
@@ -123,7 +123,7 @@ std::string compile_application_resources(
         if (allocation.kind == Kind::ciphertext && allocation.read_only)
             options.buffer_layouts.emplace(allocation.id,
                 request.scheme == hpu::delivery::SchemeKind::bfv
-                    ? Layout::coefficient_natural : Layout::canonical_ntt_physical);
+                    ? Layout::coefficient_bit_reversed : Layout::canonical_ntt_physical);
         else if (allocation.kind == Kind::evaluation_key
             || (allocation.kind == Kind::plaintext
                 && request.scheme != hpu::delivery::SchemeKind::bfv))
@@ -134,8 +134,11 @@ std::string compile_application_resources(
     // cross domains and is deliberately not assigned one permanent layout.
     for (const auto& output : request.outputs) {
         const auto& allocation = containing_allocation(image, output.destination);
+        options.required_outputs.insert(allocation.id);
         const auto layout = output.domain == hpu::delivery::OutputDomain::coefficient
-            ? Layout::coefficient_natural : Layout::canonical_ntt_physical;
+            ? Layout::coefficient_natural
+            : output.domain == hpu::delivery::OutputDomain::coefficient_bit_reversed
+                ? Layout::coefficient_bit_reversed : Layout::canonical_ntt_physical;
         const auto inserted = options.buffer_layouts.emplace(allocation.id, layout);
         if (!inserted.second && inserted.first->second != layout)
             throw std::invalid_argument("conflicting output buffer layouts: " + allocation.id);
@@ -151,18 +154,110 @@ std::string compile_application_resources(
             throw std::invalid_argument("native operator DMA port disagrees with baseline span");
     }
     auto source = *request.program.operator_program;
-    source.bind_ports(dma);
-    auto program = hpu::resource::bind_program(source, image);
-    auto resources = hpu::compiler::compile_resources(std::move(program),
-        request.program.instructions, dma, image, options);
+    if (!dma.empty()) source.bind_ports(dma);
+    // Immutable inputs have one layout for their entire lifetime. Mutable
+    // transform scratch crosses domains and must not receive a permanent tag.
+    for (auto& port : source.ports) {
+        if (!port.binding || !port.load) continue;
+        const auto& allocation = image.allocation(port.binding->allocation_id);
+        if (!allocation.read_only) continue;
+        if (port.layout != Layout::unspecified) {
+            const auto inserted = options.buffer_layouts.emplace(allocation.id, port.layout);
+            if (!inserted.second && inserted.first->second != port.layout)
+                throw std::invalid_argument("conflicting input buffer layouts: " + allocation.id);
+        } else {
+            const auto found = options.buffer_layouts.find(allocation.id);
+            if (found != options.buffer_layouts.end()) port.layout = found->second;
+        }
+    }
+    const auto compile_candidate = [&](const hpu::resource::OperatorProgram& native,
+                                       bool optimized, const char* name) {
+        auto candidate_options = options;
+        candidate_options.optimization = optimized ? hpu::compiler::OptimizationMode::optimized
+                                                  : hpu::compiler::OptimizationMode::no_opt;
+        auto virtual_program = hpu::resource::bind_program(native, image);
+        auto candidate = hpu::compiler::compile_resources(std::move(virtual_program), {}, dma, image,
+                                                         candidate_options);
+        candidate.report.selected_schedule = name;
+        return candidate;
+    };
+    std::optional<std::pair<std::uint64_t, std::size_t>> checkpoint_cost;
+    std::string checkpoint_error;
+    try {
+        auto canonical = hpu::resource::canonical_operator_program(source, image, options.required_outputs);
+        const auto checkpoints = compile_candidate(canonical, false, "all_checkpoints");
+        checkpoint_cost = std::make_pair(checkpoints.report.dload_bytes + checkpoints.report.dstore_bytes,
+                                         checkpoints.dma.size());
+    } catch (const hpu::compiler::ResourceCapacityError& error) {
+        // An unreachable branch must not block a valid required-output graph
+        // merely because this optional full-source diagnostic cannot fit.
+        checkpoint_error = error.what();
+    }
+    auto policy_only = hpu::resource::output_root_operator_program(source, image, options.required_outputs);
+    auto resources = compile_candidate(policy_only, false, "original");
+    for (const auto& output : request.outputs) {
+        const auto& allocation = containing_allocation(image, output.destination);
+        baseline_output_spans.push_back(hpu::compiler::relocate_span(resources, allocation.id, output.destination));
+    }
+    std::vector<hpu::runtime::HpuMemSpan> canonical_spans;
+    for (const auto& entry : resources.dma) canonical_spans.push_back(entry.span);
+    baseline_execution = hpu::model::execute_instructions(
+        resources.instructions, canonical_spans, resources.image, execution_options);
+    const auto baseline_dma_bytes = resources.report.dload_bytes + resources.report.dstore_bytes;
+    const auto baseline_dma_count = resources.dma.size();
+    const auto key = [](const hpu::compiler::CompiledResources& candidate) {
+        return std::make_tuple(candidate.report.dload_bytes + candidate.report.dstore_bytes,
+                               candidate.dma.size(), candidate.instructions.size());
+    };
+    std::ostringstream candidate_reports;
+    candidate_reports << "{\"name\":\"original\",\"dma_bytes\":" << baseline_dma_bytes
+        << ",\"dma_count\":" << resources.dma.size() << '}';
+    if (optimize) {
+        for (const bool reorder : {false, true}) {
+            hpu::resource::SsaOptimizationReport pass_report;
+            const auto native = hpu::resource::optimize_operator_program(
+                source, image, options.required_outputs, reorder, &pass_report);
+            const auto* name = reorder ? "reordered" : "reuse";
+            try {
+                auto candidate = compile_candidate(native, true, name);
+                candidate_reports << ",{\"name\":" << json_string(name)
+                    << ",\"dma_bytes\":" << candidate.report.dload_bytes + candidate.report.dstore_bytes
+                    << ",\"dma_count\":" << candidate.dma.size()
+                    << ",\"merged_reads\":" << pass_report.merged_reads
+                    << ",\"forwarded_reads\":" << pass_report.forwarded_reads
+                    << ",\"dead_operations\":" << pass_report.dead_operations << '}';
+                if (key(candidate) < key(resources)) resources = std::move(candidate);
+            } catch (const hpu::compiler::ResourceCapacityError& error) {
+                candidate_reports << ",{\"name\":" << json_string(name)
+                    << ",\"status\":\"infeasible\",\"reason\":" << json_string(error.what()) << '}';
+            }
+        }
+    }
+    resources.report.original_dma_bytes = baseline_dma_bytes;
+    resources.report.original_dma_count = baseline_dma_count;
     for (auto& output : request.outputs) {
         const auto& allocation = containing_allocation(image, output.destination);
         output.destination = hpu::compiler::relocate_span(resources, allocation.id, output.destination);
     }
 
     render_program(request.program, resources);
+    request.program.dma_cache_policy = options.dma_cache_policy;
 
-    const auto resource_report = hpu::compiler::render_resource_report(resources);
+    auto resource_report = hpu::compiler::render_resource_report(resources);
+    std::uint64_t removed_checkpoint_bytes = 0;
+    for (const auto& allocation : image.allocations())
+        if (allocation.kind == Kind::output && !options.required_outputs.count(allocation.id))
+            removed_checkpoint_bytes += allocation.span.line_count * 256;
+    append_json_members(resource_report,
+        "\"candidate_schedules\":[" + candidate_reports.str() + "]" +
+        ",\"all_checkpoint_status\":" + json_string(checkpoint_cost ? "compiled" : "infeasible") +
+        ",\"all_checkpoint_reason\":" + json_string(checkpoint_error) +
+        ",\"all_checkpoint_dma_bytes\":" + (checkpoint_cost ? std::to_string(checkpoint_cost->first) : "null") +
+        ",\"all_checkpoint_dma_count\":" + (checkpoint_cost ? std::to_string(checkpoint_cost->second) : "null") +
+        ",\"output_policy_saved_dma_bytes\":" +
+            (checkpoint_cost ? std::to_string(static_cast<std::int64_t>(checkpoint_cost->first) -
+                static_cast<std::int64_t>(baseline_dma_bytes)) : "null") +
+        ",\"removed_checkpoint_min_write_bytes\":" + std::to_string(removed_checkpoint_bytes));
     image = std::move(resources.image);
     request.initial_image = &image;
     const auto execution = hpu::model::execute_instructions(

@@ -1,6 +1,7 @@
 #include "hpu/model/instruction_executor.hpp"
 
 #include "hpu/model/hardware_ntt.hpp"
+#include "hpu/runtime/bank_allocator.hpp"
 #include "encoder.hpp"
 
 #include <algorithm>
@@ -29,12 +30,13 @@ hpu::Instruction decode_word(std::uint32_t word)
     if (opcode == 0x2bU) {
         const bool store = ((word >> 12U) & 1U) != 0;
         result.mnemonic = store ? Mnemonic::kDstore : Mnemonic::kDload;
-        result.obj_id = static_cast<std::uint8_t>((word >> 25U) & 7U);
+        result.obj_id = static_cast<std::uint8_t>((word >> 26U) & 63U);
         result.rs1 = static_cast<int>((word >> 15U) & 31U);
         result.rs2 = static_cast<int>((word >> 20U) & 31U);
-        const auto operation = static_cast<std::uint8_t>((word >> 13U) & 3U);
-        result.type = store ? operation >> 1U : operation;
-        result.dma_flag = static_cast<std::uint8_t>((word >> 7U) & 1U);
+        result.type = static_cast<std::uint8_t>((word >> 14U) & 1U); // MOD / REL
+        result.cp = static_cast<std::uint8_t>((word >> 13U) & 1U);
+        result.dma_flag = store ? 0 : static_cast<std::uint8_t>(
+            ((word >> 20U) & 32U) | ((word >> 7U) & 31U));
     } else if (opcode == 0x5bU) {
         const auto operation = word >> 28U;
         switch (operation) {
@@ -47,32 +49,33 @@ hpu::Instruction decode_word(std::uint32_t word)
         case 6: result.mnemonic = Mnemonic::kPmodld; break;
         case 7: result.mnemonic = Mnemonic::kPsync; break;
         case 8: result.mnemonic = Mnemonic::kPfree; break;
-        default: throw std::invalid_argument("unknown custom2 opcode");
+        default: throw std::invalid_argument("unknown custom0 opcode");
         }
         if (operation < 4) {
-            result.pdst = static_cast<int>((word >> 25U) & 7U);
-            result.psrc1 = static_cast<int>((word >> 22U) & 7U);
-            result.mode = static_cast<std::uint8_t>((word >> 8U) & 3U);
-            result.flag = static_cast<std::uint8_t>((word >> 7U) & 1U);
-            const auto op2 = static_cast<int>((word >> 14U) & 255U);
-            if ((result.mode & 1U) != 0) result.imm8 = op2;
-            else result.psrc2 = op2;
+            result.pdst = static_cast<int>((word >> 22U) & 63U);
+            result.psrc1 = static_cast<int>((word >> 16U) & 63U);
+            const auto op2 = static_cast<int>((word >> 8U) & 255U);
+            if ((word & (1U << 7U)) != 0) result.imm8 = op2;
+            else {
+                result.psrc2 = op2 & 63;
+                result.mode = static_cast<std::uint8_t>((word >> 14U) & 3U);
+            }
         } else if (operation < 6) {
-            result.pdst = static_cast<int>((word >> 25U) & 7U);
-            result.psrc1 = static_cast<int>((word >> 14U) & 255U);
-            result.idx0 = static_cast<int>((word >> 10U) & 15U);
-            result.mode = static_cast<std::uint8_t>((word >> 8U) & 3U);
-            result.flag = static_cast<std::uint8_t>((word >> 7U) & 1U);
+            result.pdst = static_cast<int>((word >> 22U) & 63U);
+            result.psrc1 = static_cast<int>((word >> 16U) & 63U);
+            result.idx0 = static_cast<int>((word >> 12U) & 15U);
+            result.mode = static_cast<std::uint8_t>((word >> 10U) & 3U);
+            result.flag = static_cast<std::uint8_t>((word >> 9U) & 1U);
         } else if (operation == 6) {
-            result.mod_id = static_cast<int>((word >> 14U) & 255U);
+            result.mod_id = static_cast<int>((word >> 8U) & 255U);
         } else if (operation == 8) {
-            result.idx0 = static_cast<int>((word >> 22U) & 7U);
+            result.idx0 = static_cast<int>((word >> 16U) & 63U);
             result.idx1 = 0;
         }
     } else {
-        throw std::invalid_argument("word is not an HPU custom1/custom2 instruction");
+        throw std::invalid_argument("word is not an HPU custom1/custom0 instruction");
     }
-    // Reject reserved bits and malformed duplicated STG operands. This check
+    // Reject reserved fields, illegal immediate forms and unsupported opcodes. This check
     // uses independently decoded fields, never the companion metadata.
     if (hpu::encode_instruction(result) != word)
         throw std::invalid_argument("instruction contains invalid/reserved fields");
@@ -111,8 +114,8 @@ void require_canonical(const std::vector<std::uint32_t>& words, std::uint32_t mo
 
 struct ResidentObject {
     std::vector<std::uint32_t> words;
-    bool small_bank = false;
-    std::uint8_t type = 1;
+    // MOD bit only; CP is not object metadata.
+    std::uint8_t type = 0;
 };
 
 } // namespace
@@ -124,6 +127,8 @@ const char* instruction_ntt_contract_name(InstructionNttContract contract) noexc
         return "legacy_raw_stage";
     case InstructionNttContract::natural_coefficient_boundaries:
         return "natural_coefficient_boundaries";
+    case InstructionNttContract::raw_bit_reversed_coefficients:
+        return "raw_bit_reversed_coefficients";
     }
     return "unknown";
 }
@@ -138,7 +143,8 @@ InstructionExecutionResult execute_instructions(
     result.words = image.words();
     auto& report = result.report;
     report.ntt_contract = options.ntt_contract;
-    std::array<std::optional<ResidentObject>, 8> objects;
+    std::array<std::optional<ResidentObject>, 64> objects;
+    std::optional<hpu::runtime::BankAllocator> banks;
     int modulus_object = -1;
     std::optional<std::uint32_t> modulus;
     std::size_t dma_index = 0;
@@ -149,32 +155,35 @@ InstructionExecutionResult execute_instructions(
             throw std::invalid_argument("object p" + std::to_string(id) + " is not resident");
         return *objects[id];
     };
-    auto account_banks = [&](std::size_t extra = 0) {
-        std::size_t resident = 0;
-        std::size_t regular = extra;
-        for (const auto& object : objects) {
-            if (!object) continue;
-            ++resident;
-            if (!object->small_bank) ++regular;
-        }
-        report.peak_resident_objects = std::max(report.peak_resident_objects, resident);
-        report.peak_regular_banks = std::max(report.peak_regular_banks, regular);
-        if (regular > options.regular_bank_count)
-            throw std::invalid_argument("insufficient regular banks including transform output");
+    auto account_banks = [&] {
+        const auto& stats = banks->stats();
+        report.peak_resident_objects = stats.peak_resident_objects;
+        report.peak_regular_banks = stats.peak_regular_banks;
+        report.peak_regular_lines = stats.peak_regular_lines;
+        report.peak_small_lines = stats.peak_small_lines;
     };
     auto release = [&](int id) {
         require_object(id);
+        banks->release(static_cast<std::uint8_t>(id));
         objects[id].reset();
+        account_banks();
         if (modulus_object == id) modulus_object = -1;
     };
 
     try {
         if (options.ntt_contract != InstructionNttContract::legacy_raw_stage
+            && options.ntt_contract != InstructionNttContract::raw_bit_reversed_coefficients
             && options.ntt_contract != InstructionNttContract::natural_coefficient_boundaries)
             throw UnsupportedContract("unknown instruction NTT software contract");
         if (instructions.empty() || options.regular_bank_count == 0
             || options.regular_bank_lines == 0)
             throw std::invalid_argument("empty program or invalid bank limits");
+        hpu::runtime::BankAllocatorOptions bank_options;
+        bank_options.regular_bank_count = options.regular_bank_count;
+        bank_options.regular_bank_lines = options.regular_bank_lines;
+        bank_options.mod_table_lines = options.mod_table_lines;
+        banks.emplace(bank_options);
+        account_banks();
         for (std::size_t index = 0; index < instructions.size(); ++index) {
             report.instruction_index = index;
             const auto instruction = decode_word(instructions[index].word);
@@ -189,22 +198,19 @@ InstructionExecutionResult execute_instructions(
                 const auto offset = span_offset(span, result.words.size());
                 const auto length = static_cast<std::size_t>(span.line_count) * kLineWords;
                 const auto id = instruction.obj_id;
+                // CP is an LLC allocation hint for this command. It neither
+                // changes payload arithmetic nor persists in the SRAM object.
                 if (instruction.mnemonic == Mnemonic::kDload) {
-                    if (objects[id]) throw std::invalid_argument("DLOAD overwrites a resident object");
-                    const bool small = instruction.dma_flag != 0;
-                    if (span.line_count > (small ? 32 : options.regular_bank_lines))
-                        throw std::invalid_argument("DLOAD object exceeds bank capacity");
-                    if (small && instruction.type != 2)
-                        throw UnsupportedContract("small-bank non-modulus objects are unsupported");
-                    if (!small && instruction.type == 2)
-                        throw UnsupportedContract("modulus table requires small bank");
-                    if (small && modulus_object >= 0)
-                        throw std::invalid_argument("multiple resident small-bank modulus tables");
+                    banks->load(id, static_cast<std::size_t>(span.line_count),
+                                instruction.type, instruction.dma_flag);
+                    // Successful replacement publishes both the physical map
+                    // and payload; a failed load leaves the old object intact.
+                    if (modulus_object == id) modulus_object = -1;
                     objects[id] = ResidentObject{
                         std::vector<std::uint32_t>(result.words.begin() + offset,
                                                   result.words.begin() + offset + length),
-                        small, instruction.type};
-                    if (small) modulus_object = id;
+                        instruction.type};
+                    if (instruction.type == 1) modulus_object = id;
                     report.loaded_words += length;
                     account_banks();
                 } else {
@@ -220,14 +226,12 @@ InstructionExecutionResult execute_instructions(
                     }
                     std::copy(source.words.begin(), source.words.end(), result.words.begin() + offset);
                     report.stored_words += length;
-                    release(id); // Current executable ABI releases for both REL values.
+                    if (instruction.type == 1) release(id); // REL=0 retains ownership.
                 }
                 break;
             }
             case Mnemonic::kPmodld: {
                 if (modulus_object < 0) throw std::invalid_argument("PMODLD has no modulus table");
-                if (instruction.mod_id > 63)
-                    throw UnsupportedContract("MOD_ID exceeds current 0..63 application ABI");
                 const auto& table = require_object(modulus_object).words;
                 const auto offset = static_cast<std::size_t>(instruction.mod_id) * 4;
                 if (offset + 4 > table.size()) throw std::invalid_argument("MOD_ID exceeds loaded table");
@@ -251,9 +255,21 @@ InstructionExecutionResult execute_instructions(
                 if (instruction.flag != 0 || (instruction.mode & 2U) != 0)
                     throw UnsupportedContract("arithmetic mode/flag is not modeled");
                 const auto& left = require_object(instruction.psrc1);
-                if (left.small_bank) throw std::invalid_argument("arithmetic reads small-bank object");
                 const auto* right = instruction.imm8 < 0 ? &require_object(instruction.psrc2) : nullptr;
-                if (right && (right->small_bank || right->words.size() != left.words.size()))
+                if (instruction.mnemonic == Mnemonic::kPmul && instruction.mode == 1) {
+                    const auto factors = expand_online_pmul_factors(right->words, *modulus, left.words.size());
+                    std::vector<std::uint32_t> output(left.words.size());
+                    for (std::size_t i = 0; i < output.size(); ++i)
+                        output[i] = static_cast<std::uint32_t>(
+                            static_cast<std::uint64_t>(left.words[i]) * factors[i] % *modulus);
+                    banks->online_multiply(static_cast<std::uint8_t>(instruction.pdst),
+                        static_cast<std::uint8_t>(instruction.psrc1),
+                        static_cast<std::uint8_t>(instruction.psrc2));
+                    objects[instruction.pdst] = ResidentObject{std::move(output), 0};
+                    account_banks();
+                    break;
+                }
+                if (right && right->words.size() != left.words.size())
                     throw std::invalid_argument("arithmetic source layouts/lengths differ");
                 const bool mac = instruction.mnemonic == Mnemonic::kPmac;
                 if (instruction.mnemonic == Mnemonic::kPadd || instruction.mnemonic == Mnemonic::kPsub) {
@@ -261,12 +277,9 @@ InstructionExecutionResult execute_instructions(
                     require_canonical(right->words, *modulus, "add/sub right operand");
                 }
                 const ResidentObject* accumulator = mac ? &require_object(instruction.pdst) : nullptr;
-                if (accumulator && (accumulator->small_bank || accumulator->words.size() != left.words.size()))
+                if (accumulator && accumulator->words.size() != left.words.size())
                     throw std::invalid_argument("PMAC accumulator layout/length differs");
                 if (accumulator) require_canonical(accumulator->words, *modulus, "PMAC accumulator");
-                if (objects[instruction.pdst] && (objects[instruction.pdst]->small_bank
-                    || objects[instruction.pdst]->words.size() != left.words.size()))
-                    throw std::invalid_argument("arithmetic destination layout/length differs");
                 std::vector<std::uint32_t> output(left.words.size());
                 for (std::size_t i = 0; i < output.size(); ++i) {
                     const std::uint64_t a = left.words[i];
@@ -280,7 +293,11 @@ InstructionExecutionResult execute_instructions(
                     }
                     output[i] = static_cast<std::uint32_t>(value % *modulus);
                 }
-                objects[instruction.pdst] = ResidentObject{std::move(output), false, 1};
+                banks->arithmetic(static_cast<std::uint8_t>(instruction.pdst),
+                    static_cast<std::uint8_t>(instruction.psrc1),
+                    right ? std::optional<std::uint8_t>(instruction.psrc2) : std::nullopt,
+                    mac);
+                objects[instruction.pdst] = ResidentObject{std::move(output), 0};
                 account_banks();
                 break;
             }
@@ -291,13 +308,11 @@ InstructionExecutionResult execute_instructions(
                     throw UnsupportedContract("transform mode/flag is not modeled");
                 const auto& data = require_object(instruction.pdst);
                 const auto& twiddle = require_object(instruction.psrc1);
-                if (data.small_bank || twiddle.small_bank
-                    || twiddle.words.size() != kStageTwiddleParameterWords)
-                    throw std::invalid_argument("transform requires a regular-bank two-line K=8 twiddle parameter object");
+                if (twiddle.type == 1 || twiddle.words.size() != kStageTwiddleParameterWords)
+                    throw std::invalid_argument("transform requires a two-line K=8 twiddle parameter object");
                 const auto degree = data.words.size();
                 if (degree < 128 || degree > 65536 || (degree & (degree - 1)) != 0)
                     throw std::invalid_argument("transform degree must be a power of two in [128, 65536]");
-                account_banks(1); // Out-of-place stage output, in addition to resident inputs.
                 auto input = data.words;
                 const bool inverse = instruction.mnemonic == Mnemonic::kPintt;
                 if (!inverse && instruction.idx0 == 0 && options.ntt_contract
@@ -318,18 +333,18 @@ InstructionExecutionResult execute_instructions(
                     output = std::move(input);
                     ++report.inverse_boundary_conversions;
                 }
+                banks->ntt(static_cast<std::uint8_t>(instruction.pdst));
                 objects[instruction.pdst]->words = std::move(output);
+                account_banks();
                 break;
             }
             case Mnemonic::kPfree:
                 release(instruction.idx0);
                 break;
             case Mnemonic::kPsync:
-                if (index + 1 != instructions.size())
-                    throw std::invalid_argument("PSYNC must be the terminal instruction");
-                for (const auto& object : objects)
-                    if (object) throw std::invalid_argument("resident object survives terminal PSYNC");
-                finished = true;
+                // A wait preserves all live objects and may occur between
+                // commands. Complete executable streams still end in a wait.
+                finished = index + 1 == instructions.size();
                 break;
             }
             ++report.executed_instructions;

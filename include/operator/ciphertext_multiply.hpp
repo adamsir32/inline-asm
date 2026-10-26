@@ -7,7 +7,8 @@ std::string generate_hpu_ciphertext_multiply_body_asm(
     int num_q,
     int num_p,
     int dnum,
-    bool append_psync = false);
+    bool append_psync = false,
+    const std::string& port_prefix = "multiply");
 
 std::string generate_hpu_ciphertext_multiply_asm(
     int N,

@@ -9,7 +9,6 @@ int main(int argc, char** argv)
             evaluator.rotate_rows(x, 1, galois, rows);
             evaluator.rotate_columns(x, galois, columns);
             evaluator.add(rows, columns, mixed);
-            app.mark_output("mixed", mixed);
             evaluator.multiply(x, mixed, y);
             evaluator.relinearize_inplace(y, relin);
             evaluator.mod_switch_to_next_inplace(y);

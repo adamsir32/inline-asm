@@ -27,6 +27,7 @@ struct BgvKeySwitchDmaBinding {
     std::optional<std::size_t> operation_index;
     std::string operation_id = "$application";
     std::size_t operation_dma_index = 0;
+    std::uint8_t cp = 0;
 };
 
 // Resolved single-operation BGV image/DMA container, also reused by the

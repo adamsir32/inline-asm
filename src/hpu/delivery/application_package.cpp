@@ -151,6 +151,8 @@ std::string output_domain_name(OutputDomain domain)
     switch (domain) {
     case OutputDomain::coefficient:
         return "coefficient";
+    case OutputDomain::coefficient_bit_reversed:
+        return "coefficient_bit_reversed";
     case OutputDomain::canonical_ntt_physical:
         return "canonical_ntt_physical";
     }
@@ -338,7 +340,16 @@ std::string render_build_json(const ApplicationPackageRequest& request)
     return output.str();
 }
 
-std::string render_abi_json()
+const char* dma_cache_policy_name(hpu::compiler::DmaCachePolicy policy)
+{
+    switch (policy) {
+    case hpu::compiler::DmaCachePolicy::preserve: return "preserve";
+    case hpu::compiler::DmaCachePolicy::twiddle_loads_only: return "twiddle_loads_only";
+    }
+    throw std::invalid_argument("application package has an invalid DMA cache policy");
+}
+
+std::string render_abi_json(hpu::compiler::DmaCachePolicy policy)
 {
     std::ostringstream output;
     output.imbue(std::locale::classic());
@@ -346,6 +357,17 @@ std::string render_abi_json()
         "{\n"
         "  \"schema\": \"hpu-dma-abi\",\n"
         "  \"schema_version\": 1,\n"
+        "  \"instruction_isa\": \"hpu-objects64-v1.2\",\n"
+        "  \"object_slots\": 64,\n"
+        "  \"allocation_granule_lines\": 128,\n"
+        "  \"mod_table_lines\": 4,\n"
+        "  \"stage_parameter_mod\": 0,\n"
+        "  \"stage_parameter_bank_mask\": 32,\n"
+        "  \"default_cp\": 0,\n"
+        "  \"dma_cache_policy\": \"" << dma_cache_policy_name(policy) << "\",\n"
+        "  \"dma_format\": \"mod_rel_cp\",\n"
+        "  \"dload_mask_scope\": \"load_only\",\n"
+        "  \"dstore_rel0_retains\": true,\n"
         "  \"rs1\": \"x10\",\n"
         "  \"rs2\": \"x11\",\n"
         "  \"word_bits\": 32,\n"
@@ -354,7 +376,11 @@ std::string render_abi_json()
         "  \"byte_order\": \"little-endian\",\n"
         "  \"stage_twiddle_format\": \"" << hpu::model::kStageTwiddleParameterFormat << "\",\n"
         "  \"twiddle_chains\": " << hpu::model::kTwiddleChains << ",\n"
-        "  \"stage_parameter_lines\": " << hpu::model::kStageTwiddleParameterLines << '\n' <<
+        "  \"stage_parameter_lines\": " << hpu::model::kStageTwiddleParameterLines << ",\n" <<
+        "  \"online_pmul_format\": \"" << hpu::model::kOnlinePmulParameterFormat << "\",\n"
+        "  \"online_pmul_parameter_lines\": " << hpu::model::kOnlinePmulParameterLines << ",\n"
+        "  \"online_pmul_mode\": 1,\n"
+        "  \"online_pmul_parameter_bank_mask\": 32\n" <<
         "}\n";
     return output.str();
 }
@@ -855,6 +881,20 @@ private:
     std::size_t position_ = 0;
 };
 
+bool extract_json_bool(
+    const std::string& json, const std::string& key,
+    const std::filesystem::path& path)
+{
+    const auto fields = JsonReader(json, path).read_document();
+    const auto found = fields.find(key);
+    if (found == fields.end() || found->second.kind != JsonKind::literal
+        || (found->second.text != "true" && found->second.text != "false")) {
+        throw std::runtime_error("application package JSON '" + path.string()
+            + "' is missing boolean field '" + key + "'");
+    }
+    return found->second.text == "true";
+}
+
 std::uint64_t extract_json_u64(
     const std::string& json,
     const std::string& key,
@@ -1189,6 +1229,7 @@ std::vector<GoldenManifestRow> parse_golden_manifest(
         }
         row.modulus = static_cast<std::uint32_t>(modulus);
         if (fields[4] != "coefficient"
+            && fields[4] != "coefficient_bit_reversed"
             && fields[4] != "canonical_ntt_physical") {
             throw std::runtime_error(
                 "application package " + context + " has invalid domain '"
@@ -1322,10 +1363,10 @@ std::vector<std::string> split_resolved_dma_csv(
         if (position == line.size()) break;
         ++position;
     }
-    if (fields.size() != 14) {
+    if (fields.size() != 15) {
         throw std::runtime_error(
             "application package DMA manifest '" + path.string()
-            + "' row must have exactly 14 fields");
+            + "' row must have exactly 15 fields");
     }
     return fields;
 }
@@ -1336,12 +1377,14 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<AllocationManifestRow>& allocations,
     std::uint64_t used_lines,
-    const std::vector<hpu::runtime::HpuMemSpan>* ordered_spans)
+    const std::vector<hpu::runtime::HpuMemSpan>* ordered_spans,
+    hpu::compiler::DmaCachePolicy cache_policy)
 {
+    (void)dma_cache_policy_name(cache_policy);
     static constexpr const char* kHeader =
         "instruction_index,dma_index,operation_index,operation_id,"
         "operation_dma_index,direction,object_slot,type_or_release,flag,"
-        "allocation_id,line_offset,line_count,word_hex,normalized_asm";
+        "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp";
     const auto relocations = hpu::collect_dma_relocations(instructions);
     std::istringstream input(contents);
     input.imbue(std::locale::classic());
@@ -1377,6 +1420,7 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
             || number(6, "object_slot") != relocation.object_id
             || number(7, "type_or_release") != relocation.type_or_release
             || number(8, "flag") != relocation.flag
+            || number(14, "cp") != relocation.cp
             || fields[12] != hpu::format_word_hex(instruction.word)
             || fields[13] != instruction.normalized_asm) {
             throw std::runtime_error(
@@ -1407,6 +1451,16 @@ std::vector<hpu::runtime::HpuMemSpan> validate_resolved_dma_manifest(
                         "application package DMA manifest DSTORE targets read_only allocation '"
                         + allocation.allocation_id + "'");
                 }
+                if (cache_policy == hpu::compiler::DmaCachePolicy::twiddle_loads_only) {
+                    const auto expected_cp = relocation.direction == hpu::Mnemonic::kDload
+                        && allocation.kind == "twiddle" ? 1 : 0;
+                    if (relocation.cp != expected_cp) {
+                        throw std::runtime_error(
+                            "application package DMA cache policy mismatch for allocation '"
+                            + allocation.allocation_id + "' at relocation "
+                            + std::to_string(index));
+                    }
+                }
                 found = true;
                 break;
             }
@@ -1436,6 +1490,12 @@ void validate_program_source(
     const std::vector<hpu::runtime::HpuMemSpan>& spans,
     hpu::ExecutableTwiddleFormat twiddle_format = hpu::ExecutableTwiddleFormat::online_k8)
 {
+    // All packages carry resolved spans, even when their entry accepts a
+    // dynamic span table. Validate the same target shapes for both renderers.
+    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
+    for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
+    const auto fixed = hpu::render_fixed_executable_source(
+        stem, instructions, capacity_lines, fixed_spans, twiddle_format);
     const std::string base = hpu::render_executable_source(
         stem, instructions, capacity_lines);
     if (source == base) return;
@@ -1458,10 +1518,7 @@ void validate_program_source(
     }
     expected << "_DMA_COUNT);\n}\n";
     if (source == expected.str()) return; // Historical V1 fixed-table wrapper.
-    std::vector<hpu::ExecutableDmaSpan> fixed_spans;
-    for (const auto& span : spans) fixed_spans.push_back({span.line_offset, span.line_count});
-    if (source != hpu::render_fixed_executable_source(stem, instructions, capacity_lines, fixed_spans,
-                                                    twiddle_format)) {
+    if (source != fixed) {
         throw std::runtime_error(
             "application package program source differs from encoded instructions or DMA spans");
     }
@@ -1588,6 +1645,33 @@ void validate_physical_artifacts(const std::filesystem::path& root)
 
     const std::string descriptor = read_file(root / "package.json");
     const std::filesystem::path descriptor_path = root / "package.json";
+    const auto target_abi_path = root / "memory/abi.json";
+    const auto target_abi = read_file(target_abi_path);
+    // Earlier v1.2 packages did not declare a policy and preserve their CP bits.
+    auto cache_policy = hpu::compiler::DmaCachePolicy::preserve;
+    if (JsonReader(target_abi, target_abi_path).read_document().count("dma_cache_policy")) {
+        const auto policy_name = extract_json_string(
+            target_abi, "dma_cache_policy", target_abi_path, true);
+        if (policy_name == "twiddle_loads_only")
+            cache_policy = hpu::compiler::DmaCachePolicy::twiddle_loads_only;
+        else if (policy_name != "preserve")
+            throw std::runtime_error("application package memory/abi.json has an unknown DMA cache policy");
+    }
+    if (extract_json_string(target_abi, "instruction_isa", target_abi_path, false)
+            != "hpu-objects64-v1.2"
+        || extract_json_u64(target_abi, "object_slots", target_abi_path) != 64
+        || extract_json_u64(target_abi, "allocation_granule_lines", target_abi_path) != 128
+        || extract_json_u64(target_abi, "mod_table_lines", target_abi_path) != 4
+        || extract_json_u64(target_abi, "stage_parameter_mod", target_abi_path) != 0
+        || extract_json_u64(target_abi, "stage_parameter_bank_mask", target_abi_path) != 32
+        || extract_json_u64(target_abi, "default_cp", target_abi_path) != 0
+        || extract_json_string(target_abi, "dma_format", target_abi_path, false) != "mod_rel_cp"
+        || extract_json_string(target_abi, "dload_mask_scope", target_abi_path, false) != "load_only"
+        || !extract_json_bool(target_abi, "dstore_rel0_retains", target_abi_path)) {
+        throw std::runtime_error(
+            "application package targets an incompatible instruction ISA or bank configuration; "
+            "regenerate for hpu-objects64-v1.2 in a new output directory");
+    }
     const std::string asm_path = extract_json_string(
         descriptor, "program_asm", descriptor_path, true);
     const std::string inst32_path = extract_json_string(
@@ -1616,21 +1700,27 @@ void validate_physical_artifacts(const std::filesystem::path& root)
     const auto resolved_spans = validate_resolved_dma_manifest(
         read_file(root / "program/dma_relocation_manifest.csv"),
         root / "program/dma_relocation_manifest.csv", assembled, memory,
-        used_lines, nullptr);
-    // Historical packages must remain structurally verifiable so managed
-    // generation can safely replace them. This does not execute their data on
-    // the current target. New requests are always validated with online_k8.
+        used_lines, nullptr, cache_policy);
     const auto abi_path = root / "memory/abi.json";
     const auto abi = read_file(abi_path);
     const auto format = extract_json_string(abi, "stage_twiddle_format", abi_path, false);
-    auto twiddle_format = hpu::ExecutableTwiddleFormat::online_k8;
-    if (format.empty()) {
-        twiddle_format = hpu::ExecutableTwiddleFormat::legacy_full_table;
-    } else if (format != hpu::model::kStageTwiddleParameterFormat
-               || extract_json_u64(abi, "twiddle_chains", abi_path) != hpu::model::kTwiddleChains
-               || extract_json_u64(abi, "stage_parameter_lines", abi_path)
-                   != hpu::model::kStageTwiddleParameterLines) {
+    const auto twiddle_format = hpu::ExecutableTwiddleFormat::online_k8;
+    if (format != hpu::model::kStageTwiddleParameterFormat
+        || extract_json_u64(abi, "twiddle_chains", abi_path) != hpu::model::kTwiddleChains
+        || extract_json_u64(abi, "stage_parameter_lines", abi_path)
+            != hpu::model::kStageTwiddleParameterLines) {
         throw std::runtime_error("application package memory ABI has unsupported stage twiddle format");
+    }
+    const bool uses_online_pmul = std::any_of(assembled.begin(), assembled.end(), [](const auto& encoded) {
+        return encoded.instruction.mnemonic == hpu::Mnemonic::kPmul && encoded.instruction.mode == 1;
+    });
+    const auto online_format = extract_json_string(abi, "online_pmul_format", abi_path, false);
+    if ((uses_online_pmul || !online_format.empty()) &&
+        (online_format != hpu::model::kOnlinePmulParameterFormat
+         || extract_json_u64(abi, "online_pmul_parameter_lines", abi_path) != hpu::model::kOnlinePmulParameterLines
+         || extract_json_u64(abi, "online_pmul_mode", abi_path) != 1
+         || extract_json_u64(abi, "online_pmul_parameter_bank_mask", abi_path) != 32)) {
+        throw std::runtime_error("application package memory ABI has unsupported online PMUL format");
     }
     validate_program_source(
         std::filesystem::path(asm_path).stem().string(),
@@ -1915,6 +2005,7 @@ void validate_application_package_request(
     for (const auto& allocation : allocations) {
         AllocationManifestRow row;
         row.allocation_id = allocation.id;
+        row.kind = allocation_kind_name(allocation.kind);
         row.line_offset = allocation.span.line_offset;
         row.line_count = allocation.span.line_count;
         row.read_only = allocation.read_only;
@@ -1923,7 +2014,8 @@ void validate_application_package_request(
     validate_resolved_dma_manifest(
         request.program.resolved_dma_manifest,
         "program/dma_relocation_manifest.csv", request.program.instructions,
-        dma_allocations, image.used_lines(), &request.program.ordered_dma_spans);
+        dma_allocations, image.used_lines(), &request.program.ordered_dma_spans,
+        request.program.dma_cache_policy);
     validate_program_source(
         request.program.stem, request.program.source,
         request.program.instructions, image.capacity_lines(),
@@ -1993,7 +2085,9 @@ void validate_application_package_request(
                 context_case(request) + " output allocation '" + allocation.id
                 + "' is read_only");
         }
-        if (output_coverage[allocation.id] != 1) {
+        if (output_coverage[allocation.id] != 1
+            && !(output_coverage[allocation.id] == 0 && request.program.operator_program
+                && !request.program.resources_compiled)) {
             throw std::invalid_argument(
                 context_case(request) + " output allocation '" + allocation.id
                 + "' must be covered by exactly one golden limb");
@@ -2037,7 +2131,10 @@ ApplicationPackageReport write_application_package(
     const std::filesystem::path& output_root,
     const ApplicationPackageRequest& original_request)
 {
-    validate_application_package_request(original_request);
+    if (!original_request.program.operator_program || original_request.program.resources_compiled)
+        validate_application_package_request(original_request);
+    else if (!original_request.initial_image)
+        throw std::invalid_argument("native application package requires an initial image");
     if (output_root.empty()) {
         throw std::invalid_argument("application package output root is empty");
     }
@@ -2087,7 +2184,7 @@ ApplicationPackageReport write_application_package(
     add("memory/hpu_mem_image.u32.bin", render_u32_le(image.words()));
     add("memory/line_map.csv", render_line_map(image));
     add("memory/memory_manifest.csv", render_memory_manifest(image));
-    add("memory/abi.json", render_abi_json());
+    add("memory/abi.json", render_abi_json(request.program.dma_cache_policy));
     add("memory/hpu_mem_config.json", render_memory_config_json(image));
     add("golden/golden_manifest.csv", render_golden_manifest(request.outputs));
     for (const auto& output : request.outputs) {

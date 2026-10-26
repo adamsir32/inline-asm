@@ -8,11 +8,13 @@ namespace hpu::scheme::bgv {
 
 // Coefficient-domain BGV modulus switch from Q to Q without its final limb.
 // The global context order is Q followed by P followed by plaintext modulus t.
+// port_prefix namespaces component, correction, and basis-conversion bindings.
 std::string generate_modswitch_body_asm(
     int num_q,
     int num_p,
     int num_components,
-    bool append_psync = false);
+    bool append_psync = false,
+    const std::string& port_prefix = "bgv_modswitch_coefficient");
 
 std::string generate_modswitch_asm(
     int num_q,
@@ -43,8 +45,8 @@ NttModSwitchConstants prepare_ntt_modswitch_constants(
     std::uint32_t plaintext_modulus);
 
 // Input/output are canonical HPU NTT at adjacent Q levels. For each component,
-// the caller binds DMA loads/stores in the order documented in the generated
-// stream: dropped limb -> coefficient scratch -> u_t scratch -> retained limbs.
+// the caller binds semantic input, constant, workspace, and output ports by
+// name; physical DMA order is determined by the resource compiler.
 // Constants are N-word splats of the values returned above. The modulus table
 // belongs to the application when manage_modulus_table=false.
 std::string generate_modswitch_ntt_body_asm(

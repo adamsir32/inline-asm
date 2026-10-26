@@ -5,75 +5,63 @@
 #include <sstream>
 #include <string>
 // eval domain
+std::string generate_hpu_cmult_contexts_body_asm(
+    const std::vector<int>& contexts,
+    const std::string& label,
+    bool append_psync,
+    bool manage_modulus_table)
+{
+    std::ostringstream asm_code;
+    if (contexts.empty()) {
+        asm_code << "        // Invalid config: require at least one modulus context\n";
+        return asm_code.str();
+    }
+    asm_code << "        /* " << label
+             << ": (a0,a1)*(b0,b1)->(out0,out1,out2) */\n";
+
+    // Independent source identities are essential: the scheduler owns their
+    // physical residency and can keep each input until its final consumer.
+    const auto modulus = hpu::resource::make_operand("modulus_table", 4);
+    const auto a0 = hpu::resource::make_operand("left/c0", 0);
+    const auto b0 = hpu::resource::make_operand("right/c0", 1);
+    const auto a1 = hpu::resource::make_operand("left/c1", 5);
+    const auto b1 = hpu::resource::make_operand("right/c1", 6);
+    const auto out0 = hpu::resource::make_operand("tensor/c0", 2);
+    const auto out1 = hpu::resource::make_operand("tensor/c1", 7);
+    const auto out2 = hpu::resource::make_operand("tensor/c2", 8);
+    if (manage_modulus_table) {
+        asm_code << hpu::resource::read(modulus, hpu::DataType::mod_ctx, "constants/modulus_table",
+                                      hpu::DloadFlag::small_bank);
+    }
+    for (int context : contexts) {
+        const auto prefix = "tensor/mod" + std::to_string(context) + "/";
+        asm_code << hpu::resource::select_modulus(context);
+        asm_code << hpu::resource::read(a0, hpu::DataType::poly, prefix + "left/c0");
+        asm_code << hpu::resource::read(b0, hpu::DataType::poly, prefix + "right/c0");
+        asm_code << hpu::resource::read(a1, hpu::DataType::poly, prefix + "left/c1");
+        asm_code << hpu::resource::read(b1, hpu::DataType::poly, prefix + "right/c1");
+        asm_code << hpu::resource::multiply(out0, a0, b0);
+        asm_code << hpu::resource::output(out0, prefix + "output/c0");
+        asm_code << hpu::resource::multiply(out1, a0, b1);
+        asm_code << hpu::resource::accumulate(out1, a1, b0);
+        asm_code << hpu::resource::output(out1, prefix + "output/c1");
+        asm_code << hpu::resource::multiply(out2, a1, b1);
+        asm_code << hpu::resource::output(out2, prefix + "output/c2");
+    }
+    if (append_psync) asm_code << hpu::resource::finish_program();
+    return asm_code.str();
+}
+
 std::string generate_hpu_cmult_body_asm(
     int num_q,
     bool append_psync,
     bool manage_modulus_table)
 {
-    std::ostringstream asm_code;
-
-    if (num_q <= 0) {
-        asm_code << "        // Invalid config: require num_q > 0\n";
-        return asm_code.str();
-    }
-
-    asm_code << "        /* CMULT: (a0,a1)*(b0,b1)->(out0,out1,out2) over basis Q */\n";
-
-    const auto POBJ_MOD_CTX = hpu::resource::make_operand("modulus_table", 4);
-    const auto POBJ_A = hpu::resource::make_operand("value", 0);
-    const auto POBJ_B = hpu::resource::make_operand("auxiliary", 1);
-    const auto POBJ_OUT = hpu::resource::make_operand("accumulator", 2);
-
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
-    }
-    for (int i = 0; i < num_q; ++i) {
-        asm_code << "        /* q_" << i << " */\n";
-
-        asm_code << hpu::resource::select_modulus(i);
-
-        asm_code << "        /* --- CMULT out0 = a0 * b0 --- */\n";
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly); // a0
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly); // b0
-        asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A);
-        asm_code << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1); // store out0
-
-        asm_code << "        /* --- CMULT out1 = a0 * b1 + a1 * b0 --- */\n";
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly); // a0
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly); // b1
-        asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A);
-        asm_code << hpu::resource::discard(POBJ_B);
-        // temp result is in POBJ_OUT
-        // Now compute a1 * b0 and ADD
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly); // a1
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly); // b0
-        asm_code << hpu::resource::accumulate(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A);
-        asm_code << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1); // store out1
-
-        asm_code << "        /* --- CMULT out2 = a1 * b1 --- */\n";
-        asm_code << hpu::resource::read(POBJ_A, hpu::DataType::poly); // a1
-        asm_code << hpu::resource::read(POBJ_B, hpu::DataType::poly); // b1
-        asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_A, POBJ_B);
-        asm_code << hpu::resource::discard(POBJ_A);
-        asm_code << hpu::resource::discard(POBJ_B);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1); // store out2
-    }
-
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
-    }
-
-    if (append_psync) {
-        asm_code << hpu::resource::finish_program();
-    }
-
-    return asm_code.str();
+    if (num_q <= 0) return "        // Invalid config: require num_q > 0\n";
+    std::vector<int> contexts;
+    for (int i = 0; i < num_q; ++i) contexts.push_back(i);
+    return generate_hpu_cmult_contexts_body_asm(
+        contexts, "CMULT", append_psync, manage_modulus_table);
 }
 
 std::string generate_hpu_cmult_asm(

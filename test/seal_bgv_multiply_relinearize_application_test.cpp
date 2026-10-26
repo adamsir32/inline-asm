@@ -54,7 +54,7 @@ void check_small(const seal::SEALContext& context, seal::Evaluator& evaluator,
     require(package.image.used_lines() == capacity &&
                 package.parms_id == left.parms_id() &&
                 package.spans().size() == package.dma.size() &&
-                package.dma.size() > 11 * q_count,
+                package.dma.size() > 7 * q_count,
             "BGV combined image, metadata, or DMA shape is wrong");
     std::size_t psync_count = 0;
     std::size_t modulus_load_count = 0;
@@ -62,7 +62,7 @@ void check_small(const seal::SEALContext& context, seal::Evaluator& evaluator,
         psync_count += encoded.instruction.mnemonic == hpu::Mnemonic::kPsync;
         modulus_load_count += encoded.instruction.mnemonic == hpu::Mnemonic::kDload &&
                               encoded.instruction.obj_id == 4 &&
-                              encoded.instruction.type == 2;
+                              encoded.instruction.type == 1;
     }
     require(psync_count == 1 && modulus_load_count == 1 &&
                 package.instructions.back().instruction.mnemonic == hpu::Mnemonic::kPsync,
@@ -127,7 +127,7 @@ void check_small(const seal::SEALContext& context, seal::Evaluator& evaluator,
         context, tensor, keys,
         hpu::seal_adapter::estimate_bgv_keyswitch_image_lines(
             degree, q_count, key_count));
-    const std::size_t key_phase_first = 1 + 11 * q_count;
+    const std::size_t key_phase_first = 1 + 7 * q_count;
     require(package.dma.size() == key_phase_first + standalone.dma.size() - 1,
             "BGV combined KeySwitch DMA suffix has a different length");
     for (std::size_t index = 1; index < standalone.dma.size(); ++index) {
@@ -195,7 +195,7 @@ int main(int argc, char** argv)
                     65536, 3, 4);
             auto package = hpu::seal_adapter::build_bgv_multiply_relinearize_application(
                 context, left, right, keys, required);
-            require(required == 83201 && package.image.used_lines() == required &&
+            require(required == 75025 && package.image.used_lines() == required &&
                         !package.dma.empty(),
                     "N=65536 BGV combined image exceeds estimated window");
             std::cout << "N=65536 BGV Multiply+Relinearize image passed: "

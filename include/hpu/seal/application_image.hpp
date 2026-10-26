@@ -73,9 +73,9 @@ struct PreparedCanonicalTwiddles {
     std::uint8_t modulus_id = 0;
     std::uint32_t modulus = 0;
     std::uint32_t canonical_psi = 0;
-    // Natural coefficient order: pre[i]=psi^i; post[i] includes normalization
-    // and inverse twist. Each stage span carries the fixed two-line K=8
-    // parameters that reconstruct the reference batch/lane factors.
+    // pre/post carry two-line online-PMUL parameters in bit-reversed
+    // coefficient positions. Post retains the full inverse lazy correction,
+    // N^-1 and untwist. Stage spans retain their separate batch/lane ABI.
     hpu::runtime::HpuMemSpan pre_twist;
     std::vector<hpu::runtime::HpuMemSpan> forward_stages;
     std::vector<hpu::runtime::HpuMemSpan> inverse_stages;
@@ -88,9 +88,10 @@ struct PreparedFusedAutomorphismTwiddles {
     std::uint32_t modulus = 0;
     std::uint32_t canonical_psi = 0;
     std::uint32_t modified_psi = 0;
-    // Each inverse stage is a two-line K=8 parameter object.
+    // Each inverse stage is a two-line K=8 parameter object; the post span
+    // retains the complete modified-root inverse correction.
     std::vector<hpu::runtime::HpuMemSpan> inverse_stages;
-    // Natural coefficient order, using modified_psi for inverse twist.
+    // Bit-reversed coefficient positions, using modified_psi for untwist.
     hpu::runtime::HpuMemSpan post_untwist_scale;
 };
 

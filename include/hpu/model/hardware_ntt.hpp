@@ -14,6 +14,48 @@ inline constexpr std::size_t kStageTwiddleParameterLines = 2;
 inline constexpr std::size_t kTwiddleChains = 8;
 inline constexpr const char* kStageTwiddleParameterFormat = "hpu-twiddle-k8-v1";
 
+// PMUL online factors use the same two-line storage shape as NTT parameters,
+// but process 64 coefficients per batch (NTT processes 128). U[0] may be any
+// canonical residue, including the inverse-transform normalization N^-1.
+inline constexpr std::size_t kOnlinePmulParameterWords = 128;
+inline constexpr std::size_t kOnlinePmulParameterLines = 2;
+inline constexpr const char* kOnlinePmulParameterFormat = "hpu-pmul-online-k8-v1";
+
+std::vector<std::uint32_t> pack_online_pmul_parameters(
+    std::uint32_t coefficient,
+    std::uint32_t ratio,
+    std::uint32_t modulus,
+    std::size_t degree);
+
+// Involutive coefficient-index permutation, applied to one polynomial at a
+// time: physical[j] = natural[bit_reverse(j, log2(N))]. It does not change word
+// bits, RNS modulus order, or the canonical NTT-domain layout.
+std::vector<std::uint32_t> bit_reverse_coefficients(
+    const std::vector<std::uint32_t>& coefficients);
+
+// Exact compression of a complete physical PMUL factor vector. Every entry
+// must be nonzero and canonical. Arbitrary vectors need not be representable
+// by K=8; reconstruction checks every coefficient and rejects such vectors.
+std::vector<std::uint32_t> pack_online_pmul_factors(
+    const std::vector<std::uint32_t>& physical_factors,
+    std::uint32_t modulus);
+
+// Layout-aware convenience for c*r^i, including independent inverse twist
+// and normalization. Unlike the natural-order convenience above, this packs
+// c*r^BR(j) and must be used with bit-reversed coefficient-domain data.
+std::vector<std::uint32_t> pack_bit_reversed_online_pmul_parameters(
+    std::uint32_t coefficient,
+    std::uint32_t ratio,
+    std::uint32_t modulus,
+    std::size_t degree);
+
+// Expand the supplied U/V/R payload as the online multiplier does. No NTT
+// permutation or extra normalization is applied, and state is reset per call.
+std::vector<std::uint32_t> expand_online_pmul_factors(
+    const std::vector<std::uint32_t>& parameters,
+    std::uint32_t modulus,
+    std::size_t degree);
+
 // Compress an existing physical batch/BF-lane table. Reconstructs and checks
 // every factor; unsupported physical recurrences throw instead of falling
 // back to the old full-table representation.
@@ -44,11 +86,19 @@ struct InverseNttTables {
     // Includes lazy-scale cancellation and N^-1 normalization.
     std::vector<std::uint32_t> post_scale;
 
-    // Application images store the explicit post PMUL factor at natural
-    // coefficient positions. Adapt that factor to this model's raw inverse
-    // layout; the caller includes normalization/untwist exactly once.
+    // Mathematical API adapter for a natural-order post factor. Production
+    // application images already store physical bit-reversed factors and must
+    // assign post_scale directly. Normalization/untwist is included once.
     void set_natural_post_scale(std::vector<std::uint32_t> factors);
 };
+
+// Complete physical post-PMUL vector for a negacyclic inverse. Preserve the
+// supplied raw inverse generator's lazy scale and N^-1 correction; multiply
+// its entry j by inverse_psi^BR(j). This also supports modified Galois roots.
+std::vector<std::uint32_t> inverse_post_factors(
+    const InverseNttTables& tables,
+    std::uint32_t inverse_psi,
+    std::uint32_t modulus);
 
 // Bit-accurate software model of hw_ntt_intt_complete.py. This class models
 // the cyclic transform. CKKS negacyclic transforms are exposed by the free
@@ -70,10 +120,10 @@ public:
     std::vector<std::vector<std::uint32_t>> forward_twiddles() const;
     InverseNttTables inverse_twiddles() const;
 
-    // Forward consumes normal logical coefficient order, performs the DIT input
-    // bit-reversal required by the hardware memory convention, and returns HPU
-    // physical NTT order. Inverse consumes that physical order and returns
-    // normal logical coefficient order.
+    // Mathematical convenience APIs consume/return natural coefficient order
+    // and explicitly convert to/from the raw bit-reversed coefficient ABI.
+    // These conversions belong to the API adapter, not to a PNTT/PINTT stage.
+    // NTT-domain results remain in HPU physical order.
     std::vector<std::uint32_t> forward(
         const std::vector<std::uint32_t>& coefficients) const;
     std::vector<std::uint32_t> forward(

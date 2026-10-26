@@ -21,7 +21,7 @@ std::string finalize_frontend_package(
     hpu::runtime::HpuMemImage& image, bool optimize_resources,
     bool require_instruction_verification,
     hpu::model::InstructionNttContract instruction_ntt_contract =
-        hpu::model::InstructionNttContract::natural_coefficient_boundaries);
+        hpu::model::InstructionNttContract::raw_bit_reversed_coefficients);
 }
 
 class ApplicationBuilder;
@@ -72,7 +72,7 @@ struct CompileOptions {
     bool require_instruction_verification = true;
     // Selects a documented host model contract, not a hardware ABI change.
     hpu::model::InstructionNttContract instruction_ntt_contract =
-        hpu::model::InstructionNttContract::natural_coefficient_boundaries;
+        hpu::model::InstructionNttContract::raw_bit_reversed_coefficients;
 };
 
 class CompiledApplication {

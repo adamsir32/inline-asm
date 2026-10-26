@@ -65,6 +65,7 @@ HpuRnsPolynomial bfv_ciphertext_component_to_hpu(
             moduli[basis].value(), "SEAL BFV modulus");
         result.moduli.push_back(modulus);
         result.modulus_ids.push_back(static_cast<std::uint8_t>(basis));
+        std::vector<std::uint32_t> coefficients(degree);
         for (std::size_t index = 0; index < degree; ++index) {
             const std::uint64_t coefficient =
                 component_data[basis * degree + index];
@@ -72,8 +73,10 @@ HpuRnsPolynomial bfv_ciphertext_component_to_hpu(
                 throw std::invalid_argument(
                     "SEAL BFV ciphertext coefficient is not reduced");
             }
-            result.words.push_back(static_cast<std::uint32_t>(coefficient));
+            coefficients[index] = static_cast<std::uint32_t>(coefficient);
         }
+        const auto physical = hpu::model::bit_reverse_coefficients(coefficients);
+        result.words.insert(result.words.end(), physical.begin(), physical.end());
     }
     return result;
 }
@@ -112,14 +115,17 @@ HpuRnsPolynomial bfv_add_subtract_plaintext_to_hpu(
             moduli[basis].value(), "SEAL BFV modulus");
         result.moduli.push_back(q);
         result.modulus_ids.push_back(static_cast<std::uint8_t>(basis));
+        std::vector<std::uint32_t> coefficients(degree);
         for (std::size_t index = 0; index < degree; ++index) {
             const std::uint64_t value = index < plaintext.coeff_count()
                 ? plaintext[index] : 0;
             const std::uint64_t correction =
                 (q_mod_t * value + rounding) / t;
-            result.words.push_back(static_cast<std::uint32_t>(
-                (value * delta_mod_q[basis].operand + correction) % q));
+            coefficients[index] = static_cast<std::uint32_t>(
+                (value * delta_mod_q[basis].operand + correction) % q);
         }
+        const auto physical = hpu::model::bit_reverse_coefficients(coefficients);
+        result.words.insert(result.words.end(), physical.begin(), physical.end());
     }
     return result;
 }

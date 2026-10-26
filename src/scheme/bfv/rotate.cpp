@@ -40,24 +40,22 @@ std::string generate_rotate_body_asm(int N, const hpu::RnsDecompositionLayout& l
              << galois_element << ". */\n";
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int context : layout.q_mod_ids) {
             asm_code << "        /* automorphism component_" << component << ", q MOD_ID "
                      << context << ", key_domain=" << galois_element << " */\n";
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly);
-            asm_code << generate_hpu_ntt_body_asm(N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << generate_hpu_intt_body_asm(N, kPolynomialObject, kTwiddleObject, false);
-            asm_code << hpu::resource::publish(kPolynomialObject, 1);
+            const auto role = "galois/c" + std::to_string(component) + "/mod" + std::to_string(context);
+            asm_code << hpu::resource::read(kPolynomialObject, hpu::DataType::poly, role + "/input");
+            asm_code << generate_hpu_ntt_body_asm(N, kPolynomialObject, kTwiddleObject, false, role + "/forward/table");
+            asm_code << generate_hpu_intt_body_asm(N, kPolynomialObject, kTwiddleObject, false, role + "/inverse/table");
+            asm_code << hpu::resource::output(kPolynomialObject, role + "/output");
         }
     }
     asm_code << "        /* Galois KeySwitch: key_domain k -> canonical secret-key domain. */\n";
     asm_code << ::generate_hpu_bfv_keyswitch_body_asm(N, layout, false, false);
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }

@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -16,7 +18,12 @@ using BufferId = std::size_t;
 using ObjectId = std::size_t;
 
 enum class OptimizationMode { no_opt, optimized };
+enum class DmaCachePolicy { preserve, twiddle_loads_only };
 enum class ResourceIrOrigin { encoded_import, operator_emission };
+class ResourceCapacityError : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
 enum class MemoryLayout {
     unspecified,
     coefficient_natural,
@@ -28,9 +35,20 @@ struct CompileOptions {
     OptimizationMode optimization = OptimizationMode::optimized;
     std::size_t regular_bank_count = hpu::runtime::kRegularBankCount;
     std::uint64_t regular_bank_lines = 1024;
+    // Must match RTL MOD_TABLE_LINES. The reserved Bank 5 prefix is not
+    // available to other objects even when the loaded table is shorter.
+    std::uint64_t mod_table_lines = 4;
     // Explicit buffer ABI annotations. They never permute payload words.
     // Workspace whose layout changes during execution must stay unspecified.
     std::map<std::string, MemoryLayout> buffer_layouts;
+    // Applied after DMA relocation using the final physical allocation kind.
+    // preserve retains explicit per-command hints, including in NoOpt mode.
+    DmaCachePolicy dma_cache_policy = DmaCachePolicy::preserve;
+    // Native SSA owns lifetime/materialization; encoded import can preserve
+    // explicit historical release semantics for replay and ISA tests.
+    bool automatic_lifetimes = false;
+    bool prune_unused_buffers = false;
+    std::set<std::string> required_outputs;
 };
 
 // Scheme-independent DMA provenance. Direction and object operands are taken
@@ -42,6 +60,9 @@ struct ResolvedDma {
     std::optional<std::size_t> operation_index;
     std::string operation_id;
     std::size_t operation_dma_index = 0;
+    std::string purpose;
+    // Diagnostic SSA identity; not part of the Package V1 DMA CSV ABI.
+    std::string logical_value;
 };
 
 struct BufferRange {
@@ -62,12 +83,15 @@ struct VirtualBuffer {
     bool fully_defined_before_read = false;
     std::size_t first_use = 0;
     std::size_t last_use = 0;
+    bool materialized = true;
 };
 
 struct VirtualObject {
     std::uint64_t line_count = 0;
+    // MOD only: 0 ordinary object, 1 fixed Bank 5 modulus table.
     std::uint8_t type = 0;
     std::uint8_t dma_flag = 0;
+    // CP belongs to each VirtualInstruction, never to resident storage.
 };
 
 struct VirtualInstruction {
@@ -79,6 +103,8 @@ struct VirtualInstruction {
     bool required_store = true;
     // A deferred scratch store and its unique reload share the object ID.
     bool reload_retained_object = false;
+    bool exact_copy = false;
+    std::string logical_value;
 };
 
 struct VirtualProgram {
@@ -108,9 +134,21 @@ struct ResourceReport {
     std::size_t dma_count = 0;
     std::size_t peak_regular_banks = 0;
     std::size_t peak_object_slots = 0;
+    std::uint64_t peak_regular_lines = 0;
+    std::uint64_t peak_small_lines = 0;
     std::size_t deferred_scratch_stores = 0;
     std::size_t spills = 0;
     std::size_t reloads = 0;
+    std::uint64_t dload_bytes = 0;
+    std::uint64_t dstore_bytes = 0;
+    std::uint64_t repeated_range_read_bytes = 0;
+    std::uint64_t required_output_write_bytes = 0;
+    std::uint64_t initial_image_bytes = 0;
+    std::uint64_t original_dma_bytes = 0;
+    std::uint64_t spill_write_bytes = 0;
+    std::uint64_t reload_read_bytes = 0;
+    std::uint64_t exact_copy_bytes = 0;
+    std::string selected_schedule = "original";
 };
 
 struct CompiledResources {
@@ -131,9 +169,10 @@ VirtualProgram import_resolved_program(
     const std::vector<ResolvedDma>& dma,
     const hpu::runtime::HpuMemImage& image);
 
-// NoOpt preserves the original instruction words, DMA ranges and image bytes.
+// NoOpt preserves original instructions, DMA ranges and image bytes, except
+// for an explicitly requested DMA cache-policy rewrite.
 // Optimized keeps immutable resources and every non-workspace allocation,
-// reuses proven scratch lifetimes, and schedules distinct slots and banks.
+// reuses proven scratch lifetimes and predicts aligned physical intervals.
 CompiledResources optimize_resources(
     const std::vector<hpu::EncodedInstruction>& instructions,
     const std::vector<ResolvedDma>& dma,

@@ -65,6 +65,8 @@ public:
                         const PreparedBfvRnsObject& coefficient_workspace,
                         const PreparedBfvRnsObject& output);
 
+    // Coefficient-domain exports decode each physical bit-reversed RNS limb
+    // to natural SEAL coefficient order; memory() retains the target layout.
     HpuRnsPolynomial export_component(const PreparedBfvRnsObject& object,
                                       std::size_t component) const;
     const hpu::runtime::HpuSoftwareExecutor& memory() const noexcept;

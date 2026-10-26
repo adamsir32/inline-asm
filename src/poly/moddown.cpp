@@ -23,7 +23,8 @@ std::string generate_hpu_moddown_contexts_body_asm(
     const std::vector<int>& q_contexts,
     const std::vector<int>& p_contexts,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
     if (!hpu::valid_mod_id_list(q_contexts)
@@ -46,28 +47,30 @@ std::string generate_hpu_moddown_contexts_body_asm(
 
     asm_code << "        /* MODDOWN stage-1: BConv P -> Q (fixed P -> active Q) */\n";
     asm_code << generate_hpu_bconv_contexts_body_asm(
-        p_contexts, q_contexts, false, manage_modulus_table);
+        p_contexts, q_contexts, false, manage_modulus_table,
+        port_prefix + "/bconv");
     if (manage_modulus_table) {
         asm_code << "        // dload the runtime-relocated complete modulus table\n";
         asm_code << hpu::resource::read(
             POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+            port_prefix + "/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     asm_code << "        /* MODDOWN stage-2: q <- q - correction (mod q_i) */\n";
     for (int q : q_contexts) {
         asm_code << "        /* q MOD_ID " << q << " */\n";
         asm_code << hpu::resource::select_modulus(q);
-        asm_code << hpu::resource::read(POBJ_Q, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_CORR, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_P_INV, hpu::DataType::poly);
+        const auto context = std::to_string(q);
+        asm_code << hpu::resource::read(POBJ_Q, hpu::DataType::poly,
+                                      port_prefix + "/input/mod" + context);
+        asm_code << hpu::resource::read(POBJ_CORR, hpu::DataType::poly,
+                                      port_prefix + "/correction/mod" + context);
+        asm_code << hpu::resource::read(POBJ_P_INV, hpu::DataType::poly,
+                                      port_prefix + "/inverse/mod" + context);
         asm_code << hpu::resource::subtract(POBJ_Q, POBJ_Q, POBJ_CORR);
         asm_code << hpu::resource::multiply(POBJ_Q, POBJ_Q, POBJ_P_INV);
-        asm_code << hpu::resource::discard(POBJ_CORR);
-        asm_code << hpu::resource::discard(POBJ_P_INV);
-        asm_code << hpu::resource::publish(POBJ_Q, 1);
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
+        asm_code << hpu::resource::output(POBJ_Q,
+                                        port_prefix + "/output/mod" + context);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -79,7 +82,8 @@ std::string generate_hpu_moddown_body_asm(
     int num_q,
     int num_p,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -97,7 +101,7 @@ std::string generate_hpu_moddown_body_asm(
         p_contexts.push_back(num_q + i);
     }
     return generate_hpu_moddown_contexts_body_asm(
-        q_contexts, p_contexts, append_psync, manage_modulus_table);
+        q_contexts, p_contexts, append_psync, manage_modulus_table, port_prefix);
 }
 
 std::string generate_hpu_moddown_asm(

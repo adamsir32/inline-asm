@@ -21,6 +21,7 @@ struct PreparedBfvRnsObject {
     std::string id;
     ::seal::parms_id_type parms_id{};
     std::size_t chain_index = 0;
+    // Internal coefficient limbs use physical[j] = natural[BR_logN(j)].
     hpu::runtime::PolynomialDomain domain = hpu::runtime::PolynomialDomain::coefficient;
     std::uint64_t key_domain = 1;
     std::vector<PreparedPolynomial> components;

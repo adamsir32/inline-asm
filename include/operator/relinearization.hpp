@@ -10,7 +10,8 @@ std::string generate_hpu_relinearization_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "relinearize");
 
 // Coefficient-domain relinearization using the SEAL rounded single-P
 // KeySwitch core, followed by the same t1 + ks1 merge as the generic path.
@@ -18,7 +19,8 @@ std::string generate_hpu_rounded_single_p_relinearization_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "relinearize");
 
 // BFV coefficient-domain relinearization with SEAL singleton key digits and
 // rounded single-P KeySwitch finalization.
@@ -26,7 +28,8 @@ std::string generate_hpu_bfv_relinearization_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "relinearize");
 
 std::string generate_hpu_relinearization_body_asm(
     int N,
@@ -34,7 +37,8 @@ std::string generate_hpu_relinearization_body_asm(
     int num_p,
     int dnum,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "relinearize");
 
 std::string generate_hpu_relinearization_asm(
     int N,

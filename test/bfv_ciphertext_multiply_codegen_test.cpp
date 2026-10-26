@@ -59,7 +59,7 @@ int main()
                     program.find("BFV Relinearization") != std::string::npos &&
                     program.find("ROUNDED SINGLE-P MODDOWN") != std::string::npos,
                 "explicit BFV multiply omitted BEHZ or rounded relinearization");
-        require(count(program, modulus_load) == 1 && count(program, hpu::pfree(4)) == 1 &&
+        require(count(program, modulus_load) == 1 && count(program, hpu::pfree(4)) == 0 &&
                     count(program, hpu::psync()) == 1 &&
                     program.rfind(hpu::psync()) + hpu::psync().size() == program.size(),
                 "explicit BFV multiply does not own one table lifetime and terminal psync");

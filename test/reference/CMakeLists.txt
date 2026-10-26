@@ -1,3 +1,5 @@
+# Internal mathematical fixtures for optional differential-oracle regressions.
+# This executable does not generate target programs or application packages.
 add_executable(hpu_reference_vectors
         main.cpp
 )

@@ -26,10 +26,10 @@ void check_lifecycle(const std::string& program, const char* role)
     if (count(program, hpu::dload(
             4, hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank)) != 1
-        || count(program, hpu::pfree(4)) != 1
+        || count(program, hpu::pfree(4)) != 0
         || count(program, hpu::psync()) != 1
         || program.rfind(hpu::psync()) + hpu::psync().size() != program.size()
-        || program.rfind("\"dstore ") >= program.rfind(hpu::pfree(4))) {
+        || program.rfind("\"dstore ") >= program.rfind(hpu::psync())) {
         throw std::runtime_error(std::string(role) + " has an invalid application lifecycle");
     }
 }

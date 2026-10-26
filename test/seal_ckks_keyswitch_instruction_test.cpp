@@ -222,9 +222,9 @@ void run_level(
     require(relocation.complete(), "KeySwitch relocation is incomplete");
     const auto runtime = lower_ckks_runtime_program(lowered, relocation);
     hpu::model::InstructionExecutionOptions options;
-    // The image contains natural-indexed pre/post factors. Complete transforms
-    // use the functional natural boundaries, without claiming RTL stage timing.
-    options.ntt_contract = hpu::model::InstructionNttContract::natural_coefficient_boundaries;
+    // The image contains BR coefficients and physical-indexed pre/post factors.
+    // Execute raw stages without an additional implicit boundary permutation.
+    options.ntt_contract = hpu::model::InstructionNttContract::raw_bit_reversed_coefficients;
     auto words_only = runtime.instructions;
     for (auto& instruction : words_only) {
         instruction.instruction = {};

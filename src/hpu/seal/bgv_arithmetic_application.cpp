@@ -9,6 +9,7 @@
 #include "assembler.hpp"
 #include "executable.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -98,60 +99,87 @@ void add_plaintext(hpu::runtime::HpuMemImage& image,
 class DmaRecipe {
 public:
     DmaRecipe(const hpu::runtime::HpuMemImage& image,
-              const std::vector<hpu::DmaRelocation>& encoded)
-        : image_(image), encoded_(encoded)
-    {}
+              hpu::resource::OperatorProgram& program, std::size_t degree)
+        : image_(image), program_(program), degree_(degree),
+          bindings_(program.ports.size()), bound_(program.ports.size())
+    {
+        for (std::size_t id = 0; id < program.ports.size(); ++id) {
+            const auto& name = program.ports[id].logical_binding;
+            if (name.empty() || !ports_.emplace(name, id).second)
+                throw std::logic_error("BGV arithmetic requires unique logical data ports");
+        }
+    }
 
-    void load(int slot, const std::string& id,
+    void load(const std::string& role, const std::string& id,
               hpu::DataType type = hpu::DataType::poly,
               hpu::DloadFlag flag = hpu::DloadFlag::regular_bank)
     {
-        bind(id, hpu::Mnemonic::kDload, slot,
-             static_cast<std::uint8_t>(type), static_cast<std::uint8_t>(flag));
+        bind(role, id, true,
+             hpu::dma_mod_bit(type), hpu::dma_bank_mask(type, flag));
     }
 
-    void store(int slot, const std::string& id)
+    void store(const std::string& role, const std::string& id)
     {
-        bind(id, hpu::Mnemonic::kDstore, slot, 1, 0);
+        bind(role, id, false, 0, 0);
     }
 
     std::vector<BgvKeySwitchDmaBinding> finish()
     {
-        if (bindings_.size() != encoded_.size()) {
+        if (std::find(bound_.begin(), bound_.end(), false) != bound_.end()) {
             throw std::logic_error("BGV arithmetic DMA recipe is incomplete");
         }
         return std::move(bindings_);
     }
 
 private:
-    void bind(const std::string& id, hpu::Mnemonic direction,
-              int slot, std::uint8_t type_or_release, std::uint8_t flag)
+    void bind(const std::string& role, const std::string& id, bool load,
+              std::uint8_t type_or_release, std::uint8_t flag)
     {
-        const std::size_t index = bindings_.size();
-        if (index >= encoded_.size()) {
-            throw std::logic_error("BGV arithmetic DMA recipe exceeds encoded stream");
-        }
-        const auto& instruction = encoded_[index];
+        const auto found = ports_.find(role);
+        if (found == ports_.end())
+            throw std::logic_error("missing BGV arithmetic logical data port: " + role);
+        const std::size_t index = found->second;
+        const auto& port = program_.ports.at(index);
+        const auto& operation = program_.operations.at(port.operation_index);
+        const auto& instruction = operation.instruction;
+        const auto direction = load ? hpu::Mnemonic::kDload : hpu::Mnemonic::kDstore;
         const auto& allocation = image_.allocation(id);
-        if (instruction.dma_index != index ||
-            instruction.direction != direction ||
-            instruction.object_id != slot ||
-            instruction.type_or_release != type_or_release ||
-            instruction.flag != flag ||
+        const auto expected_words = load && type_or_release == 1
+            ? allocation.word_count : degree_;
+        if (bound_[index] || port.load != load || instruction.mnemonic != direction ||
+            instruction.type != type_or_release || (load && instruction.dma_flag != flag) ||
+            allocation.word_count != expected_words ||
             allocation.span.line_count == 0 ||
-            (direction == hpu::Mnemonic::kDstore && allocation.read_only)) {
+            (!load && allocation.read_only) ||
+            (load && type_or_release == 1 &&
+             allocation.kind != hpu::runtime::AllocationKind::modulus_table)) {
             throw std::invalid_argument(
-                "BGV arithmetic DMA binding disagrees with encoded instruction: " + id);
+                "BGV arithmetic data binding disagrees with native declaration: " + role);
         }
-        bindings_.push_back({
-            index, instruction.instruction_index, instruction.direction,
-            instruction.object_id, instruction.type_or_release,
-            instruction.flag, id, allocation.span});
+        const auto value = load ? operation.outputs.at(0) : operation.inputs.at(0);
+        const auto slot = program_.values.at(value).variable.compatibility_slot;
+        auto& binding = bindings_[index];
+        binding.dma_index = index;
+        binding.instruction_index = port.operation_index;
+        binding.direction = direction;
+        binding.object_slot = static_cast<std::uint8_t>(slot);
+        binding.type_or_release = instruction.type;
+        binding.flag = instruction.dma_flag;
+        binding.allocation_id = id;
+        binding.span = allocation.span;
+        binding.operation_dma_index = index;
+        binding.cp = instruction.cp;
+        program_.bind_port(index, {port.operation_index, id, allocation.span,
+                                  0, "pointwise", index});
+        bound_[index] = true;
     }
 
     const hpu::runtime::HpuMemImage& image_;
-    const std::vector<hpu::DmaRelocation>& encoded_;
+    hpu::resource::OperatorProgram& program_;
+    std::size_t degree_;
+    std::map<std::string, std::size_t> ports_;
     std::vector<BgvKeySwitchDmaBinding> bindings_;
+    std::vector<bool> bound_;
 };
 
 BgvArithmeticApplication build(
@@ -266,41 +294,42 @@ BgvArithmeticApplication build(
     }
     auto instructions = hpu::assemble_source(body);
     hpu::validate_executable_program(instructions);
-    const auto encoded_dma = hpu::collect_dma_relocations(instructions);
-    DmaRecipe recipe(image, encoded_dma);
-    recipe.load(4, "constants/modulus_table", hpu::DataType::mod_ctx,
+    auto native = recording.finish();
+    DmaRecipe recipe(image, native, degree);
+    recipe.load("constants/modulus_table", "constants/modulus_table", hpu::DataType::mod_ctx,
                 hpu::DloadFlag::small_bank);
     if (is_plain(operation)) {
         for (std::size_t basis = 0; basis < q_count; ++basis) {
-            recipe.load(0, mod_id("input/left/c0", basis));
-            recipe.load(1, mod_id("input/plain", basis));
-            recipe.store(2, mod_id("output/c0", basis));
-            recipe.load(0, mod_id("input/left/c1", basis));
-            if (operation == Operation::multiply_plain) {
-                recipe.store(2, mod_id("output/c1", basis));
-            } else {
-                recipe.store(0, mod_id("output/c1", basis));
-            }
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            recipe.load(prefix + "left/c0", mod_id("input/left/c0", basis));
+            recipe.load(prefix + "plaintext", mod_id("input/plain", basis));
+            recipe.store(prefix + "output/c0", mod_id("output/c0", basis));
+            recipe.load(prefix + "left/c1", mod_id("input/left/c1", basis));
+            recipe.store(prefix + "output/c1", mod_id("output/c1", basis));
         }
     } else for (std::size_t component = 0; component < 2; ++component) {
         for (std::size_t basis = 0; basis < q_count; ++basis) {
-            recipe.load(0, mod_id("input/left/c" + std::to_string(component), basis));
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
+            recipe.load(prefix + "left/" + limb, mod_id("input/left/" + limb, basis));
             if (operation != Operation::negate) {
                 if (balance.left_scalar != 1) {
-                    recipe.load(3, mod_id("constants/bgv_balance/left", basis));
+                    recipe.load(prefix + "balance/left/" + limb,
+                                mod_id("constants/bgv_balance/left", basis));
                 }
-                recipe.load(1, mod_id("input/right/c" + std::to_string(component), basis));
+                recipe.load(prefix + "right/" + limb, mod_id("input/right/" + limb, basis));
                 if (balance.right_scalar != 1) {
-                    recipe.load(3, mod_id("constants/bgv_balance/right", basis));
+                    recipe.load(prefix + "balance/right/" + limb,
+                                mod_id("constants/bgv_balance/right", basis));
                 }
             }
-            recipe.store(2, mod_id("output/c" + std::to_string(component), basis));
+            recipe.store(prefix + "output/" + limb, mod_id("output/" + limb, basis));
         }
     }
     auto bindings = recipe.finish();
     return {std::move(image), left.parms_id(), balance.output_factor,
             std::move(instructions), std::move(bindings),
-            std::make_shared<hpu::resource::OperatorProgram>(recording.finish())};
+            std::make_shared<hpu::resource::OperatorProgram>(std::move(native))};
 }
 
 } // namespace

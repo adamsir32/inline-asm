@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,7 +86,10 @@ struct Fixture {
     hpu::runtime::HpuMemImage image;
     hpu::delivery::ApplicationPackageRequest request;
 
-    explicit Fixture(bool legacy_transform = false)
+    explicit Fixture(
+        bool legacy_transform = false, unsigned cp = 0,
+        hpu::runtime::AllocationKind input_kind = hpu::runtime::AllocationKind::plaintext,
+        std::optional<unsigned> store_cp = std::nullopt)
         : image(legacy_transform ? 8 : 4)
     {
         std::string assembly;
@@ -100,20 +104,19 @@ struct Fixture {
                 hpu::runtime::AllocationKind::twiddle, true);
             prefix_spans = {data.span, twiddle.span};
             allocation_ids = {"legacy/data", "legacy/twiddle"};
-            assembly = "dload x10, x11, p1, 1, 0\n"
-                       "dload x10, x11, p2, 1, 0\n"
+            assembly = "dload x10, x11, p1, 0, 0, 0\n"
+                       "dload x10, x11, p2, 0, 0, 0\n"
                        "pntt p1, p2, 0, 0, 0\n"
                        "pfree p1\npfree p2\n";
         }
         const auto input = image.add(
             "input", {9, 8, 7, 6},
-            hpu::runtime::AllocationKind::plaintext, true);
+            input_kind, true);
         const auto output = image.reserve(
             "result", 4, hpu::runtime::AllocationKind::output);
-        assembly +=
-            "dload x10, x11, p0, 0, 0\n"
-            "dstore x10, x11, p0, 0\n"
-            "psync\n";
+        assembly += "dload x10, x11, p0, 0, " + std::to_string(cp) + ", 0\n"
+                    "dstore x10, x11, p0, 0, " + std::to_string(store_cp.value_or(cp)) + "\n"
+                    "psync\n";
         const auto instructions = hpu::assemble_source(assembly);
 
         request.scheme = hpu::delivery::SchemeKind::ckks;
@@ -136,7 +139,7 @@ struct Fixture {
         std::ostringstream resolved;
         resolved << "instruction_index,dma_index,operation_index,operation_id,"
                     "operation_dma_index,direction,object_slot,type_or_release,flag,"
-                    "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+                    "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
         for (std::size_t index = 0; index < relocations.size(); ++index) {
             const auto& dma = relocations[index];
             const auto& span = request.program.ordered_dma_spans[index];
@@ -149,7 +152,7 @@ struct Fixture {
                      << allocation_ids[index] << ','
                      << span.line_offset << ',' << span.line_count << ','
                      << hpu::format_word_hex(instruction.word) << ",\""
-                     << instruction.normalized_asm << "\"\n";
+                     << instruction.normalized_asm << "\"," << unsigned(dma.cp) << "\n";
         }
         request.program.resolved_dma_manifest = resolved.str();
         request.outputs.push_back({
@@ -382,6 +385,78 @@ void test_happy_path_package()
     hpu::delivery::validate_application_package_on_disk(package);
 }
 
+void test_cp_manifest_roundtrip_and_tampering()
+{
+    ScratchDirectory scratch;
+    Fixture fixture(false, 1);
+    const auto package = hpu::delivery::write_application_package(
+        scratch.path() / "cp_allocating", fixture.request);
+    hpu::delivery::validate_application_package_on_disk(package.root);
+    for (const auto& dma : hpu::collect_dma_relocations(fixture.request.program.instructions))
+        require(dma.cp == 1, "CP=1 was lost by assembly/relocation");
+
+    const std::string relative = "program/dma_relocation_manifest.csv";
+    update_csv_row(package.root / relative, "0", {{14, "0"}});
+    refresh_files_manifest_entry(package.root, relative);
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"DMA", "disagrees with the encoded program"},
+        "validator accepted a re-signed cache policy unlike the instruction");
+}
+
+void test_twiddle_cache_policy_contract()
+{
+    using hpu::compiler::DmaCachePolicy;
+    Fixture table(false, 1, hpu::runtime::AllocationKind::twiddle, 0);
+    table.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    ScratchDirectory scratch;
+    const auto package = hpu::delivery::write_application_package(
+        scratch.path() / "twiddle", table.request);
+    hpu::delivery::validate_application_package_on_disk(package.root);
+    require(read_file(package.root / "memory/abi.json").find(
+                "\"dma_cache_policy\": \"twiddle_loads_only\"") != std::string::npos,
+            "package omitted the declared DMA cache policy");
+
+    Fixture missing_hint(false, 0, hpu::runtime::AllocationKind::twiddle);
+    missing_hint.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    Fixture bad_load(false, 1, hpu::runtime::AllocationKind::plaintext, 0);
+    bad_load.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    Fixture bad_store(false, 1, hpu::runtime::AllocationKind::twiddle, 1);
+    bad_store.request.program.dma_cache_policy = DmaCachePolicy::twiddle_loads_only;
+    for (const auto* fixture : {&missing_hint, &bad_load, &bad_store}) {
+        require_throws_with_fragments(
+            [&] { hpu::delivery::validate_application_package_request(fixture->request); },
+            {"DMA cache policy mismatch"},
+            "request validator accepted a DMA incompatible with its declared policy");
+    }
+
+    // Re-signing consistent instructions and CSV must not bypass data-kind validation.
+    Fixture preserved(false, 1);
+    const auto other = hpu::delivery::write_application_package(
+        scratch.path() / "preserved", preserved.request);
+    const auto abi_path = other.root / "memory/abi.json";
+    const auto original_abi = read_file(abi_path);
+    const std::string declaration = "  \"dma_cache_policy\": \"preserve\",\n";
+    const auto position = original_abi.find(declaration);
+    require(position != std::string::npos, "low-level package omitted preserve policy");
+    for (const auto* policy : {"twiddle_loads_only", "unknown", ""}) {
+        auto abi = original_abi;
+        abi.replace(position, declaration.size(),
+                    "  \"dma_cache_policy\": \"" + std::string(policy) + "\",\n");
+        write_file(abi_path, abi);
+        refresh_files_manifest_entry(other.root, "memory/abi.json");
+        require_throws_with_fragments(
+            [&] { hpu::delivery::validate_application_package_on_disk(other.root); },
+            {"DMA cache policy"},
+            "on-disk validator accepted a false or unknown cache policy declaration");
+    }
+    auto legacy_abi = original_abi;
+    legacy_abi.erase(position, declaration.size());
+    write_file(abi_path, legacy_abi);
+    refresh_files_manifest_entry(other.root, "memory/abi.json");
+    hpu::delivery::validate_application_package_on_disk(other.root);
+}
+
 void test_deterministic_generation()
 {
     ScratchDirectory scratch;
@@ -552,7 +627,7 @@ void test_request_rejects_incorrect_dma_manifest()
     fixture.request.program.resolved_dma_manifest =
         "instruction_index,dma_index,operation_index,operation_id,"
         "operation_dma_index,direction,object_slot,type_or_release,flag,"
-        "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+        "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     require_throws_with_fragments(
         [&] {
             hpu::delivery::validate_application_package_request(fixture.request);
@@ -682,64 +757,46 @@ void test_fixed_entry_compatibility_and_sideband_integrity()
     hpu::delivery::validate_application_package_on_disk(legacy.root);
 }
 
-void test_historical_full_twiddle_fixed_package()
+void test_rejects_incompatible_isa_and_stage_shape()
 {
     ScratchDirectory scratch;
-    Fixture fixture(true);
-    auto& program = fixture.request.program;
-    const std::string marker = "#ifdef __cplusplus\n}\n#endif\n\n#endif\n";
-    program.header.insert(program.header.find(marker), "int hpu_run_minimal_app(void);\n\n");
-    // Start with the dynamic source so request validation does not claim the
-    // current target accepts this historical one-line N=128 stage table.
+    Fixture fixture;
     const auto package = hpu::delivery::write_application_package(
-        scratch.path() / "historical_full_twiddle", fixture.request);
-    const auto current_abi = read_file(package.root / "memory/abi.json");
-    std::vector<hpu::ExecutableDmaSpan> spans;
-    for (const auto& span : program.ordered_dma_spans)
-        spans.push_back({span.line_offset, span.line_count});
-    const auto historical_source = hpu::render_fixed_executable_source(
-        program.stem, program.instructions, fixture.image.capacity_lines(), spans,
-        hpu::ExecutableTwiddleFormat::legacy_full_table);
-    const std::string historical_abi =
-        "{\n"
-        "  \"schema\": \"hpu-dma-abi\",\n"
-        "  \"schema_version\": 1,\n"
-        "  \"rs1\": \"x10\",\n"
-        "  \"rs2\": \"x11\",\n"
-        "  \"word_bits\": 32,\n"
-        "  \"line_words\": 64,\n"
-        "  \"line_bytes\": 256,\n"
-        "  \"byte_order\": \"little-endian\"\n"
-        "}\n";
-    write_file(package.root / "program/minimal_app.c", historical_source);
-    write_file(package.root / "memory/abi.json", historical_abi);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
-    refresh_files_manifest_entry(package.root, "memory/abi.json");
-    hpu::delivery::validate_application_package_on_disk(package.root);
-
-    // Structural backward compatibility still verifies actual fixed DMA
-    // setup. Re-signing a changed address must not make it acceptable.
-    auto corrupt = historical_source;
-    const auto position = corrupt.find("li x10, 0");
-    require(position != std::string::npos, "historical fixture omitted its first fixed DMA address");
-    corrupt.replace(position, std::string("li x10, 0").size(), "li x10, 1");
-    write_file(package.root / "program/minimal_app.c", corrupt);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
-    require_throws_with_fragments(
-        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
-        {"program", "source"},
-        "historical package accepted a re-signed incorrect fixed DMA address");
-
-    // Declaring current K=8 metadata must enable current shape checks, even
-    // when all payload and source checksums have been recomputed.
-    write_file(package.root / "program/minimal_app.c", historical_source);
-    write_file(package.root / "memory/abi.json", current_abi);
-    refresh_files_manifest_entry(package.root, "program/minimal_app.c");
+        scratch.path() / "target_abi", fixture.request);
+    auto abi = read_file(package.root / "memory/abi.json");
+    const std::string current = "hpu-objects64-v1.2";
+    const auto position = abi.find(current);
+    require(position != std::string::npos, "package omitted target instruction ISA");
+    abi.replace(position, current.size(), "hpu-objects8-legacy");
+    write_file(package.root / "memory/abi.json", abi);
     refresh_files_manifest_entry(package.root, "memory/abi.json");
     require_throws_with_fragments(
         [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"incompatible instruction ISA", "regenerate"},
+        "validator accepted a re-signed package for an incompatible target ISA");
+
+    // A consumer must not reinterpret REL0 according to incompatible metadata.
+    abi = read_file(package.root / "memory/abi.json");
+    const auto old_isa = abi.find("hpu-objects8-legacy");
+    abi.replace(old_isa, std::string("hpu-objects8-legacy").size(), current);
+    const auto rel = abi.find("\"dstore_rel0_retains\": true");
+    require(rel != std::string::npos, "fixture omitted REL0 target metadata");
+    abi.replace(rel, std::string("\"dstore_rel0_retains\": true").size(),
+                "\"dstore_rel0_retains\": false");
+    write_file(package.root / "memory/abi.json", abi);
+    refresh_files_manifest_entry(package.root, "memory/abi.json");
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_on_disk(package.root); },
+        {"incompatible instruction ISA"},
+        "validator accepted incompatible REL0 semantics");
+
+    // Dynamic entry points must validate concrete stage shapes as strictly
+    // as fixed entry points; a historical one-line N=128 table is invalid.
+    Fixture wrong_stage(true);
+    require_throws_with_fragments(
+        [&] { hpu::delivery::validate_application_package_request(wrong_stage.request); },
         {"fixed executable", "twiddles", "format"},
-        "current K=8 metadata accepted a historical one-line stage table");
+        "dynamic entry accepted a historical one-line stage table");
 }
 
 void test_validator_rejects_resigned_program_header_mismatch()
@@ -1427,6 +1484,9 @@ void test_native_writer_preserves_caller()
     require(report.find("\"ir_source\": \"operator\"") != std::string::npos &&
             report.find("\"host_instruction_model_verified\":true") != std::string::npos,
             "writer omitted native resource compilation or strict verification");
+    require(read_file(destination / "memory/abi.json").find(
+                "\"dma_cache_policy\": \"twiddle_loads_only\"") != std::string::npos,
+            "native writer did not apply the default application cache policy");
 }
 
 template <typename Function>
@@ -1450,6 +1510,7 @@ int main()
 {
     std::vector<std::string> failures;
     run_test("native writer preserves caller", test_native_writer_preserves_caller, failures);
+    run_test("twiddle cache policy contract", test_twiddle_cache_policy_contract, failures);
     run_test("happy path package", test_happy_path_package, failures);
     run_test(
         "deterministic generation", test_deterministic_generation, failures);
@@ -1477,6 +1538,7 @@ int main()
         "reject DMA beyond used image",
         test_request_rejects_dma_outside_used_image,
         failures);
+    run_test("CP manifest roundtrip and tampering", test_cp_manifest_roundtrip_and_tampering, failures);
     run_test(
         "reject incorrect DMA manifest at request boundary",
         test_request_rejects_incorrect_dma_manifest,
@@ -1506,8 +1568,8 @@ int main()
         test_fixed_entry_compatibility_and_sideband_integrity,
         failures);
     run_test(
-        "historical full-twiddle fixed package compatibility",
-        test_historical_full_twiddle_fixed_package,
+        "reject incompatible target ISA and stage shapes",
+        test_rejects_incompatible_isa_and_stage_shape,
         failures);
     run_test(
         "reject re-signed mismatched C program header",
