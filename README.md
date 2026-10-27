@@ -144,4 +144,6 @@ PMUL 执行。在线 PMUL 为 2026-10-22 追加扩展，目标 RTL 必须支持�
 [APSI 集中式应用](doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md)。
 这些应用的参考语义、已验证范围与仍待解决的差异以
 [PIR/PSI 与 Trident 语义映射](doc/examples/PIR_PSI_TRIDENT_SEMANTIC_ALIGNMENT.md)
-为准；软件/指令验证通过不自动证明集合匹配语义正确。
+为准；实测命令、结果和限制见
+[独立集成验证报告](doc/examples/PIR_PSI_TRIDENT_ALIGNMENT_VALIDATION.md)。
+软件/指令验证通过不自动证明集合匹配语义正确。

@@ -7,13 +7,15 @@ import pathlib
 import shutil
 import subprocess
 
+from pir_record_oracle import expected_record
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--example", required=True)
     parser.add_argument("--validator", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--profile", choices=("small", "full"), required=True)
+    parser.add_argument("--profile", choices=("small", "full", "trident"), required=True)
     parser.add_argument("--record-index", type=int, required=True)
     args = parser.parse_args()
 
@@ -43,8 +45,13 @@ def main() -> int:
     )
     if manifest.get("cross_stage_source") != expected_source:
         raise RuntimeError("SealPIR pipeline did not enforce verified stage-boundary data")
-    if (output / "expected_record.bin").read_bytes() != (output / "actual_record.bin").read_bytes():
+    actual_record = (output / "actual_record.bin").read_bytes()
+    if (output / "expected_record.bin").read_bytes() != actual_record:
         raise RuntimeError("SealPIR binary golden differs from the recovered record")
+    independent_record = expected_record(args.record_index,
+        int(manifest["database_seed"]), int(manifest["record_bytes"]))
+    if actual_record != independent_record:
+        raise RuntimeError("SealPIR recovered record differs from the external byte oracle")
     packages = manifest.get("packages", [])
     if len(packages) != 2:
         raise RuntimeError(f"expected 2 SealPIR packages, got {len(packages)}")

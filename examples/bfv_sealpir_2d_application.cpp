@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -22,21 +23,27 @@
 
 namespace {
 
-constexpr std::size_t kDegree = 4096;
-constexpr std::size_t kElementBytes = 1024;
+std::size_t gDegree = 4096;
+std::size_t gElementBytes = 1024;
 constexpr std::uint32_t kUsablePlainBits = 20;
 constexpr std::size_t kDimensions = 2;
 constexpr std::uint64_t kDatabaseSeed = 0x5345414c50495232ULL;
+// Explicit regression controls. Defaults preserve the original database path.
+std::uint64_t gDatabaseSeed = kDatabaseSeed;
+std::filesystem::path gTestOutputRecord;
 
 struct Profile {
     std::string name;
     std::size_t element_count;
     std::size_t default_target;
+    std::size_t degree;
+    std::size_t element_bytes;
 };
 
 struct Options {
     Profile profile;
     std::size_t target = 0;
+    std::vector<std::size_t> extra_targets;
     evaluator_example::Options evaluator;
 };
 
@@ -66,29 +73,44 @@ std::size_t parse_size(const std::string& text, const char* option)
 
 Options parse_options(int argc, char** argv)
 {
-    Profile profile{"small", 128, 0};
+    Profile profile{"small", 128, 0, 4096, 1024};
     bool target_set = false;
     std::size_t target = 0;
+    std::vector<std::size_t> extra_targets;
     bool force_resource_optimization = false;
     std::vector<char*> remaining{argv[0]};
     for (int i = 1; i < argc; ++i) {
         const std::string argument(argv[i]);
         if (argument == "--profile") {
-            if (++i >= argc) throw std::invalid_argument("--profile requires small or full");
+            if (++i >= argc) throw std::invalid_argument("--profile requires small, full, or trident");
             const std::string value(argv[i]);
-            if (value == "small") profile = {"small", 128, 0};
-            else if (value == "full") profile = {"full", 65536, 65535};
-            else throw std::invalid_argument("--profile must be small or full");
+            if (value == "small") profile = {"small", 128, 0, 4096, 1024};
+            else if (value == "full") profile = {"full", 65536, 65535, 4096, 1024};
+            else if (value == "trident")
+                profile = {"trident", 65536, 65535, 8192, 288};
+            else throw std::invalid_argument("--profile must be small, full, or trident");
         } else if (argument == "--record-index") {
             if (++i >= argc) throw std::invalid_argument("--record-index requires a value");
             target = parse_size(argv[i], "--record-index");
             target_set = true;
         } else if (argument == "--optimize-resources") {
             force_resource_optimization = true;
+        } else if (argument == "--test-database-seed") {
+            if (++i >= argc) throw std::invalid_argument("--test-database-seed needs a value");
+            gDatabaseSeed = static_cast<std::uint64_t>(
+                parse_size(argv[i], "--test-database-seed"));
+        } else if (argument == "--test-output-record") {
+            if (++i >= argc) throw std::invalid_argument("--test-output-record needs a path");
+            gTestOutputRecord = argv[i];
+        } else if (argument == "--test-extra-record-index") {
+            if (++i >= argc) throw std::invalid_argument("--test-extra-record-index needs a value");
+            extra_targets.push_back(parse_size(argv[i], "--test-extra-record-index"));
         } else {
             remaining.push_back(argv[i]);
         }
     }
+    gDegree = profile.degree;
+    gElementBytes = profile.element_bytes;
     if (!target_set) target = profile.default_target;
     if (target >= profile.element_count)
         throw std::invalid_argument("--record-index is outside the selected profile");
@@ -96,7 +118,12 @@ Options parse_options(int argc, char** argv)
         static_cast<int>(remaining.size()), remaining.data());
     if (!force_resource_optimization)
         evaluator.compiler.optimize_resources = false;
-    return {profile, target, std::move(evaluator)};
+    const auto per_plain = gDegree /
+        ((gElementBytes * 8 + kUsablePlainBits - 1) / kUsablePlainBits);
+    for (const auto extra : extra_targets)
+        if (extra >= profile.element_count || extra / per_plain != target / per_plain)
+            throw std::invalid_argument("--test-extra-record-index must share the selected plaintext");
+    return {profile, target, std::move(extra_targets), std::move(evaluator)};
 }
 
 std::size_t integer_log2_ceil(std::size_t value)
@@ -175,9 +202,9 @@ std::uint64_t splitmix64(std::uint64_t value)
 
 std::vector<std::uint8_t> database_element(std::size_t index)
 {
-    std::vector<std::uint8_t> result(kElementBytes);
+    std::vector<std::uint8_t> result(gElementBytes);
     for (std::size_t offset = 0; offset < result.size(); ++offset) {
-        const auto word = splitmix64(kDatabaseSeed
+        const auto word = splitmix64(gDatabaseSeed
             ^ (static_cast<std::uint64_t>(index) << 32)
             ^ static_cast<std::uint64_t>(offset / 8));
         result[offset] = static_cast<std::uint8_t>(word >> (8 * (offset % 8)));
@@ -187,7 +214,7 @@ std::vector<std::uint8_t> database_element(std::size_t index)
 
 std::size_t coefficients_per_element()
 {
-    return (kElementBytes * 8 + kUsablePlainBits - 1) / kUsablePlainBits;
+    return (gElementBytes * 8 + kUsablePlainBits - 1) / kUsablePlainBits;
 }
 
 std::vector<std::uint64_t> bytes_to_coefficients(const std::vector<std::uint8_t>& bytes)
@@ -214,10 +241,10 @@ std::vector<std::uint64_t> bytes_to_coefficients(const std::vector<std::uint8_t>
 std::vector<std::uint8_t> coefficients_to_bytes(
     const std::vector<std::uint64_t>& coefficients)
 {
-    std::vector<std::uint8_t> output(kElementBytes);
+    std::vector<std::uint8_t> output(gElementBytes);
     std::uint32_t room = 8;
     std::size_t target = 0;
-    std::uint32_t bits_left = static_cast<std::uint32_t>(kElementBytes * 8);
+    std::uint32_t bits_left = static_cast<std::uint32_t>(gElementBytes * 8);
     for (auto source : coefficients) {
         std::uint32_t remaining = std::min(kUsablePlainBits, bits_left);
         while (remaining && target < output.size()) {
@@ -239,7 +266,7 @@ std::vector<::seal::Plaintext> build_database(
     const std::vector<std::size_t>& shape)
 {
     ::seal::BatchEncoder encoder(context);
-    const auto per_plain = kDegree / coefficients_per_element();
+    const auto per_plain = gDegree / coefficients_per_element();
     const auto used_plaintexts = (element_count + per_plain - 1) / per_plain;
     const auto matrix_plaintexts = std::accumulate(
         shape.begin(), shape.end(), std::size_t{1}, std::multiplies<std::size_t>());
@@ -255,14 +282,14 @@ std::vector<::seal::Plaintext> build_database(
             std::copy(packed.begin(), packed.end(),
                       coefficients.begin() + local * coefficients_per_element());
         }
-        coefficients.resize(kDegree, 1);
+        coefficients.resize(gDegree, 1);
         ::seal::Plaintext plain;
         encoder.encode(coefficients, plain);
         result.push_back(std::move(plain));
     }
     while (result.size() < matrix_plaintexts) {
-        ::seal::Plaintext padding(kDegree);
-        std::fill_n(padding.data(), kDegree, std::uint64_t{1});
+        ::seal::Plaintext padding(gDegree);
+        std::fill_n(padding.data(), gDegree, std::uint64_t{1});
         result.push_back(std::move(padding));
     }
     return result;
@@ -270,9 +297,9 @@ std::vector<::seal::Plaintext> build_database(
 
 ::seal::Plaintext monomial(std::uint32_t exponent)
 {
-    ::seal::Plaintext result(kDegree);
+    ::seal::Plaintext result(gDegree);
     result.set_zero();
-    result[exponent % kDegree] = 1;
+    result[exponent % gDegree] = 1;
     return result;
 }
 
@@ -308,7 +335,7 @@ std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
     std::map<std::uint32_t, hpu::seal_adapter::Plaintext> monomials;
     auto monomial_handle = [&](std::uint32_t exponent)
         -> const hpu::seal_adapter::Plaintext& {
-        exponent %= static_cast<std::uint32_t>(kDegree);
+        exponent %= static_cast<std::uint32_t>(gDegree);
         auto found = monomials.find(exponent);
         if (found == monomials.end()) {
             found = monomials.emplace(exponent, app.import_plaintext(
@@ -318,10 +345,10 @@ std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
     };
     auto multiply_power_of_x = [&](const hpu::seal_adapter::Ciphertext& input,
                                    std::uint32_t exponent) {
-        exponent %= static_cast<std::uint32_t>(2 * kDegree);
+        exponent %= static_cast<std::uint32_t>(2 * gDegree);
         hpu::seal_adapter::Ciphertext output;
         evaluator.multiply_plain(input, monomial_handle(exponent), output);
-        if (exponent >= kDegree) evaluator.negate_inplace(output);
+        if (exponent >= gDegree) evaluator.negate_inplace(output);
         return output;
     };
 
@@ -329,11 +356,11 @@ std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
         const auto old_size = expanded.size();
         std::vector<hpu::seal_adapter::Ciphertext> next(old_size * 2);
         const auto element = static_cast<std::uint32_t>(
-            kDegree / (std::size_t{1} << level) + 1);
+            gDegree / (std::size_t{1} << level) + 1);
         const auto raw = static_cast<std::uint32_t>(
-            2 * kDegree - (std::size_t{1} << level));
+            2 * gDegree - (std::size_t{1} << level));
         const auto shifted = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(raw) * element) % (2 * kDegree));
+            (static_cast<std::uint64_t>(raw) * element) % (2 * gDegree));
         for (std::size_t index = 0; index < old_size; ++index) {
             const bool corner = level + 1 == logm
                 && index >= count - (std::size_t{1} << (logm - 1));
@@ -344,7 +371,7 @@ std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
             hpu::seal_adapter::Ciphertext rotated;
             evaluator.rotate_rows(
                 expanded[index],
-                rotate_rows_steps_for_galois_element(kDegree, element),
+                rotate_rows_steps_for_galois_element(gDegree, element),
                 galois_keys, rotated);
             evaluator.add(expanded[index], rotated, next[index]);
             auto left = multiply_power_of_x(expanded[index], raw);
@@ -403,9 +430,15 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
     for (std::size_t index = 0; index < outputs.size(); ++index)
         app.mark_output("reply_" + std::to_string(index), outputs[index]);
     const auto directory = stage + "_concentrated_000";
+    const auto audit_compile_started = std::chrono::steady_clock::now();
     const auto compiled = app.compile(
         "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
         options.evaluator.compiler);
+    if (!gTestOutputRecord.empty())
+        std::cerr << "AUDIT_STAGE_COMPILE_AND_VERIFY_SECONDS " << stage << ' '
+                  << std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - audit_compile_started).count()
+                  << '\n';
     maybe_write(options, directory, compiled);
     stats.push_back(package_stats(stage + " concentrated", directory, compiled));
     std::vector<::seal::Ciphertext> actual;
@@ -558,15 +591,15 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"application\": \"Microsoft SealPIR two-dimensional BFV HPU port\",\n"
              << "  \"profile\": \"" << options.profile.name << "\",\n"
              << "  \"record_count\": " << options.profile.element_count << ",\n"
-             << "  \"record_bytes\": " << kElementBytes << ",\n"
-             << "  \"poly_modulus_degree\": " << kDegree << ",\n"
+             << "  \"record_bytes\": " << gElementBytes << ",\n"
+             << "  \"poly_modulus_degree\": " << gDegree << ",\n"
              << "  \"usable_plain_bits\": " << kUsablePlainBits << ",\n"
              << "  \"dimensions\": [" << shape[0] << ", " << shape[1] << "],\n"
              << "  \"used_plaintexts\": " << used_plaintexts << ",\n"
              << "  \"selected_record\": " << options.target << ",\n"
              << "  \"selected_plaintext\": " << selected_plaintext << ",\n"
              << "  \"selected_offset\": " << selected_offset << ",\n"
-             << "  \"database_seed\": \"0x5345414c50495232\",\n"
+             << "  \"database_seed\": \"" << gDatabaseSeed << "\",\n"
              << "  \"seal_random_seed\": \"0x5345414c50495232,1,2,3,4,5,6,7\",\n"
              << "  \"coefficient_modulus_bits\": [31, 31, 31, 31],\n"
              << "  \"recursive_modulus_target\": \"two 31-bit Q primes after one HPU mod-switch\",\n"
@@ -587,7 +620,8 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "    {\"step\": \"hpu_stage0\", \"produces\": \"first-dimensional ciphertext replies\"},\n"
              << "    {\"step\": \"cpu_decompose\", \"depends_on\": \"stage0 oracle proxy after exact HPU software verification\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
              << "    {\"step\": \"hpu_stage1\", \"depends_on\": \"cpu_decompose output plus second compressed query\", \"produces\": \"recursive PIR reply\"},\n"
-             << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"stage1 oracle proxy after exact HPU software verification\", \"produces\": \"recovered 1024-byte record\"}\n"
+             << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"stage1 oracle proxy after exact HPU software verification\", \"produces\": \"recovered "
+             << gElementBytes << "-byte record\"}\n"
              << "  ],\n"
              << "  \"packages\": [\n";
     for (std::size_t i = 0; i < stats.size(); ++i) {
@@ -624,22 +658,20 @@ int run(int argc, char** argv)
     try {
         const auto options = parse_options(argc, argv);
         if (options.evaluator.delivery.poly_modulus_degree
-            && *options.evaluator.delivery.poly_modulus_degree != kDegree)
-            throw std::invalid_argument("SealPIR 2D fixes --degree to N=4096");
+            && *options.evaluator.delivery.poly_modulus_degree != gDegree)
+            throw std::invalid_argument("SealPIR 2D --degree must match the selected profile");
 
-        // SealPIR's BFVDefault(4096) primes are 36/36/37 bits. A single
-        // 31-bit recursive Q exhausts its budget for the 86-term full dot
-        // product, so use three data Qs plus P and switch once to a two-Q
-        // recursive level. Build this deterministic application context with
-        // SEAL's own public API; no HPU context extension is needed.
+        // Use three 31-bit data Qs plus P and switch once to a two-Q
+        // recursive level. The HPU Q/P ABI differs from either reference's
+        // coefficient moduli; the decrypted record is the comparison target.
         ::seal::EncryptionParameters parameters(::seal::scheme_type::bfv);
-        parameters.set_poly_modulus_degree(kDegree);
+        parameters.set_poly_modulus_degree(gDegree);
         parameters.set_coeff_modulus(
-            ::seal::CoeffModulus::Create(kDegree, {31, 31, 31, 31}));
-        parameters.set_plain_modulus(::seal::PlainModulus::Batching(kDegree, 21));
+            ::seal::CoeffModulus::Create(gDegree, {31, 31, 31, 31}));
+        parameters.set_plain_modulus(::seal::PlainModulus::Batching(gDegree, 21));
         ::seal::prng_seed_type seed{};
         const std::array<std::uint64_t, 8> seed_words{
-            kDatabaseSeed, 1, 2, 3, 4, 5, 6, 7};
+            gDatabaseSeed, 1, 2, 3, 4, 5, 6, 7};
         std::copy(seed_words.begin(), seed_words.end(), seed.begin());
         parameters.set_random_generator(
             std::make_shared<::seal::Blake2xbPRNGFactory>(seed));
@@ -657,16 +689,23 @@ int run(int argc, char** argv)
                     == kUsablePlainBits,
                 "batching plaintext modulus does not provide 20 usable bits");
 
-        const auto per_plain = kDegree / coefficients_per_element();
+        const auto per_plain = gDegree / coefficients_per_element();
         const auto used_plaintexts =
             (options.profile.element_count + per_plain - 1) / per_plain;
         const auto shape = dimensions(used_plaintexts);
-        require(per_plain == 9 && coefficients_per_element() == 410,
-                "SealPIR 1024-byte packing changed unexpectedly");
+        if (options.profile.name == "trident") {
+            require(per_plain == 70 && coefficients_per_element() == 116 &&
+                    used_plaintexts == 937 &&
+                    shape == std::vector<std::size_t>{31, 31},
+                    "Trident 288-byte profile must retain its 31x31 layout");
+        } else {
+            require(per_plain == 9 && coefficients_per_element() == 410,
+                    "SealPIR 1024-byte packing changed unexpectedly");
+        }
         if (options.profile.name == "small")
             require(used_plaintexts == 15 && shape == std::vector<std::size_t>{4, 4},
                     "small profile must retain its 4x4 layout");
-        else
+        else if (options.profile.name == "full")
             require(used_plaintexts == 7282 && shape == std::vector<std::size_t>{86, 85},
                     "full profile must retain SealPIR's 86x85 layout");
 
@@ -678,14 +717,14 @@ int run(int argc, char** argv)
         ::seal::KeyGenerator keygen(context);
         ::seal::GaloisKeys galois_keys;
         std::vector<std::uint32_t> galois_elements;
-        for (std::size_t i = 0; i < integer_log2_ceil(kDegree); ++i)
+        for (std::size_t i = 0; i < integer_log2_ceil(gDegree); ++i)
             galois_elements.push_back(static_cast<std::uint32_t>(
-                kDegree / (std::size_t{1} << i) + 1));
+                gDegree / (std::size_t{1} << i) + 1));
         keygen.create_galois_keys(galois_elements, galois_keys);
         ::seal::Encryptor encryptor(context, keygen.secret_key());
         std::vector<::seal::Ciphertext> compressed_queries;
         for (std::size_t dimension = 0; dimension < shape.size(); ++dimension) {
-            ::seal::Plaintext query(kDegree);
+            ::seal::Plaintext query(gDegree);
             query.set_zero();
             const auto scale = std::uint64_t{1} << integer_log2_ceil(shape[dimension]);
             std::uint64_t inverse = 0;
@@ -745,8 +784,23 @@ int run(int argc, char** argv)
                 coefficient_begin + coefficients_per_element()));
         const auto actual_record = coefficients_to_bytes(selected_coefficients);
         const auto expected_record = database_element(options.target);
+        if (!gTestOutputRecord.empty()) write_bytes(gTestOutputRecord, actual_record);
         require(actual_record == expected_record,
-                "two-dimensional recursive PIR returned the wrong 1024-byte record");
+                "two-dimensional recursive PIR returned the wrong record bytes");
+        for (const auto extra : options.extra_targets) {
+            const auto begin = (extra % per_plain) * coefficients_per_element();
+            std::vector<std::uint64_t> extra_coefficients(
+                decoded.begin() + static_cast<std::ptrdiff_t>(begin),
+                decoded.begin() + static_cast<std::ptrdiff_t>(begin + coefficients_per_element()));
+            const auto recovered = coefficients_to_bytes(extra_coefficients);
+            require(recovered == database_element(extra),
+                    "test-only extra index recovered an incorrect record");
+            if (!gTestOutputRecord.empty())
+                write_bytes(gTestOutputRecord.parent_path() /
+                    (options.profile.name + "_" + std::to_string(extra) + "_seed_" +
+                     std::to_string(gDatabaseSeed) + ".bin"), recovered);
+            std::cout << "AUDIT_EXTRA_INDEX_PASS " << extra << '\n';
+        }
 
         write_manifest(options, shape, used_plaintexts, selected_plaintext,
                        selected_offset, decomposed.size(), first_noise, final_noise,
@@ -762,8 +816,8 @@ int run(int argc, char** argv)
         }
         std::cout << "Microsoft SealPIR two-dimensional BFV HPU application: PASS\n"
                   << "Profile: " << options.profile.name << " ("
-                  << options.profile.element_count << " records x " << kElementBytes
-                  << " bytes, N=" << kDegree << ", d=2)\n"
+                  << options.profile.element_count << " records x " << gElementBytes
+                  << " bytes, N=" << gDegree << ", d=2)\n"
                   << "Batch packing: " << per_plain << " records/plaintext, "
                   << used_plaintexts << " used, matrix " << shape[0] << 'x' << shape[1]
                   << "\nSelected record/plaintext/offset: " << options.target << '/'
@@ -782,8 +836,11 @@ int run(int argc, char** argv)
                   << (options.evaluator.compiler.optimize_resources ? "enabled" : "disabled")
                   << "\n"
                   << "Cross-stage source: SEAL oracle proxy accepted only after exact HPU software verification\n"
-                  << "HPU adaptation: BFVDefault 36/36/37-bit chain -> 31/31/31/31-bit chain;\n"
-                  << "  recursive transfer uses two Qs after one HPU mod-switch (single-Q 31-bit failed at full scale)\n"
+                  << (options.profile.name == "trident"
+                      ? "HPU adaptation: Trident's N=8192 example uses a different coefficient chain and disables recursive mod-switch;\n"
+                        "  this application uses 31/31/31/31-bit Q/P and transfers at the two-Q level.\n"
+                      : "HPU adaptation: SealPIR BFVDefault 36/36/37-bit chain -> 31/31/31/31-bit chain;\n"
+                        "  recursive transfer uses two Qs after one HPU mod-switch.\n")
                   << "SEAL oracle comparison: PASS\nHPU software execution: PASS\n"
                   << "Real HPU hardware execution: NOT RUN\n";
         return 0;
