@@ -1,15 +1,36 @@
-# APSI 无标签 PSI 集中式 HPU 应用
+# APSI PSI 集中式 HPU 应用
+
+> **双模式更新（2026-10-27）：** 应用现在提供 `--match-mode trident` 和
+> `--match-mode exact`。默认 `exact` 保持历史回归含义；`trident` 使用 Kuku
+> 候选位置和各 felt 独立根多项式，按原始 APSI 的同一 BinBundle 全零规则恢复，
+> 允许其定义内的概率性匹配。`exact` 使用此前的同 sender 七字段插值扩展。
+> 两模式仍在确定性 OPRF 输出夹具边界执行。见
+> [双模式语义映射](PIR_PSI_TRIDENT_SEMANTIC_ALIGNMENT.md#7-第二阶段双模式-psi2026-10-27)
+> 和[第二阶段验证记录](PIR_PSI_TRIDENT_ALIGNMENT_VALIDATION.md#第二阶段独立验证记录2026-10-27进行中)。
+
+两种模式使用同一可执行文件。构建时须提供 Kuku 2.1 的 CMake 安装前缀，
+例如 `cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/kuku-prefix`。
+执行示例：
+
+```bash
+build/hpu_bfv_apsi_concentrated_example --profile small --scenario multi --match-mode trident
+build/hpu_bfv_apsi_concentrated_example --profile small --scenario multi --match-mode exact
+```
+
+`--emit-dir` 生成的 `pipeline_manifest.json` 显式写入模式、匹配策略、
+原始集合交集、APSI 参考匹配和解密恢复结果。原始集合交集与参考匹配
+在 `trident` 模式允许不同；只有后两者相等才报告计算语义验证通过。
 
 > **当前集成分支说明（2026-10-26）：** 下文第 1–7 节描述此前的五字段概率性
-> APSI 风格实现和当时的测量结果，不能用来解释现行计算图。现行应用以一个
+> APSI 风格实现和当时的测量结果，不能用来解释当前两种计算图。`exact` 模式以一个
 > 首字段匹配多项式加七个同 sender 插值字段检查全部 128 bit 令牌，见
 > [语义映射与证明](PIR_PSI_TRIDENT_SEMANTIC_ALIGNMENT.md#5-应用层修复后的-psi-语义)。
 > `small`、`medium` 是回归规模；新 `target` 入口为 1,000,000/1,024。
 > `target` 按 sender 分区逐包编译和软件验证，客户端对每包解密匹配求并集；
 > `small`、`medium` 继续单包运行。目标规模实测以验证报告为准。
 > 此增强消除已知误报，但与 Trident 的概率性五字段多项式并非逐算子相同。
-> OPRF 与候选位置仍是本应用的确定性测试实现，真实 FourQ/Kuku
-> 路径尚未验证。当前测试结果以集成分支新验证报告为准。
+> OPRF 仍是确定性测试夹具；`exact` 的候选位置仍为 splitmix64，
+> `trident` 的候选位置使用 Kuku。当前测试结果以第二阶段验证记录为准。
 
 ## 1. 客观实现范围
 

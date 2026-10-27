@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", choices=("small", "medium", "target"), required=True)
     parser.add_argument("--scenario", choices=("empty", "single", "multi", "boundary"), required=True)
+    parser.add_argument("--match-mode", choices=("exact", "trident"), default="exact")
     parser.add_argument("--optimize-resources", action="store_true")
     args = parser.parse_args()
 
@@ -31,6 +32,7 @@ def main() -> int:
         args.example,
         "--profile", args.profile,
         "--scenario", args.scenario,
+        "--match-mode", args.match_mode,
         "--emit-dir", str(output),
     ]
     if args.optimize_resources:
@@ -46,12 +48,15 @@ def main() -> int:
     manifest_path = output / "pipeline_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     packages = manifest.get("packages", [])
+    if manifest.get("match_mode") != args.match_mode:
+        raise RuntimeError("PSI package match mode differs from request")
     if not packages or manifest.get("hpu_application_packages") != len(packages):
         raise RuntimeError("concentrated PSI delivery package count is inconsistent")
     if args.profile != "target" and len(packages) != 1:
         raise RuntimeError("small and medium PSI delivery must contain one package")
     for field in (
         "intersection_match",
+        "apsi_reference_match",
         "seal_oracle_per_node_verified",
         "hpu_software_executor_verified",
         "host_instruction_model_verified",
@@ -63,8 +68,10 @@ def main() -> int:
     if "fixture" not in manifest.get("oprf_mode", ""):
         raise RuntimeError("cropped OPRF boundary is not explicit")
     set_data = json.loads((output / "set_test_data.json").read_text(encoding="utf-8"))
-    if set_data["expected_intersection"] != set_data["recovered_intersection"]:
-        raise RuntimeError("recovered PSI intersection differs from the CPU golden")
+    expected = (set_data["apsi_reference_matches"] if args.match_mode == "trident"
+                else set_data["expected_intersection"])
+    if expected != set_data["recovered_intersection"]:
+        raise RuntimeError("recovered PSI intersection differs from the selected CPU reference")
     for package in packages:
         if not package.get("directory"):
             raise RuntimeError("APSI pipeline manifest has an unnamed package")

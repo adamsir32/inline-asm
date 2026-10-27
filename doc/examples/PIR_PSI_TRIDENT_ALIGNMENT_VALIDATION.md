@@ -148,3 +148,46 @@ OPRF/哈希路径仍不同。最初将所有 sender 分区编进同一包的版�
    OPRF 和位置函数，故不宣称完整 Trident 协议或同输入算子语义对齐。
 4. 上述通过项是实际软件测试；关于 Trident 对应关系的其余内容是源码分析，
    应在获得可运行参考路径及同输入向量后继续验证。没有真实 HPU/RTL 执行。
+
+## 第二阶段独立验证记录（2026-10-27；进行中）
+
+本阶段从已推送的受保护提交
+`7a060f6c0e6aa191606babc2e9d236969d8e5a1f` 建立服务器分支
+`feature/trident-faithful-pir-psi`，另建
+`backup/pre-trident-faithful-20261027` 指向相同提交。
+上游基线仍为 `cfee951e4056660e521d55a3535d82335a49bb08`。
+未向 GitHub 推送，未合并目标开发分支。
+
+固定 Trident `e3f819f845f3cee7425fa08a3aa64879cfd5b3c0` 在独立目录
+`/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-faithful-reference`
+构建。Poseidon 与 Kuku、Flatbuffers、jsoncpp 单独安装在该目录；
+Trident PIR `pir_bfv` 原生示例完成一次默认随机数据库运行，退出码 0，
+日志 `trident-pir-native.log` 报告 `PIR result correct!`。这证明原生参考可运行，
+**不是**与 HPU 相同数据库的逐阶段差分。
+APSI 的 `apsi` 原生静态库也编译成功，日志 `trident-apsi-build.log`。
+为了绕过参考工程硬编码的 `/usr/bin/flatc`，只在独立参考副本修改
+`apsi/CMakeLists.txt` 一行路径，记录于 `trident-apsi-build-only.patch`；
+未改 APSI 算法函数。另在参考副本附加向量驱动目标，待运行结果单独记录。
+
+| 本轮命令（服务器集成目录 `repo`） | 退出码 | 结果与日志 |
+| --- | ---: | --- |
+| `cmake -S . -B ../build -DCMAKE_PREFIX_PATH=.../trident-faithful-reference/reference-prefix` | 0 | 发现 Kuku 2.1.0；`../trident-faithful-configure.log`。 |
+| `cmake --build ../build --target hpu_bfv_apsi_concentrated_example -j4` | 0 | `../trident-faithful-build.log`。 |
+| `../build/hpu_bfv_apsi_concentrated_example --match-mode trident --profile small --scenario multi` | 0 | 原始/参考/恢复匹配均 2；SEAL、HPU 软件及指令模型通过；244 节点、2891 指令、1161 DMA、23025 HPU_MEM 行、最低噪声 7 bit；`../trident-small-multi.log`。 |
+| `../build/hpu_bfv_apsi_concentrated_example --match-mode trident --profile medium --scenario multi` | 0 | 三种匹配均 32；三层软件验证通过；301 节点、107094 指令、40691 DMA、119025 HPU_MEM 行、最低噪声 5 bit；`../trident-medium-multi.log`。 |
+| `../build/hpu_bfv_apsi_concentrated_example --match-mode exact --profile small --scenario multi` | 0 | 历史模式仍通过；288 节点、7515 指令、3121 DMA、50673 HPU_MEM 行、最低噪声 7 bit；`../exact-small-multi.log`。 |
+| `../build/hpu_bfv_apsi_concentrated_example --match-mode trident --profile target --scenario multi` | 未取得退出码 | 运行期间 SSH 连接在服务端握手前关闭；不可计为通过。`../trident-target-multi.log` 待恢复后检查。 |
+
+前三个应用运行的 `SEAL per-node oracle`、HPU 软件执行和主机编码指令模型均报告
+PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一组 BinBundle
+字段根独立计算成员关系，属于独立 CPU 模型等级；在原生同输入向量完成前，
+不称为 Trident 原生端到端对照。
+
+目标规模初次运行使用旧构建，每个 sender 元素都重新初始化 Kuku `LocFunc`。
+源代码已改为每进程缓存与 `SenderDB::hash_functions` 相同的三个位置函数；
+服务器连接恢复后须重建并重新运行。当前没有目标规模通过结论。
+
+本轮待完成的门槛：原生向量与相同输入对拍、精确模式全部历史反例和随机差分、
+两模式应用包验证、PIR 同输入阶段差分、1M/1024 目标规模、
+`git diff --exit-code cfee951e4056660e521d55a3535d82335a49bb08 HEAD -- src include encode`
+以及最终提交 SHA。此处不把旧报告的测试记录算作新实测。

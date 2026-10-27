@@ -134,3 +134,31 @@ Trident `pir_bfv/main.cpp:23-35` 的 288 B 与 8192，并保持 65,536 条、
 模数切换。Trident 默认示例不执行递归模数切换；因此业务记录可按完整字节
 比较，但中间密文的模数层级不能宣称相同。应用的确定性数据库生成器也不同于
 Trident 示例随机数据库；外部字节 Oracle 从相同数据库种子独立生成期望记录。
+
+## 7. 第二阶段双模式 PSI（2026-10-27）
+
+本节从受保护提交 `7a060f6c0e6aa191606babc2e9d236969d8e5a1f` 出发；
+以上第 3、5 节是此前只有精确模式的历史说明。
+`--match-mode exact` 仍为默认，保留八字段同一 sender 插值、splitmix64
+候选位置和完整令牌精确匹配。
+`--match-mode trident` 对应固定 Trident
+`e3f819f845f3cee7425fa08a3aa64879cfd5b3c0` 的无标签 APSI 计算：
+
+| 原生函数 | 新应用表达 | 对齐边界 |
+| --- | --- | --- |
+| `PSIParams::initialize`、`bits_to_field_elts` | `bit_count(t)-1` 位/字段，低位在前；medium/target 为 5×18=90 bit | 字段编码仍须与原生向量逐项比较。 |
+| `Receiver::create_query` | Kuku 2.1 的零种子 `KukuTable`、500 次探测、无 stash | 原始 128-bit 令牌决定位置；随机驱逐使具体位置不总是固定。 |
+| `SenderDB::all_locations`、`insert_or_assign_worker` | Kuku `LocFunc(table_size, make_item(i,0))`；逆序选择可容纳的 BinBundle；新 bin 长度严格 `< max_items_per_bin` | 线程调度会影响合法分包顺序。 |
+| `BinBundle::regen_polyns` | 各 felt 独立计算 `∏(X-r)`；空槽为常数 1 | 没有七个同 sender 插值标签，保留 APSI 概率性匹配。 |
+| `PowersDag`、`ProcessBinBundleCache` | 同源幂与 PS 目标幂集合，HPU 公开乘法/平方/立即重线性化/模数切换/多项式求值 | HPU 的 31-bit 模数链属于参数适配。 |
+| `Receiver::process_result_part` | 同一 BinBundle 连续字段全零；跨包取并集 | 原始集合交集单独记录，验收比较 APSI 参考匹配。 |
+
+目标规模逐 sender 分区出包只调整资源边界，保留每个 BinBundle 的多项式和
+判零语义。两个模式的包清单都标记 `match_mode`、`match_strategy`。
+当前两模式的 OPRF 输入仍为确定性 CPU 夹具；`--test-input` 支持注入同一
+128-bit 令牌。CPU 根成员模型不等于 Trident 原生端到端结果。
+
+PIR 本轮审查未发现必须修复的 D 类核心语义错误，故保留应用算法。
+`rotate_rows` 对 Galois 置换属 A 类等价表达；31-bit 模数链与显式递归
+切换属 B 类 HPU 适配；测试数据库生成方式属 C 类外围差异。
+不同模数链下逐阶段明文对照仍属 E 类，最终字节 Oracle 不证明中间密文一致。

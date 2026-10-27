@@ -565,8 +565,9 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     add_executable(hpu_bfv_apsi_concentrated_example
             examples/bfv_apsi_concentrated_application.cpp
     )
+    find_package(Kuku 2.1 CONFIG REQUIRED)
     target_link_libraries(hpu_bfv_apsi_concentrated_example
-            PRIVATE hpu_seal_delivery hpu_filesystem_compat)
+            PRIVATE hpu_seal_delivery hpu_filesystem_compat Kuku::kuku)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
@@ -769,6 +770,19 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
                     ${apsi_fixture_options})
             set_tests_properties(hpu_bfv_apsi_exact_medium_${apsi_fixture}
                 PROPERTIES LABELS "apsi;application;exact-regression" RUN_SERIAL TRUE TIMEOUT 2400)
+        endforeach()
+        add_test(NAME hpu_bfv_apsi_trident_small_multi
+            COMMAND hpu_bfv_apsi_concentrated_example
+                --profile small --scenario multi --match-mode trident)
+        set_tests_properties(hpu_bfv_apsi_trident_small_multi
+            PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 1800)
+        foreach(apsi_fixture truncation cross_felt)
+            add_test(NAME hpu_bfv_apsi_trident_small_${apsi_fixture}
+                COMMAND hpu_bfv_apsi_concentrated_example --profile small
+                    --match-mode trident
+                    --test-input ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_exact/${apsi_fixture}.input)
+            set_tests_properties(hpu_bfv_apsi_trident_small_${apsi_fixture}
+                PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 1800)
         endforeach()
     endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)
