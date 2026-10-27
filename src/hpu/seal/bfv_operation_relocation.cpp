@@ -4,9 +4,7 @@
 #include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
-#include <regex>
-#include "assembler.hpp"
-#include "executable.hpp"
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -23,87 +21,38 @@ struct DmaInstruction {
     hpu::DataType load_type = hpu::DataType::poly;
     hpu::DloadFlag load_flag = hpu::DloadFlag::regular_bank;
     int store_release = 0;
+    std::uint8_t cp = 0;
+    std::string logical_binding;
 };
 
-std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
-{
-    static const std::regex pattern(
-        "\\\"d(load|store) x10, x11, p([0-9]+), ([0-9]+)(?:, ([0-9]+))?");
-    std::vector<DmaInstruction> result;
-    for (std::sregex_iterator it(body.begin(), body.end(), pattern), end; it != end; ++it) {
-        DmaInstruction instruction;
-        instruction.direction =
-            (*it)[1].str() == "load" ? BfvDmaDirection::load : BfvDmaDirection::store;
-        instruction.object_slot = std::stoi((*it)[2].str());
-        const int operand = std::stoi((*it)[3].str());
-        if (instruction.direction == BfvDmaDirection::load) {
-            if (!(*it)[4].matched || operand < static_cast<int>(hpu::DataType::seg) ||
-                operand > static_cast<int>(hpu::DataType::mod_ctx)) {
-                throw std::logic_error("generated BFV dload has an invalid operand");
-            }
-            instruction.load_type = static_cast<hpu::DataType>(operand);
-            const int flag = std::stoi((*it)[4].str());
-            if (flag < static_cast<int>(hpu::DloadFlag::regular_bank) ||
-                flag > static_cast<int>(hpu::DloadFlag::small_bank)) {
-                throw std::logic_error("generated BFV dload has an invalid bank flag");
-            }
-            instruction.load_flag = static_cast<hpu::DloadFlag>(flag);
-        } else {
-            if ((*it)[4].matched) {
-                throw std::logic_error("generated BFV dstore has too many operands");
-            }
-            instruction.store_release = operand;
-        }
-        result.push_back(instruction);
-    }
-    std::size_t dma_token_count = 0;
-    for (const char* token : {"\"dload ", "\"dstore "}) {
-        std::size_t position = 0;
-        while ((position = body.find(token, position)) != std::string::npos) {
-            ++dma_token_count;
-            position += std::char_traits<char>::length(token);
-        }
-    }
-    if (dma_token_count != result.size()) {
-        throw std::logic_error("generated BFV DMA instruction does not use the frozen x10/x11 ABI");
-    }
-    return result;
-}
-
-
 std::vector<DmaInstruction> declared_dma_instructions(
-    const hpu::resource::OperatorProgram* program, const std::string& compatibility_body)
+    const hpu::resource::OperatorProgram* program)
 {
-    if (!program) return parse_dma_instructions(compatibility_body);
+    if (!program)
+        throw std::invalid_argument("BFV relocation requires native operator IR");
     std::vector<DmaInstruction> result;
     for (const auto& port : program->ports) {
+        if (port.logical_binding.empty())
+            throw std::invalid_argument("BFV relocation requires named logical data ports");
         const auto& node = program->operations.at(port.operation_index);
         DmaInstruction dma;
         dma.direction = port.load ? BfvDmaDirection::load : BfvDmaDirection::store;
         const auto id = port.load ? node.outputs.at(0) : node.inputs.at(0);
         dma.object_slot = program->values.at(id).variable.compatibility_slot;
-        dma.load_type = static_cast<hpu::DataType>(node.instruction.type);
+        dma.load_type = node.instruction.type == 1 ? hpu::DataType::mod_ctx : hpu::DataType::poly;
         dma.load_flag = static_cast<hpu::DloadFlag>(node.instruction.dma_flag);
         dma.store_release = node.instruction.type;
+        dma.cp = node.instruction.cp;
+        dma.logical_binding = port.logical_binding;
         result.push_back(dma);
-    }
-    const auto encoded = hpu::collect_dma_relocations(hpu::assemble_source(compatibility_body));
-    if (encoded.size() != result.size()) throw std::invalid_argument("native DMA ports disagree with compatibility body");
-    for (std::size_t i = 0; i < encoded.size(); ++i) {
-        const auto& actual = encoded[i];
-        const auto& expected = result[i];
-        if (actual.object_id != expected.object_slot ||
-            actual.direction != (expected.direction == BfvDmaDirection::load ? hpu::Mnemonic::kDload : hpu::Mnemonic::kDstore) ||
-            actual.type_or_release != (expected.direction == BfvDmaDirection::load ? static_cast<int>(expected.load_type) : expected.store_release) ||
-            (expected.direction == BfvDmaDirection::load && actual.flag != static_cast<int>(expected.load_flag)))
-            throw std::invalid_argument("native DMA declaration differs from compatibility instruction");
     }
     return result;
 }
 
 bool same_instruction(const DmaInstruction& left, const DmaInstruction& right)
 {
-    return left.direction == right.direction && left.object_slot == right.object_slot &&
+    return left.cp == right.cp && left.direction == right.direction &&
+           left.logical_binding == right.logical_binding &&
            (left.direction == BfvDmaDirection::load
                 ? left.load_type == right.load_type && left.load_flag == right.load_flag
                 : left.store_release == right.store_release);
@@ -126,26 +75,25 @@ public:
     {
     }
 
-    void load(int slot, const std::string& allocation_id)
+    void load_named(const std::string& name, const std::string& allocation_id)
     {
-        load_words(slot, allocation_id, polynomial_words_);
+        bind_named(name, allocation_id, true, polynomial_words_);
     }
 
-    void load_words(int slot, const std::string& allocation_id, std::size_t expected_words)
+    void load_named_words(const std::string& name, const std::string& allocation_id,
+                          std::size_t words)
     {
-        append(BfvDmaDirection::load, slot, allocation_id, hpu::DataType::poly,
-               hpu::DloadFlag::regular_bank, 0, expected_words);
+        bind_named(name, allocation_id, true, words);
     }
 
-    void store(int slot, const std::string& allocation_id)
+    void store_named(const std::string& name, const std::string& allocation_id)
     {
-        append(BfvDmaDirection::store, slot, allocation_id, hpu::DataType::poly,
-               hpu::DloadFlag::regular_bank, 1, polynomial_words_);
+        bind_named(name, allocation_id, false, polynomial_words_);
     }
 
     void finish() const
     {
-        if (cursor_ != instructions_.size()) {
+        if (bound_.size() != instructions_.size()) {
             throw std::logic_error(
                 "BFV relocation recipe did not consume every DMA instruction for " +
                 operation_.operation.id);
@@ -153,18 +101,32 @@ public:
     }
 
 private:
+    void bind_named(const std::string& name, const std::string& allocation_id, bool load,
+                    std::size_t expected_words)
+    {
+        const auto found = std::find_if(instructions_.begin(), instructions_.end(),
+            [&](const auto& instruction) { return instruction.logical_binding == name; });
+        if (found == instructions_.end()) {
+            throw std::logic_error("missing BFV logical data port: " + name);
+        }
+        const auto index = static_cast<std::size_t>(found - instructions_.begin());
+        append(load ? BfvDmaDirection::load : BfvDmaDirection::store,
+               found->object_slot, allocation_id, found->load_type,
+               found->load_flag, found->store_release, expected_words, index);
+    }
+
     void append(BfvDmaDirection direction, int slot, const std::string& allocation_id,
                 hpu::DataType load_type, hpu::DloadFlag load_flag, int store_release,
-                std::size_t expected_words)
+                std::size_t expected_words, std::size_t index)
     {
-        if (cursor_ >= instructions_.size()) {
+        if (index >= instructions_.size() || bound_.count(index)) {
             throw std::logic_error("BFV relocation recipe exceeds generated DMA instructions for " +
                                    operation_.operation.id);
         }
-        const auto& instruction = instructions_[cursor_];
+        const auto& instruction = instructions_[index];
         if (instruction.direction != direction || instruction.object_slot != slot ||
             (direction == BfvDmaDirection::load &&
-             (instruction.load_type != load_type || instruction.load_flag != load_flag)) ||
+             (hpu::dma_mod_bit(instruction.load_type) != hpu::dma_mod_bit(load_type) || instruction.load_flag != load_flag)) ||
             (direction == BfvDmaDirection::store && instruction.store_release != store_release)) {
             throw std::logic_error("BFV relocation recipe disagrees with generated DMA ABI for " +
                                    operation_.operation.id);
@@ -181,19 +143,20 @@ private:
         }
 
         BfvDmaBinding binding;
-        binding.program_dma_index = first_program_dma_index_ + cursor_;
+        binding.program_dma_index = first_program_dma_index_ + index;
         binding.operation_index = operation_index_;
-        binding.operation_dma_index = cursor_;
+        binding.operation_dma_index = index;
         binding.operation_id = operation_.operation.id;
         binding.direction = direction;
-        binding.object_slot = slot;
+        binding.object_slot = instruction.object_slot;
         binding.load_type = instruction.load_type;
+        binding.cp = instruction.cp;
         binding.load_flag = instruction.load_flag;
         binding.store_release = instruction.store_release;
         binding.allocation_id = allocation.id;
         binding.span = allocation.span;
         schedule_.bindings.push_back(std::move(binding));
-        ++cursor_;
+        bound_.insert(index);
     }
 
     BfvRelocationSchedule& schedule_;
@@ -203,7 +166,7 @@ private:
     std::size_t first_program_dma_index_;
     std::size_t polynomial_words_;
     std::vector<DmaInstruction> instructions_;
-    std::size_t cursor_ = 0;
+    std::set<std::size_t> bound_;
 };
 
 void bind_ciphertext_binary(OperationBindingBuilder& bindings, const BfvOperationStep& step,
@@ -215,9 +178,11 @@ void bind_ciphertext_binary(OperationBindingBuilder& bindings, const BfvOperatio
     }
     for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.keyswitch_layout.q_mod_ids) {
-            bindings.load(0, limb_id(step.inputs[0], component, modulus_id));
-            bindings.load(1, limb_id(step.inputs[1], component, modulus_id));
-            bindings.store(2, limb_id(step.output, component, modulus_id));
+            const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+            const auto limb = "c" + std::to_string(component);
+            bindings.load_named(prefix + "left/" + limb, limb_id(step.inputs[0], component, modulus_id));
+            bindings.load_named(prefix + "right/" + limb, limb_id(step.inputs[1], component, modulus_id));
+            bindings.store_named(prefix + "output/" + limb, limb_id(step.output, component, modulus_id));
         }
     }
     bindings.finish();
@@ -231,11 +196,12 @@ void bind_plain_binary(OperationBindingBuilder& bindings, const BfvOperationStep
         throw std::invalid_argument("invalid BFV AddPlain/SubtractPlain relocation manifest");
     }
     for (int modulus_id : level.keyswitch_layout.q_mod_ids) {
-        bindings.load(0, limb_id(step.inputs[0], 0, modulus_id));
-        bindings.load(1, limb_id(step.inputs[1], 0, modulus_id));
-        bindings.store(2, limb_id(step.output, 0, modulus_id));
-        bindings.load(0, limb_id(step.inputs[0], 1, modulus_id));
-        bindings.store(0, limb_id(step.output, 1, modulus_id));
+        const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+        bindings.load_named(prefix + "left/c0", limb_id(step.inputs[0], 0, modulus_id));
+        bindings.load_named(prefix + "plaintext", limb_id(step.inputs[1], 0, modulus_id));
+        bindings.store_named(prefix + "output/c0", limb_id(step.output, 0, modulus_id));
+        bindings.load_named(prefix + "left/c1", limb_id(step.inputs[0], 1, modulus_id));
+        bindings.store_named(prefix + "output/c1", limb_id(step.output, 1, modulus_id));
     }
     bindings.finish();
 }
@@ -260,69 +226,70 @@ std::string workspace_mod_id(const std::string& prefix, const std::string& role,
     return prefix + "/workspace/" + role + "/mod" + std::to_string(modulus_id);
 }
 
+void bind_transform_tables(OperationBindingBuilder& bindings, const std::string& role,
+                           int modulus_id, std::size_t degree, bool inverse,
+                           const std::string& alternate = {})
+{
+    const auto table_id = [&](const std::string& suffix) {
+        return alternate.empty() ? canonical_twiddle_id(modulus_id, inverse, suffix)
+                                 : alternate + "/" + suffix;
+    };
+    if (!inverse) bindings.load_named_words(role + "/pre_twist", table_id("pre_twist"),
+                                            hpu::model::kOnlinePmulParameterWords);
+    for (std::size_t stage = 0; stage < ntt_stage_count(degree); ++stage) {
+        const auto suffix = "stage" + std::to_string(stage);
+        bindings.load_named_words(role + "/" + suffix, table_id(suffix),
+                                  hpu::model::kStageTwiddleParameterWords);
+    }
+    if (inverse) bindings.load_named_words(role + "/post_untwist_scale", table_id("post_untwist_scale"),
+                                           hpu::model::kOnlinePmulParameterWords);
+}
+
 void bind_transform_limb(OperationBindingBuilder& bindings, const std::string& input_id,
                          const std::string& output_id, int modulus_id, std::size_t degree,
-                         bool inverse)
+                         bool inverse, const std::string& role)
 {
-    bindings.load(0, input_id);
-    const std::size_t stages = ntt_stage_count(degree);
-    if (!inverse) {
-        bindings.load_words(3, canonical_twiddle_id(modulus_id, false, "pre_twist"), degree);
-    }
-    for (std::size_t stage = 0; stage < stages; ++stage) {
-        bindings.load_words(
-            3, canonical_twiddle_id(modulus_id, inverse, "stage" + std::to_string(stage)),
-            hpu::model::kStageTwiddleParameterWords);
-    }
-    if (inverse) {
-        bindings.load_words(3, canonical_twiddle_id(modulus_id, true, "post_untwist_scale"),
-                            degree);
-    }
-    bindings.store(0, output_id);
+    bindings.load_named(role + "/input", input_id);
+    bind_transform_tables(bindings, role + "/table", modulus_id, degree, inverse);
+    bindings.store_named(role + "/output", output_id);
 }
 
 void bind_automorphism_limb(OperationBindingBuilder& bindings, const std::string& input_id,
                             const std::string& output_id, int modulus_id,
-                            const std::string& fused_twiddle_prefix, std::size_t degree)
+                            const std::string& fused_twiddle_prefix, std::size_t degree,
+                            const std::string& role)
 {
-    bindings.load(0, input_id);
-    const std::size_t stages = ntt_stage_count(degree);
-    bindings.load_words(3, canonical_twiddle_id(modulus_id, false, "pre_twist"), degree);
-    for (std::size_t stage = 0; stage < stages; ++stage) {
-        bindings.load_words(3, canonical_twiddle_id(
-                                   modulus_id, false, "stage" + std::to_string(stage)),
-                            hpu::model::kStageTwiddleParameterWords);
-    }
-    for (std::size_t stage = 0; stage < stages; ++stage) {
-        bindings.load_words(3, fused_twiddle_prefix + "/stage" + std::to_string(stage),
-                            hpu::model::kStageTwiddleParameterWords);
-    }
-    bindings.load_words(3, fused_twiddle_prefix + "/post_untwist_scale", degree);
-    bindings.store(0, output_id);
+    bindings.load_named(role + "/input", input_id);
+    bind_transform_tables(bindings, role + "/forward/table", modulus_id, degree, false);
+    bind_transform_tables(bindings, role + "/inverse/table", modulus_id, degree, true,
+                          fused_twiddle_prefix);
+    bindings.store_named(role + "/output", output_id);
 }
 
 void bind_bconv(OperationBindingBuilder& bindings, const std::vector<int>& sources,
                 const std::vector<int>& targets, const std::vector<std::string>& source_ids,
                 const std::vector<std::string>& target_ids, const std::string& normalized_prefix,
-                const std::string& inverse_prefix, const std::string& target_prefix)
+                const std::string& inverse_prefix, const std::string& target_prefix,
+                const std::string& role)
 {
-    if (sources.size() != source_ids.size() || targets.size() != target_ids.size()) {
+    if (sources.size() != source_ids.size() || targets.size() != target_ids.size())
         throw std::logic_error("BFV BConv relocation shape mismatch");
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const auto source = std::to_string(sources[i]);
+        bindings.load_named(role + "/source/mod" + source, source_ids[i]);
+        bindings.load_named(role + "/inverse/mod" + source, inverse_prefix + "/qhat_inv/mod" + source);
+        bindings.store_named(role + "/normalized/mod" + source, normalized_prefix + std::to_string(i));
     }
-    for (std::size_t source_index = 0; source_index < sources.size(); ++source_index) {
-        const int source = sources[source_index];
-        bindings.load(0, source_ids[source_index]);
-        bindings.load(1, inverse_prefix + "/qhat_inv/mod" + std::to_string(source));
-        bindings.store(0, normalized_prefix + std::to_string(source_index));
-    }
-    for (std::size_t target_index = 0; target_index < targets.size(); ++target_index) {
-        const int target = targets[target_index];
-        for (std::size_t source_index = 0; source_index < sources.size(); ++source_index) {
-            bindings.load(0, normalized_prefix + std::to_string(source_index));
-            bindings.load(1, target_prefix + "/qhat_mod_target/target" + std::to_string(target) +
-                                 "/source" + std::to_string(sources[source_index]));
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const auto target = std::to_string(targets[i]);
+        for (std::size_t j = 0; j < sources.size(); ++j) {
+            const auto source = std::to_string(sources[j]);
+            bindings.load_named(role + "/accumulate/to" + target + "/source/mod" + source,
+                                normalized_prefix + std::to_string(j));
+            bindings.load_named(role + "/factor/to" + target + "/from" + source,
+                                target_prefix + "/qhat_mod_target/target" + target + "/source" + source);
         }
-        bindings.store(2, target_ids[target_index]);
+        bindings.store_named(role + "/output/mod" + target, target_ids[i]);
     }
 }
 
@@ -348,55 +315,55 @@ std::vector<std::string> value_limb_ids(const BfvPlannedValue& value, std::size_
     return result;
 }
 
-void bind_bfv_galois_keyswitch(OperationBindingBuilder& bindings, const BfvOperationStep& step,
-                               const BfvLevelDescriptor& level, std::size_t degree)
+template <typename SwitchingLimb, typename BaseLimb, typename ModdownOutput>
+void bind_bfv_keyswitch_core(OperationBindingBuilder& bindings, const BfvOperationStep& step,
+                             const BfvLevelDescriptor& level, std::size_t degree,
+                             const std::string& role, SwitchingLimb switching_limb,
+                             BaseLimb base_limb, ModdownOutput moddown_output)
 {
     const auto& layout = level.keyswitch_layout;
     const auto& q = layout.q_mod_ids;
     const auto& p = layout.p_mod_ids;
-    if (p.size() != 1) {
-        throw std::invalid_argument("BFV rotation KeySwitch requires one special prime");
-    }
+    if (p.size() != 1) throw std::invalid_argument("BFV KeySwitch requires one special prime");
     std::vector<int> q_p = q;
     q_p.insert(q_p.end(), p.begin(), p.end());
-    const auto& switching = step.workspaces.front();
     const std::string prefix = step.resources.keyswitch_constants_id + "/hardware";
     const std::string normalized = prefix + "/workspace/bconv/normalized";
-
     for (std::size_t digit = 0; digit < layout.key_digits.size(); ++digit) {
         const auto& sources = layout.key_digits[digit];
         std::vector<int> targets;
-        for (int context : q) {
-            if (std::find(sources.begin(), sources.end(), context) == sources.end()) {
-                targets.push_back(context);
-            }
-        }
+        for (int context : q)
+            if (std::find(sources.begin(), sources.end(), context) == sources.end()) targets.push_back(context);
         targets.insert(targets.end(), p.begin(), p.end());
         const std::string digit_prefix = prefix + "/modup/d" + std::to_string(digit);
-        const auto switching_ids = value_limb_ids(switching, 1, sources);
-        for (std::size_t index = 0; index < sources.size(); ++index) {
-            bindings.load(0, switching_ids[index]);
-            bindings.store(0, workspace_mod_id(prefix, "modup", sources[index]));
+        const auto digit_role = role + "/digit" + std::to_string(digit);
+        std::vector<std::string> switching_ids;
+        for (int source : sources) switching_ids.push_back(switching_limb(source));
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            const auto mod = std::to_string(sources[i]);
+            bindings.load_named(digit_role + "/modup/copy/input/mod" + mod, switching_ids[i]);
+            bindings.store_named(digit_role + "/modup/copy/output/mod" + mod,
+                                  workspace_mod_id(prefix, "modup", sources[i]));
         }
         bind_bconv(bindings, sources, targets, switching_ids,
                    workspace_ids(prefix, "modup", targets), normalized, digit_prefix,
-                   digit_prefix);
+                   digit_prefix, digit_role + "/modup/bconv");
         for (int context : q_p) {
             const auto id = workspace_mod_id(prefix, "modup", context);
-            bind_transform_limb(bindings, id, id, context, degree, false);
+            bind_transform_limb(bindings, id, id, context, degree, false,
+                                digit_role + "/forward/mod" + std::to_string(context));
         }
         for (int component = 0; component < 2; ++component) {
             const auto accumulator_role = "accumulator/c" + std::to_string(component);
             for (int context : q_p) {
-                bindings.load(0, workspace_mod_id(prefix, "modup", context));
-                bindings.load(1, step.resources.evaluation_key_id + "/d" +
-                                     std::to_string(digit) + "/c" +
-                                     std::to_string(component) + "/mod" +
-                                     std::to_string(context));
-                if (digit != 0) {
-                    bindings.load(2, workspace_mod_id(prefix, accumulator_role, context));
-                }
-                bindings.store(2, workspace_mod_id(prefix, accumulator_role, context));
+                const auto product = digit_role + "/product/c" + std::to_string(component) +
+                                     "/mod" + std::to_string(context);
+                bindings.load_named(product + "/input", workspace_mod_id(prefix, "modup", context));
+                bindings.load_named(product + "/key", step.resources.evaluation_key_id + "/d" +
+                    std::to_string(digit) + "/c" + std::to_string(component) + "/mod" + std::to_string(context));
+                if (digit != 0) bindings.load_named(product + "/accumulator",
+                    workspace_mod_id(prefix, accumulator_role, context));
+                bindings.store_named(product + "/output", workspace_mod_id(prefix, accumulator_role, context));
             }
         }
     }
@@ -404,37 +371,58 @@ void bind_bfv_galois_keyswitch(OperationBindingBuilder& bindings, const BfvOpera
         const auto accumulator_role = "accumulator/c" + std::to_string(component);
         for (int context : q_p) {
             const auto id = workspace_mod_id(prefix, accumulator_role, context);
-            bind_transform_limb(bindings, id, id, context, degree, true);
+            bind_transform_limb(bindings, id, id, context, degree, true,
+                                role + "/inverse/c" + std::to_string(component) + "/mod" + std::to_string(context));
         }
     }
-
     const int p_context = p.front();
     const std::string moddown_prefix = prefix + "/moddown";
     for (int component = 0; component < 2; ++component) {
         const auto accumulator_role = "accumulator/c" + std::to_string(component);
+        const auto rounded_role = role + "/rounded_moddown/c" + std::to_string(component);
         for (int context : q_p) {
+            const auto mod = std::to_string(context);
             const auto accumulator = workspace_mod_id(prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(1, prefix + "/half/mod" + std::to_string(context));
-            bindings.store(0, accumulator);
+            bindings.load_named(rounded_role + "/half/input/mod" + mod, accumulator);
+            bindings.load_named(rounded_role + "/half/constant/mod" + mod, prefix + "/half/mod" + mod);
+            bindings.store_named(rounded_role + "/half/output/mod" + mod, accumulator);
         }
         bind_bconv(bindings, {p_context}, q,
                    workspace_ids(prefix, accumulator_role, {p_context}),
                    workspace_ids(prefix, "moddown/correction", q), normalized,
-                   moddown_prefix, moddown_prefix);
+                   moddown_prefix, moddown_prefix, rounded_role + "/moddown/bconv");
         for (int context : q) {
-            const auto accumulator = workspace_mod_id(prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(1, workspace_mod_id(prefix, "moddown/correction", context));
-            bindings.load(2, moddown_prefix + "/p_inverse/mod" + std::to_string(context));
-            bindings.store(0, component == 1 ? limb_id(step.output, 1, context) : accumulator);
+            const auto mod = std::to_string(context);
+            const auto moddown_role = rounded_role + "/moddown";
+            bindings.load_named(moddown_role + "/input/mod" + mod,
+                                workspace_mod_id(prefix, accumulator_role, context));
+            bindings.load_named(moddown_role + "/correction/mod" + mod,
+                                workspace_mod_id(prefix, "moddown/correction", context));
+            bindings.load_named(moddown_role + "/inverse/mod" + mod,
+                                moddown_prefix + "/p_inverse/mod" + mod);
+            bindings.store_named(moddown_role + "/output/mod" + mod, moddown_output(component, context));
         }
     }
     for (int context : q) {
-        bindings.load(0, workspace_mod_id(prefix, "accumulator/c0", context));
-        bindings.load(1, limb_id(switching, 0, context));
-        bindings.store(2, limb_id(step.output, 0, context));
+        const auto merge_role = role + "/merge/mod" + std::to_string(context);
+        bindings.load_named(merge_role + "/value", workspace_mod_id(prefix, "accumulator/c0", context));
+        bindings.load_named(merge_role + "/base", base_limb(context));
+        bindings.store_named(merge_role + "/output", limb_id(step.output, 0, context));
     }
+}
+
+void bind_bfv_galois_keyswitch(OperationBindingBuilder& bindings, const BfvOperationStep& step,
+                               const BfvLevelDescriptor& level, std::size_t degree)
+{
+    const auto& switching = step.workspaces.front();
+    const auto prefix = step.resources.keyswitch_constants_id + "/hardware";
+    bind_bfv_keyswitch_core(bindings, step, level, degree, "keyswitch",
+        [&](int context) { return limb_id(switching, 1, context); },
+        [&](int context) { return limb_id(switching, 0, context); },
+        [&](int component, int context) {
+            return component == 1 ? limb_id(step.output, 1, context)
+                : workspace_mod_id(prefix, "accumulator/c0", context);
+        });
 }
 
 void bind_bfv_galois(OperationBindingBuilder& bindings, const BfvOperationStep& step,
@@ -455,7 +443,8 @@ void bind_bfv_galois(OperationBindingBuilder& bindings, const BfvOperationStep& 
             const int context = level.keyswitch_layout.q_mod_ids[basis];
             bind_automorphism_limb(bindings, limb_id(step.inputs[0], component, context),
                                    limb_id(step.workspaces[0], component, context), context,
-                                   step.resources.fused_twiddle_ids[basis], degree);
+                                   step.resources.fused_twiddle_ids[basis], degree,
+                                   "galois/c" + std::to_string(component) + "/mod" + std::to_string(context));
         }
     }
     bind_bfv_galois_keyswitch(bindings, step, level, degree);
@@ -467,90 +456,18 @@ void bind_bfv_relinearization(OperationBindingBuilder& bindings, const BfvOperat
                               const BfvLevelDescriptor& level, std::size_t degree,
                               TensorLimb tensor_limb)
 {
-    const auto& q = level.keyswitch_layout.q_mod_ids;
-    const auto& p = level.keyswitch_layout.p_mod_ids;
-    std::vector<int> q_p = q;
-    q_p.insert(q_p.end(), p.begin(), p.end());
-    const std::string keyswitch_prefix = step.resources.keyswitch_constants_id + "/hardware";
-    const std::string keyswitch_normalized = keyswitch_prefix + "/workspace/bconv/normalized";
-    for (std::size_t digit = 0; digit < level.keyswitch_layout.key_digits.size(); ++digit) {
-        const auto& sources = level.keyswitch_layout.key_digits[digit];
-        std::vector<int> targets;
-        for (int context : q) {
-            if (std::find(sources.begin(), sources.end(), context) == sources.end()) {
-                targets.push_back(context);
-            }
-        }
-        targets.insert(targets.end(), p.begin(), p.end());
-        const std::string digit_prefix = keyswitch_prefix + "/modup/d" + std::to_string(digit);
-        std::vector<std::string> switching_ids;
-        for (int context : sources) {
-            switching_ids.push_back(tensor_limb(2, context));
-        }
-        for (std::size_t index = 0; index < sources.size(); ++index) {
-            bindings.load(0, switching_ids[index]);
-            bindings.store(0, workspace_mod_id(keyswitch_prefix, "modup", sources[index]));
-        }
-        bind_bconv(bindings, sources, targets, switching_ids,
-                   workspace_ids(keyswitch_prefix, "modup", targets), keyswitch_normalized,
-                   digit_prefix, digit_prefix);
-        for (int context : q_p) {
-            const auto id = workspace_mod_id(keyswitch_prefix, "modup", context);
-            bind_transform_limb(bindings, id, id, context, degree, false);
-        }
-        for (int component = 0; component < 2; ++component) {
-            const auto accumulator_role = "accumulator/c" + std::to_string(component);
-            for (int context : q_p) {
-                bindings.load(0, workspace_mod_id(keyswitch_prefix, "modup", context));
-                bindings.load(1, step.resources.evaluation_key_id + "/d" + std::to_string(digit) +
-                                     "/c" + std::to_string(component) + "/mod" +
-                                     std::to_string(context));
-                if (digit != 0) {
-                    bindings.load(2, workspace_mod_id(keyswitch_prefix, accumulator_role, context));
-                }
-                bindings.store(2, workspace_mod_id(keyswitch_prefix, accumulator_role, context));
-            }
-        }
-    }
-    for (int component = 0; component < 2; ++component) {
-        const auto accumulator_role = "accumulator/c" + std::to_string(component);
-        for (int context : q_p) {
-            const auto id = workspace_mod_id(keyswitch_prefix, accumulator_role, context);
-            bind_transform_limb(bindings, id, id, context, degree, true);
-        }
-    }
-
-    const int p_context = p.front();
-    const std::string moddown_prefix = keyswitch_prefix + "/moddown";
-    for (int component = 0; component < 2; ++component) {
-        const auto accumulator_role = "accumulator/c" + std::to_string(component);
-        for (int context : q_p) {
-            const auto accumulator = workspace_mod_id(keyswitch_prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(1, keyswitch_prefix + "/half/mod" + std::to_string(context));
-            bindings.store(0, accumulator);
-        }
-        bind_bconv(bindings, {p_context}, q,
-                   workspace_ids(keyswitch_prefix, accumulator_role, {p_context}),
-                   workspace_ids(keyswitch_prefix, "moddown/correction", q), keyswitch_normalized,
-                   moddown_prefix, moddown_prefix);
-        for (int context : q) {
-            const auto accumulator = workspace_mod_id(keyswitch_prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(1, workspace_mod_id(keyswitch_prefix, "moddown/correction", context));
-            bindings.load(2, moddown_prefix + "/p_inverse/mod" + std::to_string(context));
-            bindings.store(0, accumulator);
-        }
-    }
-    for (int context : q) {
-        bindings.load(0, workspace_mod_id(keyswitch_prefix, "accumulator/c0", context));
-        bindings.load(1, tensor_limb(0, context));
-        bindings.store(2, limb_id(step.output, 0, context));
-    }
-    for (int context : q) {
-        bindings.load(0, tensor_limb(1, context));
-        bindings.load(1, workspace_mod_id(keyswitch_prefix, "accumulator/c1", context));
-        bindings.store(2, limb_id(step.output, 1, context));
+    const auto prefix = step.resources.keyswitch_constants_id + "/hardware";
+    bind_bfv_keyswitch_core(bindings, step, level, degree, "relinearize/keyswitch",
+        [&](int context) { return tensor_limb(2, context); },
+        [&](int context) { return tensor_limb(0, context); },
+        [&](int component, int context) {
+            return workspace_mod_id(prefix, "accumulator/c" + std::to_string(component), context);
+        });
+    for (int context : level.keyswitch_layout.q_mod_ids) {
+        const auto merge = "relinearize/merge/mod" + std::to_string(context);
+        bindings.load_named(merge + "/tensor", tensor_limb(1, context));
+        bindings.load_named(merge + "/switched", workspace_mod_id(prefix, "accumulator/c1", context));
+        bindings.store_named(merge + "/output", limb_id(step.output, 1, context));
     }
 }
 
@@ -590,7 +507,7 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
         bind_bconv(bindings, q, bsk,
                    value_limb_ids(*input_values[input], input_components[input], q),
                    workspace_ids(multiply_prefix, input_role(input), bsk), multiply_normalized,
-                   q_to_bsk, q_to_bsk);
+                   q_to_bsk, q_to_bsk, "behz/input_bconv/c" + std::to_string(input));
     }
 
     for (int input = 0; input < 4; ++input) {
@@ -598,13 +515,15 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
             bind_transform_limb(bindings,
                                 limb_id(*input_values[input], input_components[input], context),
                                 workspace_mod_id(multiply_prefix, input_role(input), context),
-                                context, degree, false);
+                                context, degree, false,
+                                "behz/input_q/c" + std::to_string(input) + "/mod" + std::to_string(context));
         }
     }
     for (int input = 0; input < 4; ++input) {
         for (int context : bsk) {
             const auto id = workspace_mod_id(multiply_prefix, input_role(input), context);
-            bind_transform_limb(bindings, id, id, context, degree, false);
+            bind_transform_limb(bindings, id, id, context, degree, false,
+                                "behz/input_bsk/c" + std::to_string(input) + "/mod" + std::to_string(context));
         }
     }
 
@@ -613,17 +532,15 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
             const auto input = [&](int index) {
                 return workspace_mod_id(multiply_prefix, input_role(index), context);
             };
-            bindings.load(0, input(0));
-            bindings.load(1, input(2));
-            bindings.store(2, workspace_mod_id(multiply_prefix, tensor_role(0), context));
-            bindings.load(0, input(0));
-            bindings.load(1, input(3));
-            bindings.load(0, input(1));
-            bindings.load(1, input(2));
-            bindings.store(2, workspace_mod_id(multiply_prefix, tensor_role(1), context));
-            bindings.load(0, input(1));
-            bindings.load(1, input(3));
-            bindings.store(2, workspace_mod_id(multiply_prefix, tensor_role(2), context));
+            const auto prefix = "tensor/mod" + std::to_string(context) + "/";
+            bindings.load_named(prefix + "left/c0", input(0));
+            bindings.load_named(prefix + "right/c0", input(2));
+            bindings.load_named(prefix + "left/c1", input(1));
+            bindings.load_named(prefix + "right/c1", input(3));
+            for (int component = 0; component < 3; ++component) {
+                bindings.store_named(prefix + "output/c" + std::to_string(component),
+                    workspace_mod_id(multiply_prefix, tensor_role(component), context));
+            }
         }
     };
     bind_tensor_basis(q);
@@ -632,22 +549,25 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
     for (int component = 0; component < 3; ++component) {
         for (int context : q) {
             const auto id = workspace_mod_id(multiply_prefix, tensor_role(component), context);
-            bind_transform_limb(bindings, id, id, context, degree, true);
+            bind_transform_limb(bindings, id, id, context, degree, true,
+                                "behz/tensor_inverse_q/c" + std::to_string(component) + "/mod" + std::to_string(context));
         }
     }
     for (int component = 0; component < 3; ++component) {
         for (int context : bsk) {
             const auto id = workspace_mod_id(multiply_prefix, tensor_role(component), context);
-            bind_transform_limb(bindings, id, id, context, degree, true);
+            bind_transform_limb(bindings, id, id, context, degree, true,
+                                "behz/tensor_inverse_bsk/c" + std::to_string(component) + "/mod" + std::to_string(context));
         }
     }
 
     for (int component = 0; component < 3; ++component) {
         for (int context : q_bsk) {
             const auto tensor = workspace_mod_id(multiply_prefix, tensor_role(component), context);
-            bindings.load(0, tensor);
-            bindings.load(1, multiply_prefix + "/t/mod" + std::to_string(context));
-            bindings.store(0, tensor);
+            const auto role = "behz/scalar/c" + std::to_string(component) + "/mod" + std::to_string(context);
+            bindings.load_named(role + "/input", tensor);
+            bindings.load_named(role + "/scalar", multiply_prefix + "/t/mod" + std::to_string(context));
+            bindings.store_named(role + "/output", tensor);
         }
     }
 
@@ -655,14 +575,15 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
         const auto converted_role = "fast_floor/converted/c" + std::to_string(component);
         bind_bconv(bindings, q, bsk, workspace_ids(multiply_prefix, tensor_role(component), q),
                    workspace_ids(multiply_prefix, converted_role, bsk), multiply_normalized,
-                   q_to_bsk, q_to_bsk);
+                   q_to_bsk, q_to_bsk, "behz/fast_floor/c" + std::to_string(component) + "/bconv");
         for (int context : bsk) {
             const auto tensor = workspace_mod_id(multiply_prefix, tensor_role(component), context);
-            bindings.load(0, tensor);
-            bindings.load(1, workspace_mod_id(multiply_prefix, converted_role, context));
-            bindings.load(2,
+            const auto role = "behz/fast_floor/c" + std::to_string(component) + "/mod" + std::to_string(context);
+            bindings.load_named(role + "/input", tensor);
+            bindings.load_named(role + "/converted", workspace_mod_id(multiply_prefix, converted_role, context));
+            bindings.load_named(role + "/inverse",
                           multiply_prefix + "/fast_floor/q_inverse/mod" + std::to_string(context));
-            bindings.store(0, tensor);
+            bindings.store_named(role + "/output", tensor);
         }
     }
 
@@ -673,29 +594,31 @@ void bind_bfv_multiply(OperationBindingBuilder& bindings, const BfvOperationStep
         const auto source_ids = workspace_ids(multiply_prefix, tensor_role(component), b);
         const auto y_role = "branchless/y/c" + std::to_string(component);
         const auto alpha_role = "branchless/alpha/c" + std::to_string(component);
+        const auto role = "behz/sk/c" + std::to_string(component);
         bind_bconv(bindings, b, q, source_ids, workspace_ids(multiply_prefix, y_role, q),
-                   multiply_normalized, b_to_q, b_to_q);
+                   multiply_normalized, b_to_q, b_to_q, role + "/to_q");
         bind_bconv(bindings, b, {level.m_sk_mod_id}, source_ids,
                    workspace_ids(multiply_prefix, alpha_role, {level.m_sk_mod_id}),
-                   multiply_normalized, b_to_q, b_to_msk);
+                   multiply_normalized, b_to_q, b_to_msk, role + "/to_msk");
 
         const auto alpha_msk = workspace_mod_id(multiply_prefix, alpha_role, level.m_sk_mod_id);
-        bindings.load(0, alpha_msk);
-        bindings.load(1,
+        bindings.load_named(role + "/alpha/input", alpha_msk);
+        bindings.load_named(role + "/alpha/coefficient",
                       workspace_mod_id(multiply_prefix, tensor_role(component), level.m_sk_mod_id));
-        bindings.load(2, multiply_prefix + "/branchless/b_inverse/mod" +
+        bindings.load_named(role + "/alpha/inverse", multiply_prefix + "/branchless/b_inverse/mod" +
                              std::to_string(level.m_sk_mod_id));
-        bindings.store(0, alpha_msk);
+        bindings.store_named(role + "/alpha/output", alpha_msk);
 
         bind_bconv(bindings, {level.m_sk_mod_id}, q, {alpha_msk},
                    workspace_ids(multiply_prefix, alpha_role, q), multiply_normalized, msk_to_q,
-                   msk_to_q);
+                   msk_to_q, role + "/broadcast");
         for (int context : q) {
-            bindings.load(2, workspace_mod_id(multiply_prefix, y_role, context));
-            bindings.load(0, workspace_mod_id(multiply_prefix, alpha_role, context));
-            bindings.load(1,
+            const auto limb = role + "/mod" + std::to_string(context);
+            bindings.load_named(limb + "/base", workspace_mod_id(multiply_prefix, y_role, context));
+            bindings.load_named(limb + "/alpha", workspace_mod_id(multiply_prefix, alpha_role, context));
+            bindings.load_named(limb + "/factor",
                           multiply_prefix + "/branchless/negative_b/mod" + std::to_string(context));
-            bindings.store(2, fused
+            bindings.store_named(limb + "/output", fused
                 ? workspace_mod_id(multiply_prefix, tensor_role(component), context)
                 : limb_id(step.output, component, context));
         }
@@ -718,25 +641,15 @@ void bind_multiply_plain(OperationBindingBuilder& bindings, const BfvOperationSt
         !step.resources.requires_canonical_twiddles) {
         throw std::invalid_argument("invalid BFV MultiplyPlain relocation manifest");
     }
-    const std::size_t stages = ntt_stage_count(degree);
     for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.keyswitch_layout.q_mod_ids) {
-            bindings.load(0, limb_id(step.inputs[0], component, modulus_id));
-            bindings.load_words(3, canonical_twiddle_id(modulus_id, false, "pre_twist"), degree);
-            for (std::size_t stage = 0; stage < stages; ++stage) {
-                bindings.load_words(
-                    3, canonical_twiddle_id(modulus_id, false, "stage" + std::to_string(stage)),
-                    hpu::model::kStageTwiddleParameterWords);
-            }
-            bindings.load(1, limb_id(step.inputs[1], 0, modulus_id));
-            for (std::size_t stage = 0; stage < stages; ++stage) {
-                bindings.load_words(
-                    3, canonical_twiddle_id(modulus_id, true, "stage" + std::to_string(stage)),
-                    hpu::model::kStageTwiddleParameterWords);
-            }
-            bindings.load_words(3, canonical_twiddle_id(modulus_id, true, "post_untwist_scale"),
-                                degree);
-            bindings.store(0, limb_id(step.output, component, modulus_id));
+            const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+            const auto limb = "c" + std::to_string(component);
+            bindings.load_named(prefix + "left/" + limb, limb_id(step.inputs[0], component, modulus_id));
+            bind_transform_tables(bindings, prefix + "forward/" + limb + "/table", modulus_id, degree, false);
+            bindings.load_named(prefix + "plaintext/" + limb, limb_id(step.inputs[1], 0, modulus_id));
+            bind_transform_tables(bindings, prefix + "inverse/" + limb + "/table", modulus_id, degree, true);
+            bindings.store_named(prefix + "output/" + limb, limb_id(step.output, component, modulus_id));
         }
     }
     bindings.finish();
@@ -751,8 +664,10 @@ void bind_negate(OperationBindingBuilder& bindings, const BfvOperationStep& step
     }
     for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.keyswitch_layout.q_mod_ids) {
-            bindings.load(0, limb_id(step.inputs[0], component, modulus_id));
-            bindings.store(2, limb_id(step.output, component, modulus_id));
+            const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+            const auto limb = "c" + std::to_string(component);
+            bindings.load_named(prefix + "left/" + limb, limb_id(step.inputs[0], component, modulus_id));
+            bindings.store_named(prefix + "output/" + limb, limb_id(step.output, component, modulus_id));
         }
     }
     bindings.finish();
@@ -778,28 +693,24 @@ void bind_mod_switch(OperationBindingBuilder& bindings, const BfvOperationStep& 
     const std::string hardware_prefix = step.resources.mod_switch_constants_id + "/hardware";
     for (std::size_t component = 0; component < 2; ++component) {
         const std::string rounded_role = "rounded/c" + std::to_string(component);
+        const auto role = "rounded_drop_last/c" + std::to_string(component);
         for (int context : source_contexts) {
-            bindings.load(0, limb_id(step.inputs.front(), component, context));
-            bindings.load(1, hardware_prefix + "/half/mod" + std::to_string(context));
-            bindings.store(0, workspace_mod_id(hardware_prefix, rounded_role, context));
+            const auto mod = std::to_string(context);
+            bindings.load_named(role + "/half/input/mod" + mod, limb_id(step.inputs.front(), component, context));
+            bindings.load_named(role + "/half/constant/mod" + mod, hardware_prefix + "/half/mod" + mod);
+            bindings.store_named(role + "/half/output/mod" + mod, workspace_mod_id(hardware_prefix, rounded_role, context));
         }
-
-        bindings.load(0, workspace_mod_id(hardware_prefix, rounded_role, dropped_context));
-        bindings.load(1,
-                      hardware_prefix + "/moddown/qhat_inv/mod" + std::to_string(dropped_context));
-        bindings.store(0, hardware_prefix + "/workspace/bconv/normalized0");
-        for (int target : destination_contexts) {
-            bindings.load(0, hardware_prefix + "/workspace/bconv/normalized0");
-            bindings.load(1, hardware_prefix + "/moddown/qhat_mod_target/target" +
-                                 std::to_string(target) + "/source" +
-                                 std::to_string(dropped_context));
-            bindings.store(2, workspace_mod_id(hardware_prefix, "moddown/correction", target));
-        }
+        bind_bconv(bindings, {dropped_context}, destination_contexts,
+                   workspace_ids(hardware_prefix, rounded_role, {dropped_context}),
+                   workspace_ids(hardware_prefix, "moddown/correction", destination_contexts),
+                   hardware_prefix + "/workspace/bconv/normalized", hardware_prefix + "/moddown",
+                   hardware_prefix + "/moddown", role + "/moddown/bconv");
         for (int context : destination_contexts) {
-            bindings.load(0, workspace_mod_id(hardware_prefix, rounded_role, context));
-            bindings.load(1, workspace_mod_id(hardware_prefix, "moddown/correction", context));
-            bindings.load(2, hardware_prefix + "/moddown/p_inverse/mod" + std::to_string(context));
-            bindings.store(0, limb_id(step.output, component, context));
+            const auto mod = std::to_string(context);
+            bindings.load_named(role + "/moddown/input/mod" + mod, workspace_mod_id(hardware_prefix, rounded_role, context));
+            bindings.load_named(role + "/moddown/correction/mod" + mod, workspace_mod_id(hardware_prefix, "moddown/correction", context));
+            bindings.load_named(role + "/moddown/inverse/mod" + mod, hardware_prefix + "/moddown/p_inverse/mod" + mod);
+            bindings.store_named(role + "/moddown/output/mod" + mod, limb_id(step.output, component, context));
         }
     }
     bindings.finish();
@@ -822,12 +733,12 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
     const std::size_t degree = key_data->parms().poly_modulus_degree();
     const BfvLevelChain level_chain(context);
 
-    const auto program_instructions = declared_dma_instructions(program.operator_program.get(), program.body_asm);
+    const auto program_instructions = declared_dma_instructions(program.operator_program.get());
     std::vector<std::vector<DmaInstruction>> operation_instructions;
     operation_instructions.reserve(program.operations.size());
     std::size_t operation_dma_count = 0;
     for (const auto& operation : program.operations) {
-        operation_instructions.push_back(declared_dma_instructions(operation.operator_program.get(), operation.body_asm));
+        operation_instructions.push_back(declared_dma_instructions(operation.operator_program.get()));
         operation_dma_count += operation_instructions.back().size();
     }
     if (program_instructions.size() < operation_dma_count ||
@@ -839,8 +750,10 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
     BfvRelocationSchedule result;
     result.expected_dma_count = program_instructions.size();
     if (global_dma_count == 1) {
-        const DmaInstruction expected{BfvDmaDirection::load, kModulusTableObject,
+        DmaInstruction expected{BfvDmaDirection::load, kModulusTableObject,
                                       hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank, 0};
+        expected.cp = program_instructions.front().cp;
+        expected.logical_binding = kModulusTableId;
         if (!same_instruction(program_instructions.front(), expected)) {
             throw std::invalid_argument("lowered BFV global DMA is not the modulus-table load");
         }
@@ -857,6 +770,7 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
         binding.direction = BfvDmaDirection::load;
         binding.object_slot = kModulusTableObject;
         binding.load_type = hpu::DataType::mod_ctx;
+        binding.cp = program_instructions.front().cp;
         binding.load_flag = hpu::DloadFlag::small_bank;
         binding.allocation_id = allocation.id;
         binding.span = allocation.span;
@@ -928,6 +842,9 @@ BfvRelocationSchedule build_bfv_relocation_schedule(const BfvLoweredProgram& pro
     if (first_program_dma_index != program_instructions.size()) {
         throw std::logic_error("BFV relocation did not account for the complete DMA stream");
     }
+    std::sort(result.bindings.begin(), result.bindings.end(), [](const auto& left, const auto& right) {
+        return left.program_dma_index < right.program_dma_index;
+    });
     return result;
 }
 

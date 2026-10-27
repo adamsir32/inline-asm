@@ -6,10 +6,11 @@ int main(int argc, char** argv)
         const auto opts = evaluator_example::options(argc, argv);
         hpu::seal_adapter::CkksContextSpec spec;
         spec.poly_modulus_degree = opts.delivery.poly_modulus_degree.value_or(128);
-        spec.coeff_modulus_bits = spec.poly_modulus_degree >= 4096
-            ? std::vector<int>{31,31,31,31} : std::vector<int>{20,20,20,20};
+        spec.coeff_modulus_bits = std::vector<int>(opts.data_moduli + 1,
+            spec.poly_modulus_degree >= 4096 ? 31 : 20);
         const auto bundle = hpu::seal_adapter::create_ckks_context(spec);
-        const auto& context = *bundle.context;
+        const auto context_ptr = evaluator_example::fixture_context(bundle.context, opts);
+        const auto& context = *context_ptr;
         seal::KeyGenerator keygen(context);
         seal::RelinKeys relin;
         seal::GaloisKeys galois;
@@ -35,7 +36,6 @@ int main(int argc, char** argv)
         evaluator.rotate_vector(x, 1, galois, rotated);
         evaluator.complex_conjugate(x, galois, conjugated);
         evaluator.add(rotated, conjugated, mixed);
-        app.mark_output("mixed", mixed);
         evaluator.multiply(x, mixed, y);
         evaluator.relinearize_inplace(y, relin);
         evaluator.rescale_to_next_inplace(y);
@@ -43,7 +43,7 @@ int main(int argc, char** argv)
         encoder.encode(std::vector<double>(input.size(), 1.0), y.parms_id(), y.scale(), native_bias);
         evaluator.add_plain_inplace(y, app.import_plaintext("constant/bias", native_bias));
         app.mark_output("y", y);
-        const auto compiled = app.compile(delivery_artifact_stem("ckks_evaluator_application", opts.delivery), opts.compiler);
+        const auto compiled = app.compile(evaluator_example::artifact_stem("ckks_evaluator_application", opts), opts.compiler);
         seal::Plaintext decrypted;
         seal::Decryptor(context, keygen.secret_key()).decrypt(compiled.oracle_result(y), decrypted);
         std::vector<double> decoded;

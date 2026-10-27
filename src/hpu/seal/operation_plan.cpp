@@ -635,7 +635,7 @@ PreparedRnsObject CkksOperationPlan::append_galois(
         }
         validate_twiddle_resource(
             image_builder_.image(), table.id + "/post_untwist_scale",
-            table.post_untwist_scale, degree,
+            table.post_untwist_scale, hpu::model::kOnlinePmulParameterWords,
             "CKKS Galois fused post-untwist table");
         fused_twiddle_ids.push_back(table.id);
     }

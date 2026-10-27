@@ -52,8 +52,8 @@ Add/Sub/Multiply 的两个输入必须处于同一 level，跨计划或被修改
 导出后的 IT 消费方使用包内 DMA、memory 和 golden 清单。
 
 计划保存导入数据的只读快照。重复密钥在节点间共享；相同的只读物理 payload 在
-HPU_MEM 中共享 allocation。可变 workspace 和每步 golden 输出保持独立，不会
-被后续节点覆盖。lowering 使用的临时独立应用逐节点销毁，减少宿主峰值内存。
+HPU_MEM 中共享 allocation。可变 workspace 由后端按生命周期管理，只有指定导出结果持久化为 golden；
+显式多输出的结果保持可读，不会被后续节点覆盖。lowering 使用的临时独立应用逐节点销毁，减少宿主峰值内存。
 
 ## Oracle、软件模型与交付
 

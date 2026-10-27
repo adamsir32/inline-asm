@@ -153,7 +153,7 @@ int parse_pobj(const std::string& token, const std::string& field_name) {
         throw std::runtime_error("invalid object slot for " + field_name + ": " + token);
     }
     const int value = parse_base0_int(token.substr(1), field_name);
-    if (value < 0 || value > 7) {
+    if (value < 0 || value > 63) {
         throw std::runtime_error("object slot out of range for " + field_name + ": " + token);
     }
     return value;
@@ -178,9 +178,18 @@ void expect_operand_count(const std::vector<std::string>& operands,
     }
 }
 
+std::uint8_t parse_u8(const std::string& token, const std::string& field_name) {
+    const int value = parse_base0_int(token, field_name);
+    if (value < 0 || value > 255)
+        throw std::runtime_error(field_name + " is out of range");
+    return static_cast<std::uint8_t>(value);
+}
+
 Instruction parse_ar3(Mnemonic mnemonic,
                       const std::vector<std::string>& operands) {
-    expect_operand_count(operands, 3, to_string(mnemonic));
+    if (operands.size() != 3 &&
+        !(mnemonic == Mnemonic::kPmul && operands.size() == 4))
+        throw std::runtime_error("unexpected operand count for " + to_string(mnemonic));
 
     Instruction instruction {};
     instruction.mnemonic = mnemonic;
@@ -194,6 +203,11 @@ Instruction parse_ar3(Mnemonic mnemonic,
         }
         instruction.imm8 = parse_base0_int(operands[2], "cimm8");
     }
+    if (operands.size() == 4) {
+        if (instruction.imm8 >= 0 || instruction.psrc2 < 0)
+            throw std::runtime_error("PMUL mode requires an object parameter operand");
+        instruction.mode = parse_u8(operands[3], "pmul mode");
+    }
     return instruction;
 }
 
@@ -205,8 +219,8 @@ Instruction parse_stg(Mnemonic mnemonic, const std::vector<std::string>& operand
     instruction.pdst = parse_pobj(operands[0], "pdata");
     instruction.psrc1 = parse_pobj(operands[1], "ptwiddle");
     instruction.idx0 = parse_base0_int(operands[2], "stage");
-    instruction.mode = static_cast<std::uint8_t>(parse_base0_int(operands[3], "mode"));
-    instruction.flag = static_cast<std::uint8_t>(parse_base0_int(operands[4], "flag"));
+    instruction.mode = parse_u8(operands[3], "mode");
+    instruction.flag = parse_u8(operands[4], "flag");
     return instruction;
 }
 
@@ -239,7 +253,7 @@ Instruction parse_sync(const std::vector<std::string>& operands) {
 }
 
 Instruction parse_dma(Mnemonic mnemonic, const std::vector<std::string>& operands) {
-    expect_operand_count(operands, mnemonic == Mnemonic::kDload ? 5 : 4,
+    expect_operand_count(operands, mnemonic == Mnemonic::kDload ? 6 : 5,
                          to_string(mnemonic));
 
     Instruction instruction {};
@@ -247,13 +261,12 @@ Instruction parse_dma(Mnemonic mnemonic, const std::vector<std::string>& operand
     instruction.rs1 = parse_xreg(operands[0], "rs1");
     instruction.rs2 = parse_xreg(operands[1], "rs2");
     instruction.obj_id = static_cast<std::uint8_t>(parse_pobj(operands[2], "obj_id"));
-    instruction.type = static_cast<std::uint8_t>(
-        parse_base0_int(
-            operands[3],
-            mnemonic == Mnemonic::kDload ? "load_type" : "rel"));
+    instruction.type = parse_u8(
+        operands[3], mnemonic == Mnemonic::kDload ? "mod" : "rel");
+    instruction.cp = parse_u8(operands[4], "cp");
     if (mnemonic == Mnemonic::kDload) {
         instruction.dma_flag =
-            static_cast<std::uint8_t>(parse_base0_int(operands[4], "small_bank"));
+            parse_u8(operands[5], "bank_mask");
     }
     return instruction;
 }

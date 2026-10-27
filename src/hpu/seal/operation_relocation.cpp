@@ -4,9 +4,7 @@
 #include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
-#include <regex>
-#include "assembler.hpp"
-#include "executable.hpp"
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -23,84 +21,30 @@ struct DmaInstruction {
     hpu::DataType load_type = hpu::DataType::poly;
     hpu::DloadFlag load_flag = hpu::DloadFlag::regular_bank;
     int store_release = 0;
+    std::uint8_t cp = 0;
+    std::string logical_binding;
 };
 
-std::vector<DmaInstruction> parse_dma_instructions(const std::string& body)
-{
-    static const std::regex pattern(
-        "\\\"d(load|store) x10, x11, p([0-9]+), ([0-9]+)(?:, ([0-9]+))?");
-    std::vector<DmaInstruction> result;
-    for (std::sregex_iterator it(body.begin(), body.end(), pattern), end;
-         it != end; ++it) {
-        DmaInstruction instruction;
-        instruction.direction = (*it)[1].str() == "load"
-            ? CkksDmaDirection::load
-            : CkksDmaDirection::store;
-        instruction.object_slot = std::stoi((*it)[2].str());
-        const int operand = std::stoi((*it)[3].str());
-        if (instruction.direction == CkksDmaDirection::load) {
-            if (!(*it)[4].matched
-                || operand < static_cast<int>(hpu::DataType::seg)
-                || operand > static_cast<int>(hpu::DataType::mod_ctx)) {
-                throw std::logic_error("generated dload has an invalid operand");
-            }
-            instruction.load_type = static_cast<hpu::DataType>(operand);
-            const int flag = std::stoi((*it)[4].str());
-            if (flag < static_cast<int>(hpu::DloadFlag::regular_bank)
-                || flag > static_cast<int>(hpu::DloadFlag::small_bank)) {
-                throw std::logic_error("generated dload has an invalid bank flag");
-            }
-            instruction.load_flag = static_cast<hpu::DloadFlag>(flag);
-        } else {
-            if ((*it)[4].matched) {
-                throw std::logic_error("generated dstore has too many operands");
-            }
-            instruction.store_release = operand;
-        }
-        result.push_back(instruction);
-    }
-    std::size_t dma_token_count = 0;
-    for (const char* token : {"\"dload ", "\"dstore "}) {
-        std::size_t position = 0;
-        while ((position = body.find(token, position)) != std::string::npos) {
-            ++dma_token_count;
-            position += std::char_traits<char>::length(token);
-        }
-    }
-    if (dma_token_count != result.size()) {
-        throw std::logic_error(
-            "generated DMA instruction does not use the frozen x10/x11 ABI");
-    }
-    return result;
-}
-
-
 std::vector<DmaInstruction> declared_dma_instructions(
-    const hpu::resource::OperatorProgram* program, const std::string& compatibility_body)
+    const hpu::resource::OperatorProgram* program)
 {
-    if (!program) return parse_dma_instructions(compatibility_body);
+    if (!program)
+        throw std::invalid_argument("CKKS relocation requires native operator IR");
     std::vector<DmaInstruction> result;
     for (const auto& port : program->ports) {
+        if (port.logical_binding.empty())
+            throw std::invalid_argument("CKKS relocation requires named logical data ports");
         const auto& node = program->operations.at(port.operation_index);
         DmaInstruction dma;
         dma.direction = port.load ? CkksDmaDirection::load : CkksDmaDirection::store;
         const auto id = port.load ? node.outputs.at(0) : node.inputs.at(0);
         dma.object_slot = program->values.at(id).variable.compatibility_slot;
-        dma.load_type = static_cast<hpu::DataType>(node.instruction.type);
+        dma.load_type = node.instruction.type == 1 ? hpu::DataType::mod_ctx : hpu::DataType::poly;
         dma.load_flag = static_cast<hpu::DloadFlag>(node.instruction.dma_flag);
         dma.store_release = node.instruction.type;
+        dma.cp = node.instruction.cp;
+        dma.logical_binding = port.logical_binding;
         result.push_back(dma);
-    }
-    const auto encoded = hpu::collect_dma_relocations(hpu::assemble_source(compatibility_body));
-    if (encoded.size() != result.size()) throw std::invalid_argument("native DMA ports disagree with compatibility body");
-    for (std::size_t i = 0; i < encoded.size(); ++i) {
-        const auto& actual = encoded[i];
-        const auto& expected = result[i];
-        if (actual.object_id != expected.object_slot ||
-            actual.direction != (expected.direction == CkksDmaDirection::load ? hpu::Mnemonic::kDload : hpu::Mnemonic::kDstore) ||
-            actual.type_or_release != (expected.direction == CkksDmaDirection::load ? static_cast<int>(expected.load_type) : expected.store_release) ||
-            (expected.direction == CkksDmaDirection::load && actual.flag != static_cast<int>(expected.load_flag)))
-            throw std::invalid_argument("native DMA declaration differs from compatibility instruction");
     }
     return result;
 }
@@ -109,8 +53,8 @@ bool same_instruction(
     const DmaInstruction& left,
     const DmaInstruction& right)
 {
-    return left.direction == right.direction
-        && left.object_slot == right.object_slot
+    return left.cp == right.cp && left.direction == right.direction
+        && left.logical_binding == right.logical_binding
         && (left.direction == CkksDmaDirection::load
             ? left.load_type == right.load_type
                 && left.load_flag == right.load_flag
@@ -143,28 +87,15 @@ public:
           instructions_(std::move(instructions))
     {}
 
-    void load(int slot, const std::string& allocation_id)
+    void load_named(const std::string& name, const std::string& allocation_id,
+                    std::size_t words = 0)
     {
-        load_words(slot, allocation_id, polynomial_words_);
+        bind_named(name, allocation_id, true, words ? words : polynomial_words_);
     }
 
-    void load_words(
-        int slot,
-        const std::string& allocation_id,
-        std::size_t expected_words)
+    void store_named(const std::string& name, const std::string& allocation_id)
     {
-        append(
-            CkksDmaDirection::load, slot, allocation_id,
-            hpu::DataType::poly, hpu::DloadFlag::regular_bank, 0,
-            expected_words);
-    }
-
-    void store(int slot, const std::string& allocation_id)
-    {
-        append(
-            CkksDmaDirection::store, slot, allocation_id,
-            hpu::DataType::poly, hpu::DloadFlag::regular_bank, 1,
-            polynomial_words_);
+        bind_named(name, allocation_id, false, polynomial_words_);
     }
 
     void finish() const
@@ -177,6 +108,20 @@ public:
     }
 
 private:
+    void bind_named(const std::string& name, const std::string& allocation_id, bool load,
+                    std::size_t expected_words)
+    {
+        const auto found = std::find_if(instructions_.begin(), instructions_.end(),
+            [&](const auto& instruction) { return instruction.logical_binding == name; });
+        if (found == instructions_.end()) {
+            throw std::logic_error("missing logical data port: " + name);
+        }
+        const auto index = static_cast<std::size_t>(found - instructions_.begin());
+        append(load ? CkksDmaDirection::load : CkksDmaDirection::store,
+               found->object_slot, allocation_id, found->load_type,
+               found->load_flag, found->store_release, expected_words, index);
+    }
+
     void append(
         CkksDmaDirection direction,
         int slot,
@@ -184,18 +129,20 @@ private:
         hpu::DataType load_type,
         hpu::DloadFlag load_flag,
         int store_release,
-        std::size_t expected_words)
+        std::size_t expected_words,
+        std::optional<std::size_t> port_index = {})
     {
-        if (cursor_ >= instructions_.size()) {
+        const auto index = port_index.value_or(cursor_);
+        if (index >= instructions_.size() || bound_.count(index)) {
             throw std::logic_error(
                 "relocation recipe exceeds generated DMA instructions for "
                 + operation_.operation.id);
         }
-        const auto& instruction = instructions_[cursor_];
+        const auto& instruction = instructions_[index];
         if (instruction.direction != direction
             || instruction.object_slot != slot
             || (direction == CkksDmaDirection::load
-                && (instruction.load_type != load_type
+                && (hpu::dma_mod_bit(instruction.load_type) != hpu::dma_mod_bit(load_type)
                     || instruction.load_flag != load_flag))
             || (direction == CkksDmaDirection::store
                 && instruction.store_release != store_release)) {
@@ -218,19 +165,21 @@ private:
         }
 
         CkksDmaBinding binding;
-        binding.program_dma_index = first_program_dma_index_ + cursor_;
+        binding.program_dma_index = first_program_dma_index_ + index;
         binding.operation_index = operation_index_;
-        binding.operation_dma_index = cursor_;
+        binding.operation_dma_index = index;
         binding.operation_id = operation_.operation.id;
         binding.direction = direction;
-        binding.object_slot = slot;
+        binding.object_slot = instruction.object_slot;
         binding.load_type = instruction.load_type;
+        binding.cp = instruction.cp;
         binding.load_flag = instruction.load_flag;
         binding.store_release = instruction.store_release;
         binding.allocation_id = allocation.id;
         binding.span = allocation.span;
         schedule_.bindings.push_back(std::move(binding));
-        ++cursor_;
+        bound_.insert(index);
+        while (bound_.count(cursor_)) ++cursor_;
     }
 
     CkksRelocationSchedule& schedule_;
@@ -241,6 +190,7 @@ private:
     std::size_t polynomial_words_;
     std::vector<DmaInstruction> instructions_;
     std::size_t cursor_ = 0;
+    std::set<std::size_t> bound_;
 };
 
 void bind_square(
@@ -254,21 +204,15 @@ void bind_square(
     }
     const auto& input = step.inputs[0];
     for (int modulus_id : level.rns_layout.q_mod_ids) {
-        const auto in0 = limb_id(input, 0, modulus_id);
-        const auto in1 = limb_id(input, 1, modulus_id);
-        bindings.load(0, in0);
-        bindings.load(1, in0);
-        bindings.store(2, limb_id(step.output, 0, modulus_id));
-
-        bindings.load(0, in0);
-        bindings.load(1, in1);
-        bindings.load(0, in1);
-        bindings.load(1, in0);
-        bindings.store(2, limb_id(step.output, 1, modulus_id));
-
-        bindings.load(0, in1);
-        bindings.load(1, in1);
-        bindings.store(2, limb_id(step.output, 2, modulus_id));
+        const auto prefix = "tensor/mod" + std::to_string(modulus_id) + "/";
+        bindings.load_named(prefix + "left/c0", limb_id(input, 0, modulus_id));
+        bindings.load_named(prefix + "right/c0", limb_id(input, 0, modulus_id));
+        bindings.load_named(prefix + "left/c1", limb_id(input, 1, modulus_id));
+        bindings.load_named(prefix + "right/c1", limb_id(input, 1, modulus_id));
+        for (std::size_t component = 0; component < 3; ++component) {
+            bindings.store_named(prefix + "output/c" + std::to_string(component),
+                                 limb_id(step.output, component, modulus_id));
+        }
     }
     bindings.finish();
 }
@@ -286,19 +230,15 @@ void bind_multiply(
     const auto& left = step.inputs[0];
     const auto& right = step.inputs[1];
     for (int modulus_id : level.rns_layout.q_mod_ids) {
-        bindings.load(0, limb_id(left, 0, modulus_id));
-        bindings.load(1, limb_id(right, 0, modulus_id));
-        bindings.store(2, limb_id(step.output, 0, modulus_id));
-
-        bindings.load(0, limb_id(left, 0, modulus_id));
-        bindings.load(1, limb_id(right, 1, modulus_id));
-        bindings.load(0, limb_id(left, 1, modulus_id));
-        bindings.load(1, limb_id(right, 0, modulus_id));
-        bindings.store(2, limb_id(step.output, 1, modulus_id));
-
-        bindings.load(0, limb_id(left, 1, modulus_id));
-        bindings.load(1, limb_id(right, 1, modulus_id));
-        bindings.store(2, limb_id(step.output, 2, modulus_id));
+        const auto prefix = "tensor/mod" + std::to_string(modulus_id) + "/";
+        bindings.load_named(prefix + "left/c0", limb_id(left, 0, modulus_id));
+        bindings.load_named(prefix + "right/c0", limb_id(right, 0, modulus_id));
+        bindings.load_named(prefix + "left/c1", limb_id(left, 1, modulus_id));
+        bindings.load_named(prefix + "right/c1", limb_id(right, 1, modulus_id));
+        for (std::size_t component = 0; component < 3; ++component) {
+            bindings.store_named(prefix + "output/c" + std::to_string(component),
+                                 limb_id(step.output, component, modulus_id));
+        }
     }
     bindings.finish();
 }
@@ -318,9 +258,11 @@ void bind_ciphertext_binary(
     const auto& right = step.inputs[1];
     for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.rns_layout.q_mod_ids) {
-            bindings.load(0, limb_id(left, component, modulus_id));
-            bindings.load(1, limb_id(right, component, modulus_id));
-            bindings.store(2, limb_id(step.output, component, modulus_id));
+            const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+            const auto limb = "c" + std::to_string(component);
+            bindings.load_named(prefix + "left/" + limb, limb_id(left, component, modulus_id));
+            bindings.load_named(prefix + "right/" + limb, limb_id(right, component, modulus_id));
+            bindings.store_named(prefix + "output/" + limb, limb_id(step.output, component, modulus_id));
         }
     }
     bindings.finish();
@@ -339,11 +281,12 @@ void bind_plain_binary(
     const auto& ciphertext = step.inputs[0];
     const auto& plaintext = step.inputs[1];
     for (int modulus_id : level.rns_layout.q_mod_ids) {
-        bindings.load(0, limb_id(ciphertext, 0, modulus_id));
-        bindings.load(1, limb_id(plaintext, 0, modulus_id));
-        bindings.store(2, limb_id(step.output, 0, modulus_id));
-        bindings.load(0, limb_id(ciphertext, 1, modulus_id));
-        bindings.store(0, limb_id(step.output, 1, modulus_id));
+        const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+        bindings.load_named(prefix + "left/c0", limb_id(ciphertext, 0, modulus_id));
+        bindings.load_named(prefix + "plaintext", limb_id(plaintext, 0, modulus_id));
+        bindings.store_named(prefix + "output/c0", limb_id(step.output, 0, modulus_id));
+        bindings.load_named(prefix + "left/c1", limb_id(ciphertext, 1, modulus_id));
+        bindings.store_named(prefix + "output/c1", limb_id(step.output, 1, modulus_id));
     }
     bindings.finish();
 }
@@ -362,11 +305,12 @@ void bind_multiply_plain(
     const auto& ciphertext = step.inputs[0];
     const auto& plaintext = step.inputs[1];
     for (int modulus_id : level.rns_layout.q_mod_ids) {
-        bindings.load(0, limb_id(ciphertext, 0, modulus_id));
-        bindings.load(1, limb_id(plaintext, 0, modulus_id));
-        bindings.store(2, limb_id(step.output, 0, modulus_id));
-        bindings.load(0, limb_id(ciphertext, 1, modulus_id));
-        bindings.store(2, limb_id(step.output, 1, modulus_id));
+        const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+        bindings.load_named(prefix + "left/c0", limb_id(ciphertext, 0, modulus_id));
+        bindings.load_named(prefix + "plaintext", limb_id(plaintext, 0, modulus_id));
+        bindings.store_named(prefix + "output/c0", limb_id(step.output, 0, modulus_id));
+        bindings.load_named(prefix + "left/c1", limb_id(ciphertext, 1, modulus_id));
+        bindings.store_named(prefix + "output/c1", limb_id(step.output, 1, modulus_id));
     }
     bindings.finish();
 }
@@ -383,8 +327,10 @@ void bind_negate(
     const auto& input = step.inputs[0];
     for (std::size_t component = 0; component < 2; ++component) {
         for (int modulus_id : level.rns_layout.q_mod_ids) {
-            bindings.load(0, limb_id(input, component, modulus_id));
-            bindings.store(2, limb_id(step.output, component, modulus_id));
+            const auto prefix = "pointwise/mod" + std::to_string(modulus_id) + "/";
+            const auto limb = "c" + std::to_string(component);
+            bindings.load_named(prefix + "left/" + limb, limb_id(input, component, modulus_id));
+            bindings.store_named(prefix + "output/" + limb, limb_id(step.output, component, modulus_id));
         }
     }
     bindings.finish();
@@ -419,57 +365,75 @@ std::string workspace_mod_id(
 
 void bind_transform_limb(
     OperationBindingBuilder& bindings,
+    const std::string& port_prefix,
     const std::string& data_id,
     int modulus_id,
     std::size_t degree,
     bool inverse,
-    const std::string& output_id = {})
+    const std::string& output_id = {},
+    const std::string& inverse_twiddle_prefix = {})
 {
-    bindings.load(0, data_id);
-    const std::size_t stages = ntt_stage_count(degree);
-    if (!inverse) {
-        bindings.load_words(
-            3, canonical_twiddle_id(
-                modulus_id, false, "pre_twist"),
-            degree);
+    bindings.load_named(port_prefix + "/input", data_id);
+    const auto table = port_prefix + "/table/";
+    const auto twiddle = [&](const std::string& suffix) {
+        return inverse && !inverse_twiddle_prefix.empty()
+            ? inverse_twiddle_prefix + "/" + suffix
+            : canonical_twiddle_id(modulus_id, inverse, suffix);
+    };
+    if (!inverse) bindings.load_named(table + "pre_twist", twiddle("pre_twist"),
+                                     hpu::model::kOnlinePmulParameterWords);
+    for (std::size_t stage = 0; stage < ntt_stage_count(degree); ++stage) {
+        const auto suffix = "stage" + std::to_string(stage);
+        bindings.load_named(table + suffix, twiddle(suffix),
+                            hpu::model::kStageTwiddleParameterWords);
     }
-    for (std::size_t stage = 0; stage < stages; ++stage) {
-        bindings.load_words(
-            3, canonical_twiddle_id(
-                modulus_id, inverse,
-                "stage" + std::to_string(stage)),
-            hpu::model::kStageTwiddleParameterWords);
-    }
-    if (inverse) {
-        bindings.load_words(
-            3, canonical_twiddle_id(
-                modulus_id, true, "post_untwist_scale"),
-            degree);
-    }
-    bindings.store(0, output_id.empty() ? data_id : output_id);
+    if (inverse) bindings.load_named(table + "post_untwist_scale", twiddle("post_untwist_scale"),
+                                    hpu::model::kOnlinePmulParameterWords);
+    bindings.store_named(port_prefix + "/output", output_id.empty() ? data_id : output_id);
 }
 
-void bind_fused_inverse_limb(
+void bind_bconv_ports(
     OperationBindingBuilder& bindings,
-    const std::string& input_id,
-    const std::string& output_id,
-    const std::string& twiddle_prefix,
-    std::size_t degree)
+    const std::string& prefix,
+    const std::vector<int>& sources,
+    const std::vector<int>& targets,
+    const std::vector<std::string>& source_ids,
+    const std::vector<std::string>& target_ids,
+    const std::string& constant_prefix,
+    const std::string& normalized_prefix)
 {
-    bindings.load(0, input_id);
-    const std::size_t stages = ntt_stage_count(degree);
-    for (std::size_t stage = 0; stage < stages; ++stage) {
-        bindings.load_words(
-            3, twiddle_prefix + "/stage" + std::to_string(stage),
-            hpu::model::kStageTwiddleParameterWords);
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        const auto source = std::to_string(sources[index]);
+        bindings.load_named(prefix + "/source/mod" + source, source_ids.at(index));
+        bindings.load_named(prefix + "/inverse/mod" + source,
+            constant_prefix + "/qhat_inv/mod" + source);
+        bindings.store_named(prefix + "/normalized/mod" + source,
+            normalized_prefix + std::to_string(index));
     }
-    bindings.load_words(
-        3, twiddle_prefix + "/post_untwist_scale", degree);
-    bindings.store(0, output_id);
+    for (std::size_t target_index = 0; target_index < targets.size(); ++target_index) {
+        const auto target = std::to_string(targets[target_index]);
+        for (std::size_t source_index = 0; source_index < sources.size(); ++source_index) {
+            const auto source = std::to_string(sources[source_index]);
+            bindings.load_named(prefix + "/accumulate/to" + target + "/source/mod" + source,
+                normalized_prefix + std::to_string(source_index));
+            bindings.load_named(prefix + "/factor/to" + target + "/from" + source,
+                constant_prefix + "/qhat_mod_target/target" + target + "/source" + source);
+        }
+        bindings.store_named(prefix + "/output/mod" + target, target_ids.at(target_index));
+    }
+}
+
+std::vector<std::string> workspace_ids(
+    const std::string& prefix, const std::string& role, const std::vector<int>& contexts)
+{
+    std::vector<std::string> result;
+    for (int context : contexts) result.push_back(workspace_mod_id(prefix, role, context));
+    return result;
 }
 
 void bind_keyswitch_core(
     OperationBindingBuilder& bindings,
+    const std::string& port_prefix,
     const CkksPlannedValue& switching,
     std::size_t switching_component,
     const CkksPlannedValue& base,
@@ -482,168 +446,84 @@ void bind_keyswitch_core(
     bool direct_second_output)
 {
     std::vector<int> full_contexts = layout.q_mod_ids;
-    full_contexts.insert(
-        full_contexts.end(), layout.p_mod_ids.begin(),
-        layout.p_mod_ids.end());
-
+    full_contexts.insert(full_contexts.end(), layout.p_mod_ids.begin(), layout.p_mod_ids.end());
+    const auto normalized = hardware_prefix + "/workspace/bconv/normalized";
     for (std::size_t digit = 0; digit < layout.key_digits.size(); ++digit) {
+        const auto logical = port_prefix + "/digit" + std::to_string(digit);
+        const auto constants = hardware_prefix + "/modup/d" + std::to_string(digit);
         const auto& sources = layout.key_digits[digit];
         std::vector<int> targets;
+        std::vector<std::string> source_ids;
         for (int context : layout.q_mod_ids) {
-            if (std::find(sources.begin(), sources.end(), context)
-                == sources.end()) {
+            if (std::find(sources.begin(), sources.end(), context) == sources.end())
                 targets.push_back(context);
-            }
         }
-        targets.insert(
-            targets.end(), layout.p_mod_ids.begin(), layout.p_mod_ids.end());
-        const std::string digit_prefix = hardware_prefix
-            + "/modup/d" + std::to_string(digit);
-
+        targets.insert(targets.end(), layout.p_mod_ids.begin(), layout.p_mod_ids.end());
         for (int source : sources) {
-            bindings.load(
-                0, limb_id(switching, switching_component, source));
-            bindings.store(
-                0, workspace_mod_id(
-                    hardware_prefix, "modup", source));
+            const auto suffix = "/mod" + std::to_string(source);
+            const auto input = limb_id(switching, switching_component, source);
+            source_ids.push_back(input);
+            bindings.load_named(logical + "/modup/copy/input" + suffix, input);
+            bindings.store_named(logical + "/modup/copy/output" + suffix,
+                workspace_mod_id(hardware_prefix, "modup", source));
         }
-        for (std::size_t source_index = 0;
-             source_index < sources.size(); ++source_index) {
-            const int source = sources[source_index];
-            bindings.load(
-                0, limb_id(switching, switching_component, source));
-            bindings.load(
-                1, digit_prefix + "/qhat_inv/mod"
-                    + std::to_string(source));
-            bindings.store(
-                0, hardware_prefix + "/workspace/bconv/normalized"
-                    + std::to_string(source_index));
-        }
-        for (int target : targets) {
-            for (std::size_t source_index = 0;
-                 source_index < sources.size(); ++source_index) {
-                const int source = sources[source_index];
-                bindings.load(
-                    0, hardware_prefix + "/workspace/bconv/normalized"
-                        + std::to_string(source_index));
-                bindings.load(
-                    1, digit_prefix + "/qhat_mod_target/target"
-                        + std::to_string(target) + "/source"
-                        + std::to_string(source));
-            }
-            bindings.store(
-                2, workspace_mod_id(
-                    hardware_prefix, "modup", target));
-        }
-
+        bind_bconv_ports(bindings, logical + "/modup/bconv", sources, targets,
+            source_ids, workspace_ids(hardware_prefix, "modup", targets), constants, normalized);
         for (int context : full_contexts) {
-            bind_transform_limb(
-                bindings,
-                workspace_mod_id(hardware_prefix, "modup", context),
-                context, degree, false);
+            bind_transform_limb(bindings, logical + "/forward/mod" + std::to_string(context),
+                workspace_mod_id(hardware_prefix, "modup", context), context, degree, false);
         }
-
         for (int component = 0; component < 2; ++component) {
             for (int context : full_contexts) {
-                bindings.load(
-                    0, workspace_mod_id(
-                        hardware_prefix, "modup", context));
-                bindings.load(
-                    1, evaluation_key_id + "/d" + std::to_string(digit)
-                        + "/c" + std::to_string(component) + "/mod"
-                        + std::to_string(context));
-                if (digit != 0) {
-                    bindings.load(
-                        2, workspace_mod_id(
-                            hardware_prefix,
-                            "accumulator/c" + std::to_string(component),
-                            context));
-                }
-                bindings.store(
-                    2, workspace_mod_id(
-                        hardware_prefix,
-                        "accumulator/c" + std::to_string(component),
-                        context));
+                const auto suffix = "/c" + std::to_string(component) + "/mod" + std::to_string(context);
+                const auto product = logical + "/product" + suffix;
+                const auto accumulator = workspace_mod_id(hardware_prefix,
+                    "accumulator/c" + std::to_string(component), context);
+                bindings.load_named(product + "/input", workspace_mod_id(hardware_prefix, "modup", context));
+                bindings.load_named(product + "/key", evaluation_key_id + "/d" + std::to_string(digit) + suffix);
+                if (digit != 0) bindings.load_named(product + "/accumulator", accumulator);
+                bindings.store_named(product + "/output", accumulator);
             }
         }
     }
-
     for (int component = 0; component < 2; ++component) {
+        const auto component_name = "c" + std::to_string(component);
+        const auto accumulator_role = "accumulator/" + component_name;
         for (int context : full_contexts) {
-            const auto accumulator = workspace_mod_id(
-                hardware_prefix,
-                "accumulator/c" + std::to_string(component), context);
-            bind_transform_limb(
-                bindings, accumulator, context, degree, true);
+            bind_transform_limb(bindings, port_prefix + "/inverse/" + component_name
+                + "/mod" + std::to_string(context),
+                workspace_mod_id(hardware_prefix, accumulator_role, context), context, degree, true);
         }
-    }
-
-    const std::string moddown_prefix = hardware_prefix + "/moddown";
-    for (int component = 0; component < 2; ++component) {
-        const std::string accumulator_role =
-            "accumulator/c" + std::to_string(component);
-        // Match the rounded single-P KeySwitch core: add floor(P/2) to QP
-        // scratch in place, never to an imported ciphertext or constant.
+        const auto rounded = port_prefix + "/rounded_moddown/" + component_name;
         for (int context : full_contexts) {
-            const auto accumulator = workspace_mod_id(
-                hardware_prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(
-                1, hardware_prefix + "/half/mod" + std::to_string(context));
-            bindings.store(0, accumulator);
+            const auto suffix = "/mod" + std::to_string(context);
+            const auto accumulator = workspace_mod_id(hardware_prefix, accumulator_role, context);
+            bindings.load_named(rounded + "/half/input" + suffix, accumulator);
+            bindings.load_named(rounded + "/half/constant" + suffix, hardware_prefix + "/half" + suffix);
+            bindings.store_named(rounded + "/half/output" + suffix, accumulator);
         }
-        for (std::size_t source_index = 0;
-             source_index < layout.p_mod_ids.size(); ++source_index) {
-            const int source = layout.p_mod_ids[source_index];
-            bindings.load(
-                0, workspace_mod_id(
-                    hardware_prefix, accumulator_role, source));
-            bindings.load(
-                1, moddown_prefix + "/qhat_inv/mod"
-                    + std::to_string(source));
-            bindings.store(
-                0, hardware_prefix + "/workspace/bconv/normalized"
-                    + std::to_string(source_index));
-        }
-        for (int target : layout.q_mod_ids) {
-            for (std::size_t source_index = 0;
-                 source_index < layout.p_mod_ids.size(); ++source_index) {
-                const int source = layout.p_mod_ids[source_index];
-                bindings.load(
-                    0, hardware_prefix + "/workspace/bconv/normalized"
-                        + std::to_string(source_index));
-                bindings.load(
-                    1, moddown_prefix + "/qhat_mod_target/target"
-                        + std::to_string(target) + "/source"
-                        + std::to_string(source));
-            }
-            bindings.store(
-                2, workspace_mod_id(
-                    hardware_prefix, "moddown/correction", target));
-        }
+        const auto moddown = rounded + "/moddown";
+        bind_bconv_ports(bindings, moddown + "/bconv", layout.p_mod_ids, layout.q_mod_ids,
+            workspace_ids(hardware_prefix, accumulator_role, layout.p_mod_ids),
+            workspace_ids(hardware_prefix, "moddown/correction", layout.q_mod_ids),
+            hardware_prefix + "/moddown", normalized);
         for (int context : layout.q_mod_ids) {
-            const auto accumulator = workspace_mod_id(
-                hardware_prefix, accumulator_role, context);
-            bindings.load(0, accumulator);
-            bindings.load(
-                1, workspace_mod_id(
-                    hardware_prefix, "moddown/correction", context));
-            bindings.load(
-                2, moddown_prefix + "/p_inverse/mod"
-                    + std::to_string(context));
-            bindings.store(
-                0, direct_second_output && component == 1
-                    ? limb_id(output, 1, context)
-                    : accumulator);
+            const auto suffix = "/mod" + std::to_string(context);
+            const auto accumulator = workspace_mod_id(hardware_prefix, accumulator_role, context);
+            bindings.load_named(moddown + "/input" + suffix, accumulator);
+            bindings.load_named(moddown + "/correction" + suffix,
+                workspace_mod_id(hardware_prefix, "moddown/correction", context));
+            bindings.load_named(moddown + "/inverse" + suffix,
+                hardware_prefix + "/moddown/p_inverse" + suffix);
+            bindings.store_named(moddown + "/output" + suffix,
+                direct_second_output && component == 1 ? limb_id(output, 1, context) : accumulator);
         }
     }
-
     for (int context : layout.q_mod_ids) {
-        bindings.load(
-            0, workspace_mod_id(
-                hardware_prefix, "accumulator/c0", context));
-        bindings.load(1, limb_id(base, base_component, context));
-        bindings.store(2, limb_id(output, 0, context));
+        const auto logical = port_prefix + "/merge/mod" + std::to_string(context);
+        bindings.load_named(logical + "/value", workspace_mod_id(hardware_prefix, "accumulator/c0", context));
+        bindings.load_named(logical + "/base", limb_id(base, base_component, context));
+        bindings.store_named(logical + "/output", limb_id(output, 0, context));
     }
 }
 
@@ -671,29 +551,31 @@ void bind_relinearize(
     for (std::size_t component = 0; component < 3; ++component) {
         for (int context : layout.q_mod_ids) {
             bind_transform_limb(
-                bindings, limb_id(tensor, component, context),
+                bindings, "relinearize/inverse/c" + std::to_string(component)
+                    + "/mod" + std::to_string(context), limb_id(tensor, component, context),
                 context, degree, true, limb_id(coefficients, component, context));
         }
     }
 
     bind_keyswitch_core(
-        bindings, coefficients, 2, coefficients, 0, step.output, layout,
+        bindings, "relinearize/keyswitch", coefficients, 2, coefficients, 0, step.output, layout,
         step.resources.evaluation_key_ids[0], hardware_prefix,
         degree, false);
 
     for (int context : layout.q_mod_ids) {
-        bindings.load(0, limb_id(coefficients, 1, context));
-        bindings.load(
-            1, workspace_mod_id(
-                hardware_prefix, "accumulator/c1", context));
-        bindings.store(2, limb_id(step.output, 1, context));
+        const auto prefix = "relinearize/merge/mod" + std::to_string(context);
+        bindings.load_named(prefix + "/tensor", limb_id(coefficients, 1, context));
+        bindings.load_named(prefix + "/switched",
+            workspace_mod_id(hardware_prefix, "accumulator/c1", context));
+        bindings.store_named(prefix + "/output", limb_id(step.output, 1, context));
     }
 
     for (std::size_t component = 0; component < 2; ++component) {
         for (int context : layout.q_mod_ids) {
             bind_transform_limb(
-                bindings, limb_id(step.output, component, context),
-                context, degree, false);
+                bindings, "relinearize/forward/c" + std::to_string(component)
+                    + "/mod" + std::to_string(context),
+                limb_id(step.output, component, context), context, degree, false);
         }
     }
     bindings.finish();
@@ -731,24 +613,24 @@ void bind_galois(
         for (std::size_t basis = 0;
              basis < layout.q_mod_ids.size(); ++basis) {
             const int context = layout.q_mod_ids[basis];
-            bind_fused_inverse_limb(
-                bindings,
-                limb_id(input, component, context),
-                limb_id(workspace, component, context),
-                step.resources.fused_twiddle_ids[basis], degree);
+            bind_transform_limb(bindings, "galois/inverse/c" + std::to_string(component)
+                    + "/mod" + std::to_string(context),
+                limb_id(input, component, context), context, degree, true,
+                limb_id(workspace, component, context), step.resources.fused_twiddle_ids[basis]);
         }
     }
 
     bind_keyswitch_core(
-        bindings, workspace, 1, workspace, 0, step.output, layout,
+        bindings, "keyswitch", workspace, 1, workspace, 0, step.output, layout,
         step.resources.evaluation_key_ids[0], hardware_prefix,
         degree, true);
 
     for (std::size_t component = 0; component < 2; ++component) {
         for (int context : layout.q_mod_ids) {
             bind_transform_limb(
-                bindings, limb_id(step.output, component, context),
-                context, degree, false);
+                bindings, "galois/forward/c" + std::to_string(component)
+                    + "/mod" + std::to_string(context),
+                limb_id(step.output, component, context), context, degree, false);
         }
     }
     bindings.finish();
@@ -789,62 +671,42 @@ void bind_rescale(
     for (std::size_t component = 0; component < input.component_count; ++component) {
         for (int context : source_contexts) {
             bind_transform_limb(
-                bindings, limb_id(input, component, context),
+                bindings, "rescale/inverse/c" + std::to_string(component)
+                    + "/mod" + std::to_string(context), limb_id(input, component, context),
                 context, degree, true, limb_id(coefficients, component, context));
         }
     }
 
     for (std::size_t component = 0; component < input.component_count; ++component) {
-        const std::string rounded_role =
-            "rounded/c" + std::to_string(component);
+        const auto role = "rounded/c" + std::to_string(component);
+        const auto prefix = "rounded_drop_last/c" + std::to_string(component);
         for (int context : source_contexts) {
-            bindings.load(0, limb_id(coefficients, component, context));
-            bindings.load(
-                1, hardware_prefix + "/half/mod"
-                    + std::to_string(context));
-            bindings.store(
-                0, workspace_mod_id(
-                    hardware_prefix, rounded_role, context));
+            const auto suffix = "/mod" + std::to_string(context);
+            bindings.load_named(prefix + "/half/input" + suffix, limb_id(coefficients, component, context));
+            bindings.load_named(prefix + "/half/constant" + suffix, hardware_prefix + "/half" + suffix);
+            bindings.store_named(prefix + "/half/output" + suffix,
+                workspace_mod_id(hardware_prefix, role, context));
         }
-
-        bindings.load(
-            0, workspace_mod_id(
-                hardware_prefix, rounded_role, dropped_context));
-        bindings.load(
-            1, hardware_prefix + "/moddown/qhat_inv/mod"
-                + std::to_string(dropped_context));
-        bindings.store(
-            0, hardware_prefix + "/workspace/bconv/normalized0");
-        for (int target : destination_contexts) {
-            bindings.load(
-                0, hardware_prefix + "/workspace/bconv/normalized0");
-            bindings.load(
-                1, hardware_prefix + "/moddown/qhat_mod_target/target"
-                    + std::to_string(target) + "/source"
-                    + std::to_string(dropped_context));
-            bindings.store(
-                2, workspace_mod_id(
-                    hardware_prefix, "moddown/correction", target));
-        }
+        const auto moddown = prefix + "/moddown";
+        bind_bconv_ports(bindings, moddown + "/bconv", {dropped_context}, destination_contexts,
+            workspace_ids(hardware_prefix, role, {dropped_context}),
+            workspace_ids(hardware_prefix, "moddown/correction", destination_contexts),
+            hardware_prefix + "/moddown", hardware_prefix + "/workspace/bconv/normalized");
         for (int context : destination_contexts) {
-            bindings.load(
-                0, workspace_mod_id(
-                    hardware_prefix, rounded_role, context));
-            bindings.load(
-                1, workspace_mod_id(
-                    hardware_prefix, "moddown/correction", context));
-            bindings.load(
-                2, hardware_prefix + "/moddown/q_last_inverse/mod"
-                    + std::to_string(context));
-            bindings.store(0, limb_id(step.output, component, context));
+            const auto suffix = "/mod" + std::to_string(context);
+            bindings.load_named(moddown + "/input" + suffix, workspace_mod_id(hardware_prefix, role, context));
+            bindings.load_named(moddown + "/correction" + suffix,
+                workspace_mod_id(hardware_prefix, "moddown/correction", context));
+            bindings.load_named(moddown + "/inverse" + suffix,
+                hardware_prefix + "/moddown/q_last_inverse" + suffix);
+            bindings.store_named(moddown + "/output" + suffix, limb_id(step.output, component, context));
         }
     }
-
     for (std::size_t component = 0; component < input.component_count; ++component) {
         for (int context : destination_contexts) {
-            bind_transform_limb(
-                bindings, limb_id(step.output, component, context),
-                context, degree, false);
+            bind_transform_limb(bindings, "rescale/forward/c" + std::to_string(component)
+                + "/mod" + std::to_string(context),
+                limb_id(step.output, component, context), context, degree, false);
         }
     }
     bindings.finish();
@@ -870,13 +732,13 @@ CkksRelocationSchedule build_ckks_relocation_schedule(
     const std::size_t degree = key_data->parms().poly_modulus_degree();
     const CkksLevelChain level_chain(context);
 
-    const auto program_instructions = declared_dma_instructions(program.operator_program.get(), program.body_asm);
+    const auto program_instructions = declared_dma_instructions(program.operator_program.get());
     std::vector<std::vector<DmaInstruction>> operation_instructions;
     operation_instructions.reserve(program.operations.size());
     std::size_t operation_dma_count = 0;
     for (const auto& operation : program.operations) {
         operation_instructions.push_back(
-            declared_dma_instructions(operation.operator_program.get(), operation.body_asm));
+            declared_dma_instructions(operation.operator_program.get()));
         operation_dma_count += operation_instructions.back().size();
     }
     if (program_instructions.size() < operation_dma_count
@@ -890,12 +752,14 @@ CkksRelocationSchedule build_ckks_relocation_schedule(
     CkksRelocationSchedule result;
     result.expected_dma_count = program_instructions.size();
     if (global_dma_count == 1) {
-        const DmaInstruction expected{
+        DmaInstruction expected{
             CkksDmaDirection::load,
             kModulusTableObject,
             hpu::DataType::mod_ctx,
             hpu::DloadFlag::small_bank,
             0};
+        expected.cp = program_instructions.front().cp;
+        expected.logical_binding = kModulusTableId;
         if (!same_instruction(program_instructions.front(), expected)) {
             throw std::invalid_argument(
                 "lowered CKKS global DMA is not the modulus-table load");
@@ -913,6 +777,7 @@ CkksRelocationSchedule build_ckks_relocation_schedule(
         binding.direction = CkksDmaDirection::load;
         binding.object_slot = kModulusTableObject;
         binding.load_type = hpu::DataType::mod_ctx;
+        binding.cp = program_instructions.front().cp;
         binding.load_flag = hpu::DloadFlag::small_bank;
         binding.allocation_id = allocation.id;
         binding.span = allocation.span;
@@ -1064,6 +929,9 @@ CkksRelocationSchedule build_ckks_relocation_schedule(
         throw std::logic_error(
             "CKKS relocation did not account for the complete DMA stream");
     }
+    std::sort(result.bindings.begin(), result.bindings.end(), [](const auto& left, const auto& right) {
+        return left.program_dma_index < right.program_dma_index;
+    });
     return result;
 }
 

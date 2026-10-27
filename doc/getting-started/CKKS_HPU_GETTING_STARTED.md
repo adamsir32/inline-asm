@@ -41,7 +41,7 @@ include/hpu/seal, src/hpu/seal
     SEALContext、level descriptor、NTT bridge、评估密钥和 HPU_MEM image
 
 include/hpu/runtime, src/hpu/runtime
-    应用生命周期、五个 regular-bank 槽位、dstore/psync 状态、DDR image
+    应用生命周期、64 个逻辑对象与五个普通 bank 的区间分配、dstore/psync 状态、DDR image
     和基础模运算软件执行器
 
 include/scheme/ckks, src/scheme/ckks
@@ -169,10 +169,10 @@ half、单源 BConv、inverse 和 rounded/correction workspace 也由同一 imag
 组合接口通过 `manage_modulus_table=false` 告诉嵌套 kernel：small-bank 表由外层应用
 管理，不要各自重复 dload/pfree；`append_psync=false` 则保证只有应用末尾发出 psync。
 
-第一版 plan lowering 会在每个 step 边界物化结果；standalone Relinearize 与
-Rescale 也各自保持 canonical NTT 输入/输出。因此它比原专用复合 Multiply body
-多一些 NTT/INTT 与 DDR 往返，是正确但未融合的实现。后续 residency/fusion pass
-可以在不超过五个活跃多项式的前提下删除这些往返，而不改变显式 plan 或 CKKS 语义。
+Plan 展开保留各步骤的 canonical NTT 语义；交付编译随后对原生 SSA 做读取复用、
+写读转发和生命周期分配。未导出的中间结果可直接驻留，避免 step 边界不必要的
+DDR 往返。NTT/INTT 的数学变换和显式 pre/post PMUL 不因此自动融合。
+容量按真实 N 和 bank 区间判断，N8192 不能套用早期三个多项式容量的安排。
 
 ## 6. 运行与查看结果
 
@@ -244,7 +244,7 @@ outputs/ckks_composed_application/
 - `memory/hpu_mem_image.u32.bin`：执行前加载的 little-endian uint32 镜像；
 - `memory/line_map.csv`、`memory/memory_manifest.csv`、`memory/abi.json`、
   `memory/hpu_mem_config.json`：分配、容量及行地址 ABI；
-- `golden/golden_manifest.csv` 和 `golden/objects/`：每个算子输出的逐 limb golden，
+- `golden/golden_manifest.csv` 和 `golden/objects/`：指定导出结果的逐 limb golden，
   已与 SEAL oracle、软件执行器逐字核对；scratch workspace 不作为语义输出；
 - `metadata/`、`oracle/report.json`、`semantic/decoded.json`、`provenance/`：
   参数、计算图、验证证据、解码数据及文件校验和。
@@ -299,10 +299,13 @@ ModUp/ModDown 的 N-word BConv/P-inverse 对象，并预留可复用 Q|P workspa
 两条路径分别消费对应格式，不会把紧凑软件记录绑定到多项式 DMA。
 
 变换路径会
-从同一个 HPU_MEM image 读取完整 pre-twist、每个 stage 的两条 line K=8 参数，
-以及完整 INTT post-untwist/scale。stage 参数按硬件 stride-8 递推展开为 BF 因子，
+从同一个 HPU_MEM image 读取 pre-twist、每个 stage 和 INTT post-untwist/scale
+各自的两条 line K=8 参数。系数中间值按 BR 存储，pre/post 用同索引的在线 PMUL
+U/V/R 模板（B=N/64），post 保留完整 lazy-scale 修正与归一化；
+stage 参数按硬件 stride-8 递推展开为 BF 因子（B=N/128），
 不会绕过实际镜像另生成 canonical 根表。精确格式见
-[twiddle 迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
+[在线 PMUL 交接](../reference/PMUL_ONLINE_COMPILER_HANDOFF.md) 与
+[stage twiddle 迁移说明](../reference/TWIDDLE_COMPILER_MIGRATION.md)。
 `hpu_seal_ckks_software_executor_test` 将输出转换回 SEAL NTT，并要求和独立
 `seal::Evaluator` 输出逐字相同，包括不同输入的 Multiply→Relinearize→Rescale、
 Square 后的独立 KeySwitch/Relinearize，

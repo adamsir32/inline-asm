@@ -238,7 +238,7 @@ int main(int argc, char** argv)
                     65536, 3, 4);
             auto package = hpu::seal_adapter::build_bgv_keyswitch_application(
                 context, product, keys, required_lines);
-            require(required_lines == 70913 &&
+            require(required_lines == 62737 &&
                         package.image.used_lines() == required_lines &&
                         !package.instructions.empty() && !package.dma.empty() &&
                         package.spans().size() == package.dma.size(),
@@ -255,9 +255,9 @@ int main(int argc, char** argv)
             return 0;
         }
         require(hpu::seal_adapter::estimate_bgv_keyswitch_image_lines(
-                    65536, 3, 4) == 70913 &&
+                    65536, 3, 4) == 62737 &&
                     hpu::seal_adapter::estimate_bgv_keyswitch_image_lines(
-                    65536, 2, 4) == 46273,
+                    65536, 2, 4) == 40141,
                 "BGV target-degree image capacity estimate changed");
         bool rejected = false;
         try {

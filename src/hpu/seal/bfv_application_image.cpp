@@ -22,16 +22,6 @@ std::uint32_t narrow(std::uint64_t value, const char* role)
     return static_cast<std::uint32_t>(value);
 }
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::uint32_t multiply_mod(std::uint32_t left, std::uint32_t right, std::uint32_t modulus)
 {
     return static_cast<std::uint32_t>((static_cast<std::uint64_t>(left) * right) % modulus);
@@ -179,11 +169,8 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
         prepared.canonical_psi = narrow(root, "BFV NTT root exceeds the HPU uint32 ABI");
         const std::string prefix = "constants/twiddle/canonical/mod" + std::to_string(index);
 
-        std::vector<std::uint32_t> pre_twist(degree);
-        for (std::size_t position = 0; position < degree; ++position) {
-            pre_twist[position] = hpu::model::pow_mod(
-                prepared.canonical_psi, position, current_modulus);
-        }
+        const auto pre_twist = hpu::model::pack_bit_reversed_online_pmul_parameters(
+            1, prepared.canonical_psi, current_modulus, degree);
         prepared.pre_twist = image_
                                  .add(prefix + "/ntt/pre_twist", pre_twist,
                                       hpu::runtime::AllocationKind::twiddle, true)
@@ -210,17 +197,14 @@ std::vector<PreparedCanonicalTwiddles> BfvApplicationImageBuilder::add_canonical
                                                        hpu::runtime::AllocationKind::twiddle, true)
                                                   .span);
         }
-        std::vector<std::uint32_t> post(degree);
-        const std::uint32_t inverse_psi =
-            hpu::model::inverse_mod_prime(prepared.canonical_psi, current_modulus);
-        for (std::size_t position = 0; position < degree; ++position) {
-            const std::uint32_t untwist =
-                hpu::model::pow_mod(inverse_psi, position, current_modulus);
-            // The last inverse stage exposes natural coefficient order, so
-            // its raw lazy-scale tag must follow the same boundary mapping.
-            post[position] = multiply_mod(
-                inverse.post_scale[bit_reverse(position, degree)], untwist, current_modulus);
-        }
+        // Preserve every raw inverse-stage normalization factor before
+        // applying the inverse twist at physical (bit-reversed) positions.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            hpu::model::inverse_post_factors(
+                inverse,
+                hpu::model::inverse_mod_prime(prepared.canonical_psi, current_modulus),
+                current_modulus),
+            current_modulus);
         prepared.post_untwist_scale = image_
                                           .add(prefix + "/intt/post_untwist_scale", post,
                                                hpu::runtime::AllocationKind::twiddle, true)
@@ -429,15 +413,10 @@ BfvApplicationImageBuilder::add_fused_automorphism_twiddles(
                          hpu::runtime::AllocationKind::twiddle, true)
                     .span);
         }
-        // The shared generator exposes raw inverse-stage order. Delivery
-        // PMUL consumes the post factor after natural coefficient writeback.
-        auto post = tables[basis].post_untwist_scale;
-        for (std::size_t position = 0; position < post.size(); ++position) {
-            const auto reversed = bit_reverse(position, post.size());
-            if (position < reversed) {
-                std::swap(post[position], post[reversed]);
-            }
-        }
+        // The fused table generator already supplies the complete raw-stage
+        // physical post factor, including lazy scaling and modified untwist.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            tables[basis].post_untwist_scale, prepared.modulus);
         prepared.post_untwist_scale =
             image_
                 .add(prefix + "/post_untwist_scale", post,

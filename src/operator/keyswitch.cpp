@@ -19,7 +19,8 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     bool rounded_single_p,
     bool bfv_label,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     std::ostringstream asm_code;
 
@@ -52,6 +53,7 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     asm_code << "        /* Application-global MOD_IDs; fixed P survives Q level drops. */\n";
     asm_code << "        /* --- Active SEAL key digits loop (dnum = " << dnum << ") --- */\n";
     for (int d = 0; d < dnum; ++d) {
+        const auto digit_prefix = port_prefix + "/digit" + std::to_string(d);
         asm_code << "        /* --- Digit " << d << " --- */\n";
 
         // 1. ModUp (Q digit -> full Q union P)
@@ -61,21 +63,26 @@ std::string generate_hpu_keyswitch_body_asm_impl(
             p_contexts,
             layout.key_digits[static_cast<std::size_t>(d)],
             false,
-            manage_modulus_table);
+            manage_modulus_table,
+            digit_prefix + "/modup");
 
         // 2. NTT
         asm_code << "        /* --- Step 2: NTT on Q and P bases --- */\n";
         if (manage_modulus_table) {
             asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
+                                   digit_prefix + "/forward/modulus_table",
                                    hpu::DloadFlag::small_bank);
         }
 
         for (int context : full_contexts) {
+            const auto transform_prefix = digit_prefix + "/forward/mod" + std::to_string(context);
             asm_code << "        /* NTT MOD_ID " << context << " */\n";
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly);
-            asm_code << generate_hpu_ntt_body_asm(N, POBJ_TMP_A, TWIDDLE, false);
-            asm_code << hpu::resource::publish(POBJ_TMP_A, 1);
+            asm_code << hpu::resource::read(POBJ_TMP_A, hpu::DataType::poly,
+                                          transform_prefix + "/input");
+            asm_code << generate_hpu_ntt_body_asm(N, POBJ_TMP_A, TWIDDLE, false,
+                                                transform_prefix + "/table");
+            asm_code << hpu::resource::output(POBJ_TMP_A, transform_prefix + "/output");
         }
 
         // 3. Multiplication with Evk
@@ -87,24 +94,24 @@ std::string generate_hpu_keyswitch_body_asm_impl(
         for (int v = 0; v < 2; ++v) {
             asm_code << "        /* evk" << v << " mult for all bases */\n";
             for (int context : full_contexts) {
+                const auto product_prefix = digit_prefix + "/product/c" + std::to_string(v)
+                    + "/mod" + std::to_string(context);
                 asm_code << "        /* base MOD_ID " << context << " */\n";
                 asm_code << hpu::resource::select_modulus(context);
                 // IF first digit, just mul. If subsequent digits, multiply and accumulate (pmac)
-                asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly);
-                asm_code << hpu::resource::read(POBJ_EVK, hpu::DataType::poly);
+                asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly,
+                                              product_prefix + "/input");
+                asm_code << hpu::resource::read(POBJ_EVK, hpu::DataType::poly,
+                                              product_prefix + "/key");
                 if (d == 0) {
                     asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_CT, POBJ_EVK);
                 } else {
-                    asm_code << hpu::resource::read(POBJ_OUT, hpu::DataType::poly); // Load accumulated result
+                    asm_code << hpu::resource::read(POBJ_OUT, hpu::DataType::poly,
+                                                  product_prefix + "/accumulator");
                     asm_code << hpu::resource::accumulate(POBJ_OUT, POBJ_CT, POBJ_EVK);
                 }
-                asm_code << hpu::resource::discard(POBJ_CT);
-                asm_code << hpu::resource::discard(POBJ_EVK);
-                asm_code << hpu::resource::publish(POBJ_OUT, 1);
+                asm_code << hpu::resource::output(POBJ_OUT, product_prefix + "/output");
             }
-        }
-        if (manage_modulus_table) {
-            asm_code << hpu::resource::discard(POBJ_MOD_CTX);
         }
     }
 
@@ -115,20 +122,22 @@ std::string generate_hpu_keyswitch_body_asm_impl(
     const auto POBJ_TMP_A2 = hpu::resource::make_operand("value", 0);
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX2, hpu::DataType::mod_ctx,
+                               port_prefix + "/inverse/modulus_table",
                                hpu::DloadFlag::small_bank);
     }
     for (int v = 0; v < 2; ++v) {
         asm_code << "        /* INTT for out" << v << " */\n";
         for (int context : full_contexts) {
+            const auto transform_prefix = port_prefix + "/inverse/c" + std::to_string(v)
+                + "/mod" + std::to_string(context);
             asm_code << "        /* INTT MOD_ID " << context << " */\n";
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(POBJ_TMP_A2, hpu::DataType::poly);
-            asm_code << generate_hpu_intt_body_asm(N, POBJ_TMP_A2, TWIDDLE2, false);
-            asm_code << hpu::resource::publish(POBJ_TMP_A2, 1);
+            asm_code << hpu::resource::read(POBJ_TMP_A2, hpu::DataType::poly,
+                                          transform_prefix + "/input");
+            asm_code << generate_hpu_intt_body_asm(N, POBJ_TMP_A2, TWIDDLE2, false,
+                                                 transform_prefix + "/table");
+            asm_code << hpu::resource::output(POBJ_TMP_A2, transform_prefix + "/output");
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX2);
     }
 
     // 5. ModDown
@@ -136,13 +145,15 @@ std::string generate_hpu_keyswitch_body_asm_impl(
         asm_code << "        /* --- Step 5: " << (bfv_label ? "BFV " : "")
                  << "rounded coefficient-domain ModDown for both parts --- */\n";
         asm_code << generate_hpu_rounded_single_p_moddown_contexts_body_asm(
-            q_contexts, p_contexts.front(), 2, false, manage_modulus_table);
+            q_contexts, p_contexts.front(), 2, false, manage_modulus_table,
+            port_prefix + "/rounded_moddown");
     } else {
         asm_code << "        /* --- Step 5: ModDown for both parts --- */\n";
         for (int v = 0; v < 2; ++v) {
             asm_code << "        /* ModDown for out" << v << " */\n";
             asm_code << generate_hpu_moddown_contexts_body_asm(
-                q_contexts, p_contexts, false, manage_modulus_table);
+                q_contexts, p_contexts, false, manage_modulus_table,
+                port_prefix + "/moddown/c" + std::to_string(v));
         }
     }
     asm_code << "        /* --- Step 6: Add base component to out0 --- */\n";
@@ -153,24 +164,23 @@ std::string generate_hpu_keyswitch_body_asm_impl(
 
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX_S6, hpu::DataType::mod_ctx,
+                               port_prefix + "/merge/modulus_table",
                                hpu::DloadFlag::small_bank);
     }
     
     for (int context : q_contexts) {
+        const auto merge_prefix = port_prefix + "/merge/mod" + std::to_string(context);
         asm_code << hpu::resource::select_modulus(context);
         // 1. 加载刚才 ModDown 生成的 out0
-        asm_code << hpu::resource::read(POBJ_OUT0, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_OUT0, hpu::DataType::poly,
+                                      merge_prefix + "/value");
         // 2. 加载不参与分解、需要并入第一输出分量的 base（普通 KeySwitch 为 c0）
-        asm_code << hpu::resource::read(POBJ_BASE, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_BASE, hpu::DataType::poly,
+                                      merge_prefix + "/base");
         // 3. 在片上直接相加
         asm_code << hpu::resource::add(POBJ_FINAL_OUT0, POBJ_OUT0, POBJ_BASE);
-        asm_code << hpu::resource::discard(POBJ_OUT0);
-        asm_code << hpu::resource::discard(POBJ_BASE);
         // 4. 写回主存
-        asm_code << hpu::resource::publish(POBJ_FINAL_OUT0, 1);
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX_S6);
+        asm_code << hpu::resource::output(POBJ_FINAL_OUT0, merge_prefix + "/output");
     }
 
     if (append_psync) {
@@ -186,30 +196,33 @@ std::string generate_hpu_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     return generate_hpu_keyswitch_body_asm_impl(
-        N, layout, false, false, append_psync, manage_modulus_table);
+        N, layout, false, false, append_psync, manage_modulus_table, port_prefix);
 }
 
 std::string generate_hpu_rounded_single_p_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     return generate_hpu_keyswitch_body_asm_impl(
-        N, layout, true, false, append_psync, manage_modulus_table);
+        N, layout, true, false, append_psync, manage_modulus_table, port_prefix);
 }
 
 std::string generate_hpu_bfv_keyswitch_body_asm(
     int N,
     const hpu::RnsDecompositionLayout& layout,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     return generate_hpu_keyswitch_body_asm_impl(
-        N, layout, true, true, append_psync, manage_modulus_table);
+        N, layout, true, true, append_psync, manage_modulus_table, port_prefix);
 }
 
 std::string generate_hpu_keyswitch_body_asm(
@@ -218,7 +231,8 @@ std::string generate_hpu_keyswitch_body_asm(
     int num_p,
     int dnum,
     bool append_psync,
-    bool manage_modulus_table)
+    bool manage_modulus_table,
+    const std::string& port_prefix)
 {
     if (!hpu::is_valid_rns_decomposition_config(N, num_q, num_p, dnum)) {
         return "        // Invalid config: require power-of-two N fitting 1024 lines, divisible digits, and at most 64 mod contexts\n";
@@ -227,7 +241,8 @@ std::string generate_hpu_keyswitch_body_asm(
         N,
         hpu::make_contiguous_rns_decomposition_layout(num_q, num_p, dnum),
         append_psync,
-        manage_modulus_table);
+        manage_modulus_table,
+        port_prefix);
 }
 
 std::string generate_hpu_keyswitch_asm(

@@ -36,14 +36,16 @@ std::string generate_basis_transform_body_asm(
         for (int context : contexts) {
             asm_code << "        /* component_" << component
                      << ", MOD_ID " << context << " */\n";
+            const auto prefix = std::string("multiply/") + (inverse ? "inverse" : "forward")
+                + "/c" + std::to_string(component) + "/mod" + std::to_string(context);
             asm_code << hpu::resource::select_modulus(context);
-            asm_code << hpu::resource::read(poly_object, hpu::DataType::poly);
+            asm_code << hpu::resource::read(poly_object, hpu::DataType::poly, prefix + "/input");
             asm_code << (inverse
                 ? generate_hpu_intt_body_asm(
-                    N, poly_object, twiddle_object, false)
+                    N, poly_object, twiddle_object, false, prefix + "/table")
                 : generate_hpu_ntt_body_asm(
-                    N, poly_object, twiddle_object, false));
-            asm_code << hpu::resource::publish(poly_object, 1);
+                    N, poly_object, twiddle_object, false, prefix + "/table"));
+            asm_code << hpu::resource::output(poly_object, prefix + "/output");
         }
     }
     return asm_code.str();
@@ -81,7 +83,7 @@ std::string generate_ciphertext_multiply_body_asm(
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(
             modulus_table_object,
-            hpu::DataType::mod_ctx,
+            hpu::DataType::mod_ctx, "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
 
@@ -114,9 +116,6 @@ std::string generate_ciphertext_multiply_body_asm(
         N, retained_q, 2, false,
         "Rescaled c0/c1: coefficient domain -> canonical HPU NTT");
 
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(modulus_table_object);
-    }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
     }

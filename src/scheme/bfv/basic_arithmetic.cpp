@@ -32,23 +32,20 @@ std::string generate_ciphertext_binary_body(int num_q, bool subtract, bool appen
              << ": coefficient-domain Q ciphertext operation */\n";
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/" + limb);
+            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly, prefix + "right/" + limb);
             asm_code << (subtract ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
                                   : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
-            asm_code << hpu::resource::discard(kLeftObject);
-            asm_code << hpu::resource::discard(kRightObject);
-            asm_code << hpu::resource::publish(kOutputObject, 1);
+            asm_code << hpu::resource::output(kOutputObject, prefix + "output/" + limb);
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -68,25 +65,21 @@ std::string generate_plain_binary_body(int num_q, bool subtract, bool append_psy
              << ": update coefficient-domain c0 with prepared Delta*m; copy c1 */\n";
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int basis = 0; basis < num_q; ++basis) {
+        const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
         asm_code << "        /* q_" << basis << ": out0=c0 op prepared_plaintext */\n";
         asm_code << hpu::resource::select_modulus(basis);
-        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/c0");
+        asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly, prefix + "plaintext");
         asm_code << (subtract ? hpu::resource::subtract(kOutputObject, kLeftObject, kRightObject)
                               : hpu::resource::add(kOutputObject, kLeftObject, kRightObject));
-        asm_code << hpu::resource::discard(kLeftObject);
-        asm_code << hpu::resource::discard(kRightObject);
-        asm_code << hpu::resource::publish(kOutputObject, 1);
+        asm_code << hpu::resource::output(kOutputObject, prefix + "output/c0");
 
         asm_code << "        /* q_" << basis << ": out1=c1 */\n";
-        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-        asm_code << hpu::resource::publish(kLeftObject, 1);
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
+        asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/c1");
+        asm_code << hpu::resource::output(kLeftObject, prefix + "output/c1");
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -129,23 +122,23 @@ std::string generate_multiply_plain_body_asm(int N, int num_q, bool append_psync
                 "NTT -> pointwise multiply -> coefficient output */\n";
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
-            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, kTwiddleObject, false);
-            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/" + limb);
+            asm_code << ::generate_hpu_ntt_body_asm(N, kLeftObject, kTwiddleObject, false,
+                prefix + "forward/" + limb + "/table");
+            asm_code << hpu::resource::read(kRightObject, hpu::DataType::poly, prefix + "plaintext/" + limb);
             asm_code << hpu::resource::multiply(kLeftObject, kLeftObject, kRightObject);
-            asm_code << hpu::resource::discard(kRightObject);
-            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, kTwiddleObject, false);
-            asm_code << hpu::resource::publish(kLeftObject, 1);
+            asm_code << ::generate_hpu_intt_body_asm(N, kLeftObject, kTwiddleObject, false,
+                prefix + "inverse/" + limb + "/table");
+            asm_code << hpu::resource::output(kLeftObject, prefix + "output/" + limb);
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();
@@ -163,21 +156,19 @@ std::string generate_negate_body_asm(int num_q, bool append_psync, bool manage_m
     asm_code << "        /* BFV NEGATE: coefficient-domain out=(c-c)-c */\n";
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(kModulusTableObject, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int component = 0; component < 2; ++component) {
         for (int basis = 0; basis < num_q; ++basis) {
+            const auto prefix = "pointwise/mod" + std::to_string(basis) + "/";
+            const auto limb = "c" + std::to_string(component);
             asm_code << "        /* component_" << component << ", q_" << basis << " */\n";
             asm_code << hpu::resource::select_modulus(basis);
-            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly);
+            asm_code << hpu::resource::read(kLeftObject, hpu::DataType::poly, prefix + "left/" + limb);
             asm_code << hpu::resource::subtract(kOutputObject, kLeftObject, kLeftObject);
             asm_code << hpu::resource::subtract(kOutputObject, kOutputObject, kLeftObject);
-            asm_code << hpu::resource::discard(kLeftObject);
-            asm_code << hpu::resource::publish(kOutputObject, 1);
+            asm_code << hpu::resource::output(kOutputObject, prefix + "output/" + limb);
         }
-    }
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         asm_code << hpu::resource::finish_program();

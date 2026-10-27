@@ -39,6 +39,9 @@ struct DataPort {
     std::size_t operation_index = 0;
     bool load = true;
     std::optional<hpu::compiler::ResolvedDma> binding;
+    // Stable logical role, independent of instruction order and object slots.
+    std::string logical_binding;
+    hpu::compiler::MemoryLayout layout = hpu::compiler::MemoryLayout::unspecified;
 };
 struct Operation {
     hpu::Instruction instruction;
@@ -47,6 +50,8 @@ struct Operation {
     std::optional<ValueId> reuse;
     std::optional<std::size_t> tied_input;
     std::optional<PortId> port;
+    // Selected arithmetic modulus belongs to the operation, not its position.
+    std::optional<int> modulus_context;
 };
 struct OperatorProgram {
     std::vector<Value> values;
@@ -59,6 +64,8 @@ struct OperatorProgram {
                 std::size_t end = static_cast<std::size_t>(-1));
     void bind_port(PortId id, hpu::compiler::ResolvedDma binding);
     void bind_ports(const std::vector<hpu::compiler::ResolvedDma>& bindings);
+    void bind_named_ports(
+        const std::map<std::string, hpu::compiler::ResolvedDma>& bindings);
 };
 
 class Recording {
@@ -74,20 +81,43 @@ public:
     std::optional<ValueId> existing(const Operand& variable) const;
     ValueId define(const Operand& variable);
     void emit(Operation operation);
+    void name_last_port(std::string logical_binding);
+    void bind_last_port(hpu::compiler::ResolvedDma binding);
 private:
     Recording* previous_;
     OperatorProgram program_;
+    std::optional<int> modulus_context_;
 };
 
 // External data ports and value lifetime hints. The compiler owns the actual
 // DLOAD/DSTORE/PFREE and may retain a value, spill it, or reuse its DDR backing.
 std::string read(Operand object, hpu::DataType type,
-                 hpu::DloadFlag flag = hpu::DloadFlag::regular_bank);
-std::string publish(Operand object, int release = 1);
+                 hpu::DloadFlag flag = hpu::DloadFlag::regular_bank,
+                 hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string read(Operand object, hpu::DataType type,
+                 const std::string& logical_binding,
+                 hpu::DloadFlag flag = hpu::DloadFlag::regular_bank,
+                 hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string input(Operand object, hpu::compiler::ResolvedDma binding,
+                  hpu::DataType type,
+                  hpu::DloadFlag flag = hpu::DloadFlag::regular_bank,
+                  hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+// Logical writeback declaration. Release is always a backend decision.
+std::string output(Operand object,
+                   hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string output(Operand object, const std::string& logical_binding,
+                   hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string output(Operand object, hpu::compiler::ResolvedDma binding,
+                   hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
+std::string publish(Operand object, const std::string& logical_binding);
+std::string publish(Operand object, int release = 1,
+                    hpu::CachePolicy cp = hpu::CachePolicy::no_allocate);
 std::string discard(Operand object);
 std::string add(Operand destination, Operand left, Operand right);
 std::string subtract(Operand destination, Operand left, Operand right);
 std::string multiply(Operand destination, Operand left, Operand right);
+// PMUL mode 01: right is a read-only two-line exact U/V/R factor template.
+std::string multiply_online(Operand destination, Operand data, Operand parameters);
 std::string accumulate(Operand destination, Operand left, Operand right);
 std::string multiply_immediate(Operand destination, Operand left, int immediate);
 std::string accumulate_immediate(Operand destination, Operand left, int immediate);

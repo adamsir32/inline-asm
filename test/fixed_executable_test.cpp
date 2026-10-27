@@ -65,24 +65,24 @@ struct Fixture {
     const std::string stem = "dma_register_fixture";
     const std::uint64_t capacity = 16384;
     const std::vector<hpu::EncodedInstruction> instructions = hpu::assemble_source(
-        "dload x10, x11, p4, 2, 1\n"
+        "dload x10, x11, p4, 1, 1, 32\n"
         "pmodld 0\n"
-        "dload x10, x11, p0, 1, 0\n"
-        "dload x10, x11, p1, 1, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 0, 0, 0\n"
         "pmul p2, p0, p1\n"
         "pmac p2, p0, p1\n"
         "pfree p0\n"
         "pfree p1\n"
-        "dstore x10, x11, p2, 1\n"
-        "dload x10, x11, p0, 1, 0\n"
-        "dload x10, x11, p1, 0, 0\n"
+        "dstore x10, x11, p2, 1, 1\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 0, 1, 32\n"
         "pntt p0, p1, 0, 0, 0\n"
         "pfree p1\n"
-        "dstore x10, x11, p0, 1\n"
-        "dload x10, x11, p0, 1, 0\n"
-        "dstore x10, x11, p0, 1\n"
-        "dload x10, x11, p0, 1, 0\n"
-        "dstore x10, x11, p0, 1\n"
+        "dstore x10, x11, p0, 1, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dstore x10, x11, p0, 1, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dstore x10, x11, p0, 1, 0\n"
         "pfree p4\n"
         "psync\n");
     std::vector<Span> spans;
@@ -165,8 +165,8 @@ void test_fixed_register_setup(const Fixture& fixture)
 void test_rejected_spans_and_shapes()
 {
     const std::string copy =
-        "dload x10, x11, p0, 1, 0\n"
-        "dstore x10, x11, p0, 1\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dstore x10, x11, p0, 1, 0\n"
         "psync\n";
     expect_rejected(copy, 16, {{0, 0}, {1, 1}}, "zero-length span");
     expect_rejected(copy, 0, {{0, 1}, {1, 1}}, "zero memory capacity");
@@ -183,21 +183,42 @@ void test_rejected_spans_and_shapes()
                     "regular-bank overflow");
     expect_rejected(copy, 16, {{0, 2}, {2, 1}}, "mismatched DSTORE length");
     expect_rejected(
-        "dload x10, x11, p4, 2, 1\npfree p4\npsync\n",
+        "dload x10, x11, p4, 1, 0, 32\npfree p4\npsync\n",
         64, {{0, 33}}, "small-bank overflow");
 
+    // Ordinary small objects have no twiddle-specific load restriction. Only
+    // a later PNTT/PINTT checks that its parameter object is exactly two lines.
+    for (const std::uint64_t lines : {1, 3})
+        (void)hpu::render_fixed_executable_source("ordinary_small_object",
+            hpu::assemble_source("dload x10, x11, p63, 0, 1, 32\npsync\n"),
+            64, {{0, lines}});
+    expect_rejected(
+        "dload x10, x11, p40, 1, 0, 0\npmodld 64\npsync\n",
+        64, {{0, 4}}, "PMODLD outside the actual loaded table");
+    expect_rejected(
+        "dload x10, x11, p40, 1, 0, 0\npsync\n",
+        64, {{0, 5}}, "default four-line modulus reservation");
+    (void)hpu::render_fixed_executable_source("wide_modulus_table",
+        hpu::assemble_source("dload x10, x11, p40, 1, 0, 0\npmodld 127\npsync\n"),
+        64, {{0, 8}}, hpu::ExecutableTwiddleFormat::online_k8, 8);
+    (void)hpu::render_fixed_executable_source("retained_high_object",
+        hpu::assemble_source("dload x10, x11, p63, 0, 0, 1\n"
+            "dstore x10, x11, p63, 0, 0\npsync\n"
+            "dstore x10, x11, p63, 1, 0\npsync\n"),
+        64, {{0, 2}, {2, 2}, {4, 2}});
+
     const std::string two_sources =
-        "dload x10, x11, p0, 1, 0\n"
-        "dload x10, x11, p1, 1, 0\n";
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 0, 0, 0\n";
     expect_rejected(
         two_sources + "padd p2, p0, p1\npfree p0\npfree p1\npfree p2\npsync\n",
         16, {{0, 1}, {1, 2}}, "unequal arithmetic source lengths");
     expect_rejected(
         two_sources + "pmac p1, p0, 2\npfree p0\npfree p1\npsync\n",
         16, {{0, 1}, {1, 2}}, "unequal PMAC accumulator length");
-    expect_rejected(
-        two_sources + "pmul p1, p0, 2\npfree p0\npfree p1\npsync\n",
-        16, {{0, 1}, {1, 2}}, "unequal live arithmetic destination length");
+    (void)hpu::render_fixed_executable_source("replace_destination",
+        hpu::assemble_source(two_sources + "pmul p1, p0, 2\npfree p0\npfree p1\npsync\n"),
+        16, {{0, 1}, {1, 2}});
     for (const std::string direction : {"pntt", "pintt"}) {
         const auto transform = two_sources + direction +
             " p0, p1, 0, 0, 0\npfree p0\npfree p1\npsync\n";
@@ -221,17 +242,17 @@ void test_rejected_spans_and_shapes()
         }
     }
     expect_rejected(
-        "dload x10, x11, p0, 1, 0\n"
-        "dload x10, x11, p1, 2, 1\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
+        "dload x10, x11, p1, 1, 0, 32\n"
         "pntt p0, p1, 0, 0, 0\npfree p0\npfree p1\npsync\n",
-        16, {{0, 2}, {2, 2}}, "small-bank stage parameters");
+        16, {{0, 2}, {2, 2}}, "modulus-table object used as stage parameters");
 
     // A span may end exactly at capacity; immediate multiplication has no
     // second resident operand whose length must be checked.
     const auto valid = hpu::assemble_source(
-        "dload x10, x11, p0, 1, 0\n"
+        "dload x10, x11, p0, 0, 0, 0\n"
         "pmul p0, p0, 2\n"
-        "dstore x10, x11, p0, 1\npsync\n");
+        "dstore x10, x11, p0, 1, 0\npsync\n");
     (void)hpu::render_fixed_executable_source("boundary", valid, 16,
                                              {{15, 1}, {15, 1}});
 }

@@ -1,7 +1,9 @@
 #include "scheme/ckks/ciphertext_multiply.hpp"
 #include "scheme/ckks/basic_arithmetic.hpp"
 
+#include "assembler.hpp"
 #include "util/hpu_asm.hpp"
+#include "util/ntt.hpp"
 
 #include <cstddef>
 #include <iostream>
@@ -28,11 +30,50 @@ void require(bool condition, const char* message)
     }
 }
 
+void check_transform_cache_policy()
+{
+    // Exercise the complete legacy entry points as well as the transform
+    // bodies used by every scheme. Only transform tables request LLC allocation.
+    for (const auto& source : {generate_hpu_ntt_asm(8192, 0, 3, 4),
+                               generate_hpu_intt_asm(8192, 0, 3, 4)}) {
+        std::size_t table_loads = 0;
+        std::size_t small_loads = 0, online_multiplies = 0;
+        for (const auto& encoded : hpu::assemble_source(source)) {
+            const auto& instruction = encoded.instruction;
+            if (instruction.mnemonic == hpu::Mnemonic::kDload) {
+                const bool is_table = instruction.obj_id == 3;
+                require(instruction.cp == (is_table ? 1 : 0),
+                        "transform DMA did not apply twiddle-only LLC allocation");
+                require(((encoded.word >> 13U) & 1U) == instruction.cp,
+                        "transform CP hint was not encoded in bit 13");
+                if (is_table) {
+                    ++table_loads;
+                    require(instruction.type == 0,
+                            "twiddle load incorrectly selected the modulus table");
+                    require(instruction.dma_flag == 0x20,
+                            "stage or online PMUL parameters did not select Bank 5");
+                    ++small_loads;
+                }
+            } else if (instruction.mnemonic == hpu::Mnemonic::kPmul) {
+                require(instruction.mode == 1 && instruction.imm8 < 0,
+                        "transform pre/post did not select online PMUL mode");
+                ++online_multiplies;
+            } else if (instruction.mnemonic == hpu::Mnemonic::kDstore) {
+                require(instruction.cp == 0,
+                        "transform result store requested LLC allocation");
+            }
+        }
+        require(table_loads == 14 && small_loads == 14 && online_multiplies == 1,
+                "forward/inverse transform did not cache both stage and pre/post tables");
+    }
+}
+
 } // namespace
 
 int main()
 {
     try {
+        check_transform_cache_policy();
         constexpr int degree = 128;
         constexpr int num_q = 4;
         constexpr int num_p = 1;
@@ -47,19 +88,17 @@ int main()
             count(program, hpu::dload(
                 4, hpu::DataType::mod_ctx, hpu::DloadFlag::small_bank)) == 1,
             "application must load the complete modulus table exactly once");
-        require(count(program, hpu::pfree(4)) == 1,
-                "application must release the modulus table exactly once");
+        require(count(program, hpu::pfree(4)) == 0,
+                "native application must delegate modulus-table release to the compiler");
         require(count(program, hpu::psync()) == 1,
                 "application must contain exactly one terminal psync");
         require(program.rfind(hpu::psync()) + hpu::psync().size() == program.size(),
                 "psync must be the final instruction");
         const std::size_t last_store = program.rfind("\"dstore ");
-        const std::size_t table_release = program.rfind(hpu::pfree(4));
         const std::size_t synchronization = program.rfind(hpu::psync());
         require(last_store != std::string::npos
-                    && last_store < table_release
-                    && table_release < synchronization,
-                "final result must be dstore'd before table release and psync");
+                    && last_store < synchronization,
+                "final result must be declared before psync");
         require(program.find("no input NTT is emitted") != std::string::npos,
                 "application does not declare the canonical NTT input contract");
         const std::size_t key_switch_ntt =
@@ -90,13 +129,12 @@ int main()
                 degree, num_q, num_p, dnum, false, false);
         polynomial_program += hpu::scheme::ckks::generate_add_plain_body_asm(
             num_q - 1, false, false);
-        polynomial_program += hpu::pfree(4);
         polynomial_program += hpu::psync();
         require(
             count(polynomial_program, hpu::dload(
                 4, hpu::DataType::mod_ctx,
                 hpu::DloadFlag::small_bank)) == 1
-                && count(polynomial_program, hpu::pfree(4)) == 1
+                && count(polynomial_program, hpu::pfree(4)) == 0
                 && count(polynomial_program, hpu::psync()) == 1,
             "composed polynomial program duplicated application-lifetime state");
 

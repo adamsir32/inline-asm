@@ -1,7 +1,13 @@
 # 2026 年 10 月 NTT 契约与 CKKS 舍入修复审计
 
+> 历史记录：本文的自然系数边界/profile 验证采用当时的软件契约。2026-10-24 已切换为
+> BR 系数及 BR pre/post 的 raw stage ABI；旧产物及软件通过记录不代表修订后 RTL
+> 验收。布局以 [最新修订](../reference/HPU_NTT_SOFTWARE_LAYOUT_ADAPTATION_20261024.md)
+> 和 [应用包说明](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界) 为准。
+
+
 审查日期：2026-10-04；自然系数边界修复日期：2026-10-08。
-本文保存修复依据和软件验收快照。当前接口以 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#5-变换指令)
+本文保存修复依据和软件验收快照。当前接口以 [编程手册](../reference/HPU_PROGRAMMING_MANUAL.md#9-本项目的接入约定)
 和 [应用包 V1](../delivery/HPU_APPLICATION_PACKAGE_V1.md#新应用镜像的-ntt-表与软件边界) 为准。
 软件逐字对拍不代替 RTL stage 地址或目标执行验收。
 

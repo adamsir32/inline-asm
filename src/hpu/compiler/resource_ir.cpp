@@ -1,6 +1,7 @@
 #include "hpu/compiler/resource_ir.hpp"
 #include "hpu/compiler/operator_resources.hpp"
 #include "hpu/compiler/detail/use_index.hpp"
+#include "hpu/runtime/bank_allocator.hpp"
 
 #include "encoder.hpp"
 #include "executable.hpp"
@@ -12,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace hpu::compiler {
@@ -99,6 +101,53 @@ std::vector<std::optional<std::size_t>> dma_by_instruction(
     return indices;
 }
 
+void apply_dma_cache_policy(CompiledResources& resources, DmaCachePolicy policy)
+{
+    if (policy == DmaCachePolicy::preserve) return;
+    if (policy != DmaCachePolicy::twiddle_loads_only) {
+        throw std::invalid_argument("unknown DMA cache policy");
+    }
+    // Require complete one-to-one provenance before editing any hint. Object
+    // slots and Bank 5 masks cannot identify data after eviction and reuse.
+    dma_by_instruction(resources.instructions, resources.dma);
+    for (const auto& dma : resources.dma) {
+        const auto& allocation = resources.image.allocation(dma.allocation_id);
+        if (!contains(allocation.span, dma.span)) {
+            throw std::invalid_argument("DMA cache policy range exceeds allocation: " + allocation.id);
+        }
+        auto& encoded = resources.instructions.at(dma.instruction_index);
+        auto instruction = encoded.instruction;
+        instruction.cp = instruction.mnemonic == hpu::Mnemonic::kDload
+                && allocation.kind == hpu::runtime::AllocationKind::twiddle
+            ? 1 : 0;
+        encoded = encode(instruction);
+    }
+}
+
+void record_io(CompiledResources& resources, const std::vector<ResolvedDma>& original)
+{
+    auto& report = resources.report;
+    for (const auto& entry : original) report.original_dma_bytes += entry.span.line_count * 256;
+    std::set<std::tuple<std::string, std::uint64_t, std::uint64_t>> reads;
+    for (const auto& entry : resources.dma) {
+        const auto bytes = entry.span.line_count * 256;
+        const auto& instruction = resources.instructions.at(entry.instruction_index).instruction;
+        if (entry.purpose == "spill") report.spill_write_bytes += bytes;
+        if (entry.purpose == "reload") report.reload_read_bytes += bytes;
+        if (entry.purpose == "exact_copy") report.exact_copy_bytes += bytes;
+        if (instruction.mnemonic == hpu::Mnemonic::kDload) {
+            report.dload_bytes += bytes;
+            if (!reads.emplace(entry.allocation_id, entry.span.line_offset, entry.span.line_count).second)
+                report.repeated_range_read_bytes += bytes;
+        } else {
+            report.dstore_bytes += bytes;
+            if (resources.image.allocation(entry.allocation_id).kind == hpu::runtime::AllocationKind::output)
+                report.required_output_write_bytes += bytes;
+        }
+    }
+    report.initial_image_bytes = resources.image.used_lines() * 256;
+}
+
 // Removing a writeback is safe only when there is one exact consumer before
 // the next overlapping write. Other loads could observe the old DDR contents.
 std::map<std::size_t, std::size_t> deferred_store_pairs(
@@ -127,6 +176,11 @@ std::map<std::size_t, std::size_t> deferred_store_pairs(
             break;
         }
         if (!consumer) continue;
+        bool observed = false;
+        for (std::size_t instruction = store.instruction_index + 1;
+             instruction < dma[*consumer].instruction_index; ++instruction)
+            if (instructions[instruction].instruction.mnemonic == hpu::Mnemonic::kPsync) observed = true;
+        if (observed) continue;
         bool another_read = false;
         for (std::size_t next = *consumer + 1; next < dma.size(); ++next) {
             if (!overlaps(store.span, dma[next].span)) continue;
@@ -180,64 +234,63 @@ void analyze_buffers(VirtualProgram& program,
     }
 }
 
+hpu::runtime::BankAllocatorOptions bank_options(const CompileOptions& options)
+{
+    hpu::runtime::BankAllocatorOptions result;
+    result.regular_bank_count = options.regular_bank_count;
+    result.regular_bank_lines = options.regular_bank_lines;
+    result.mod_table_lines = options.mod_table_lines;
+    return result;
+}
+
+void record_bank_usage(ResourceReport& report,
+                       const hpu::runtime::BankAllocator& allocator)
+{
+    const auto stats = allocator.stats();
+    report.peak_regular_banks = stats.peak_regular_banks;
+    report.peak_object_slots = stats.peak_resident_objects;
+    report.peak_regular_lines = stats.peak_regular_lines;
+    report.peak_small_lines = stats.peak_small_lines;
+}
+
 ResourceReport inspect_original(const std::vector<hpu::EncodedInstruction>& instructions,
                                 const std::vector<ResolvedDma>& dma,
                                 const hpu::runtime::HpuMemImage& image,
                                 const CompileOptions& options)
 {
     const auto lookup = dma_by_instruction(instructions, dma);
-    std::array<std::uint64_t, 8> lines{};
-    std::array<bool, 8> small{};
+    hpu::runtime::BankAllocator allocator(bank_options(options));
     ResourceReport report;
     report.original_ddr_lines = image.used_lines();
     report.allocated_ddr_lines = image.used_lines();
     report.original_dma_count = report.dma_count = dma.size();
-    auto measure = [&](bool extra_bank) {
-        std::size_t banks = extra_bank ? 1 : 0;
-        std::size_t slots = 0;
-        std::uint64_t small_lines = 0;
-        for (std::size_t slot = 0; slot < lines.size(); ++slot) {
-            if (!lines[slot]) continue;
-            ++slots;
-            if (small[slot]) {
-                small_lines += lines[slot];
-            } else {
-                if (lines[slot] > options.regular_bank_lines) {
-                    throw std::invalid_argument("object exceeds one regular bank");
-                }
-                ++banks;
-            }
-        }
-        report.peak_regular_banks = std::max(report.peak_regular_banks, banks);
-        report.peak_object_slots = std::max(report.peak_object_slots, slots);
-        if (banks > options.regular_bank_count) {
-            throw std::invalid_argument("fixed schedule exceeds available regular banks");
-        }
-        if (small_lines > 32) {
-            throw std::invalid_argument("fixed schedule exceeds small bank capacity");
-        }
-    };
     for (std::size_t index = 0; index < instructions.size(); ++index) {
         const auto& op = instructions[index].instruction;
         switch (op.mnemonic) {
         case hpu::Mnemonic::kDload:
-            lines[op.obj_id] = dma[*lookup[index]].span.line_count;
-            small[op.obj_id] = op.dma_flag != 0;
+            allocator.load(op.obj_id, dma.at(*lookup[index]).span.line_count,
+                           op.type, op.dma_flag);
             break;
-        case hpu::Mnemonic::kDstore: lines[op.obj_id] = 0; break;
-        case hpu::Mnemonic::kPfree: lines[op.idx0] = 0; break;
+        case hpu::Mnemonic::kDstore:
+            if (op.type == 1) allocator.release(op.obj_id);
+            break;
+        case hpu::Mnemonic::kPfree: allocator.release(op.idx0); break;
         case hpu::Mnemonic::kPadd:
         case hpu::Mnemonic::kPsub:
         case hpu::Mnemonic::kPmul:
         case hpu::Mnemonic::kPmac:
-            lines[op.pdst] = lines[op.psrc1];
-            small[op.pdst] = false;
+            if (op.mnemonic == hpu::Mnemonic::kPmul && op.mode == 1)
+                allocator.online_multiply(op.pdst, op.psrc1, op.psrc2);
+            else allocator.arithmetic(op.pdst, op.psrc1,
+                op.imm8 < 0 ? std::optional<std::uint8_t>(op.psrc2) : std::nullopt,
+                op.mnemonic == hpu::Mnemonic::kPmac);
             break;
+        case hpu::Mnemonic::kPntt:
+        case hpu::Mnemonic::kPintt: allocator.ntt(op.pdst); break;
         default: break;
         }
-        measure(op.mnemonic == hpu::Mnemonic::kPntt
-                || op.mnemonic == hpu::Mnemonic::kPintt);
     }
+    record_bank_usage(report, allocator);
     return report;
 }
 
@@ -256,7 +309,8 @@ struct ScheduledProgram {
 class Scheduler {
 public:
     Scheduler(VirtualProgram& program, const CompileOptions& options)
-        : program_(program), options_(options), states_(program.objects.size()), uses_(program) {}
+        : program_(program), states_(program.objects.size()), uses_(program),
+          allocator_(bank_options(options)), automatic_(options.automatic_lifetimes) {}
 
     ScheduledProgram run()
     {
@@ -274,13 +328,21 @@ public:
                 if (next_use(op.uses.at(0)) == kNoUse) release(op.uses.at(0));
                 break;
             case hpu::Mnemonic::kPmodld:
+                if (modulus_) ensure(*modulus_);
                 emit(op.instruction);
                 break;
             case hpu::Mnemonic::kPsync:
-                while (!resident_.empty()) release(*resident_.begin());
+                // PSYNC only waits. In particular an intermediate wait must
+                // preserve dirty values and REL=0 objects used afterwards.
                 emit(op.instruction);
                 break;
             default: kernel(op); break;
+            }
+            if (automatic_) {
+                auto dead = op.uses;
+                dead.insert(dead.end(), op.definitions.begin(), op.definitions.end());
+                for (const auto id : dead)
+                    if ((!modulus_ || *modulus_ != id) && next_use(id) == kNoUse) release(id);
             }
         }
         hpu::validate_executable_program(result_.instructions);
@@ -295,6 +357,9 @@ private:
         std::optional<BufferId> spill;
         bool dirty = false;
         bool initialized = false;
+        std::size_t loads = 0;
+        bool exact_copy = false;
+        std::string logical_value;
     };
 
     std::size_t next_use(ObjectId id) const
@@ -302,33 +367,7 @@ private:
         return uses_.next(id);
     }
 
-    bool small(ObjectId id) const { return program_.objects[id].dma_flag != 0; }
-
-    std::size_t banks() const
-    {
-        std::size_t result = 0;
-        for (const auto id : resident_) if (!small(id)) ++result;
-        return result;
-    }
-
-    void measure(std::size_t extra = 0)
-    {
-        const auto regular = banks() + extra;
-        std::size_t slots = 0;
-        std::uint64_t small_lines = 0;
-        for (const auto id : resident_) {
-            ++slots;
-            if (small(id)) small_lines += program_.objects[id].line_count;
-        }
-        result_.report.peak_regular_banks = std::max(result_.report.peak_regular_banks, regular);
-        result_.report.peak_object_slots = std::max(result_.report.peak_object_slots, slots);
-        if (regular > options_.regular_bank_count) {
-            throw std::logic_error("scheduler exceeded regular bank capacity");
-        }
-        if (small_lines > 32) {
-            throw std::invalid_argument("schedule exceeds small bank capacity");
-        }
-    }
+    void measure() { record_bank_usage(result_.report, allocator_); }
 
     void emit(hpu::Instruction instruction) { result_.instructions.push_back(encode(instruction)); }
 
@@ -352,14 +391,15 @@ private:
         free.idx0 = *state.slot;
         free.idx1 = 0;
         emit(free);
+        allocator_.release(*state.slot);
         state.slot.reset();
         resident_.erase(id);
     }
 
-    void evict(ObjectId id)
+    void evict(ObjectId id, bool preserve_current_use = false)
     {
         auto& state = states_[id];
-        if (state.dirty && next_use(id) != kNoUse) {
+        if (state.dirty && (preserve_current_use || next_use(id) != kNoUse)) {
             if (!state.spill) {
                 VirtualBuffer buffer;
                 buffer.id = "$compiler/spill/" + std::to_string(id);
@@ -379,9 +419,12 @@ private:
             store.rs1 = 10;
             store.rs2 = 11;
             store.obj_id = *state.slot;
-            store.type = 0;
+            store.type = 1;
             auto origin = current_origin_;
+            origin.purpose = "spill";
+            origin.logical_value = state.logical_value;
             emit_dma(store, spill, std::move(origin));
+            allocator_.release(*state.slot);
             state.slot.reset();
             resident_.erase(id);
             state.home = spill;
@@ -392,55 +435,138 @@ private:
         }
     }
 
-    void make_room(std::size_t requested_banks, bool need_slot)
+    void evict_one()
     {
-        auto available_slot = [&] {
-            std::array<bool, 8> used{};
-            used[4] = true;
-            for (const auto id : resident_) used[*states_[id].slot] = true;
-            return std::find(used.begin(), used.end(), false) != used.end();
-        };
-        while (banks() + requested_banks > options_.regular_bank_count
-               || (need_slot && !available_slot())) {
-            std::optional<ObjectId> victim;
-            std::size_t farthest = 0;
-            for (const auto id : resident_) {
-                if (excluded_.count(id) || small(id)) continue;
-                const auto next = next_use(id);
-                if (!victim || next > farthest || (next == farthest && id < *victim)) {
-                    victim = id;
-                    farthest = next;
-                }
+        std::optional<ObjectId> victim;
+        std::size_t farthest = 0;
+        std::uint64_t cheapest = std::numeric_limits<std::uint64_t>::max();
+        for (const auto id : resident_) {
+            if (excluded_.count(id)) continue;
+            if (automatic_ && modulus_ && *modulus_ == id) continue;
+            const auto next = next_use(id);
+            const auto cost = next == kNoUse ? 0 : program_.objects[id].line_count
+                * (states_[id].dirty ? 2 : 1);
+            if (!victim || (automatic_ && cost < cheapest)
+                || ((!automatic_ || cost == cheapest)
+                    && (next > farthest || (next == farthest && id < *victim)))) {
+                victim = id;
+                farthest = next;
+                cheapest = cost;
             }
-            if (!victim) {
-                throw std::invalid_argument("kernel operands exceed regular bank capacity");
+        }
+        if (!victim) {
+            throw ResourceCapacityError(
+                "kernel operands exceed aligned physical bank capacity");
+        }
+        evict(*victim);
+    }
+
+    std::uint8_t allocate_slot(ObjectId id)
+    {
+        for (;;) {
+            std::array<bool, 64> used{};
+            for (const auto other : resident_) used[*states_[other].slot] = true;
+            auto first = std::find(used.begin(), used.end(), false);
+            // Preserve the familiar modulus-table name when available; p4 is
+            // otherwise an ordinary usable logical object, just like p0..p63.
+            if (program_.objects[id].type == 1 && !used[4]) first = used.begin() + 4;
+            if (first != used.end()) {
+                states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
+                resident_.insert(id);
+                return *states_[id].slot;
             }
-            evict(*victim);
+            evict_one();
         }
     }
 
-    std::uint8_t allocate(ObjectId id)
+    template <class Request> void allocate_physical(
+        Request request, std::uint64_t lines = 0, std::uint8_t allowed = 0x3f)
     {
-        if (program_.objects[id].line_count > options_.regular_bank_lines && !small(id)) {
-            throw std::invalid_argument("virtual object exceeds one regular bank");
+        for (;;) {
+            try {
+                request();
+                measure();
+                return;
+            } catch (const hpu::runtime::BankAllocationError&) {
+                // Hardware never spills automatically. Only explicit compiler
+                // writebacks/frees change ownership before retrying a request.
+                if (!automatic_) { evict_one(); continue; }
+                // Probe whole aligned candidate intervals. Evicting an object
+                // in an unrelated bank cannot resolve the failed allocation.
+                const auto original = allocator_;
+                std::vector<ObjectId> best;
+                std::uint64_t best_cost = std::numeric_limits<std::uint64_t>::max();
+                std::size_t best_distance = 0;
+                for (std::size_t bank = 0; bank < 6; ++bank) {
+                    if (!(allowed & (1U << bank))) continue;
+                    std::uint64_t capacity = bank == 5 ? lines : 128;
+                    while (capacity < lines) capacity *= 2;
+                    const auto limit = bank == 5 ? 32U : 1024U;
+                    const auto stride = bank == 5 ? 2U : capacity;
+                    if (!capacity || capacity > limit) continue;
+                    for (std::uint64_t base = bank == 5 ? allocator_.options().mod_table_lines : 0;
+                         base + capacity <= limit; base += stride) {
+                        std::vector<ObjectId> victims;
+                        std::uint64_t cost = 0;
+                        std::size_t distance = kNoUse;
+                        bool blocked = false;
+                        for (const auto id : resident_) {
+                            if (!states_[id].slot) continue;
+                            const auto& allocation = allocator_.allocation(*states_[id].slot);
+                            if (!allocation || allocation->bank != bank
+                                || base >= allocation->base_line + allocation->capacity_lines
+                                || allocation->base_line >= base + capacity) continue;
+                            if (excluded_.count(id) || (modulus_ && *modulus_ == id)) { blocked = true; break; }
+                            victims.push_back(id);
+                            const auto next = next_use(id);
+                            if (next != kNoUse)
+                                cost += program_.objects[id].line_count * (states_[id].dirty ? 2 : 1);
+                            distance = std::min(distance, next);
+                        }
+                        if (blocked || victims.empty()) continue;
+                        allocator_ = original;
+                        for (const auto id : victims) allocator_.release(*states_[id].slot);
+                        bool fits = true;
+                        try { request(); } catch (const hpu::runtime::BankAllocationError&) { fits = false; }
+                        allocator_ = original;
+                        if (fits && (best.empty() || cost < best_cost
+                            || (cost == best_cost && distance > best_distance))) {
+                            best = std::move(victims); best_cost = cost; best_distance = distance;
+                        }
+                    }
+                }
+                allocator_ = original;
+                if (best.empty()) throw ResourceCapacityError("kernel operands exceed allowed aligned bank capacity");
+                for (const auto id : best) evict(id);
+            }
         }
-        const bool modulus = small(id) && program_.objects[id].type == 2;
-        if (modulus) {
-            const auto previous = std::find_if(resident_.begin(), resident_.end(),
-                [&](ObjectId other) { return states_[other].slot == 4; });
-            if (previous != resident_.end()) release(*previous);
-            states_[id].slot = 4;
-        } else {
-            make_room(small(id) ? 0 : 1, true);
-            std::array<bool, 8> used{};
-            used[4] = true;
-            for (const auto other : resident_) used[*states_[other].slot] = true;
-            const auto first = std::find(used.begin(), used.end(), false);
-            states_[id].slot = static_cast<std::uint8_t>(first - used.begin());
+    }
+
+    void place_load(ObjectId id)
+    {
+        excluded_.insert(id);
+        const auto& shape = program_.objects[id];
+        // Bank 5 has one fixed modulus-table owner, even though its logical ID
+        // can be any of the 64 slots. A previously evicted table is reloadable.
+        if (shape.type == 1) {
+            for (auto it = resident_.begin(); it != resident_.end();) {
+                const auto other = *it++;
+                if (other != id && program_.objects[other].type == 1) evict(other);
+            }
         }
-        resident_.insert(id);
-        measure();
-        return *states_[id].slot;
+        const auto slot = states_[id].slot ? *states_[id].slot : allocate_slot(id);
+        try {
+            allocate_physical([&] {
+                allocator_.load(slot, shape.line_count, shape.type, shape.dma_flag);
+            }, shape.line_count, shape.dma_flag ? shape.dma_flag : shape.type == 1 ? 0x20 : 0x1f);
+        } catch (...) {
+            // A failed placement has no resident value. In particular store()
+            // may free the replacement and retry this exact memory version.
+            if (allocator_.allocation(slot)) allocator_.release(slot);
+            states_[id].slot.reset();
+            resident_.erase(id);
+            throw;
+        }
     }
 
     void ensure(ObjectId id)
@@ -450,7 +576,8 @@ private:
         if (!state.initialized || !state.home) {
             throw std::logic_error("virtual object has no reloadable definition");
         }
-        const auto slot = allocate(id);
+        place_load(id);
+        const auto slot = *state.slot;
         hpu::Instruction load;
         load.mnemonic = hpu::Mnemonic::kDload;
         load.rs1 = 10;
@@ -459,8 +586,10 @@ private:
         load.type = program_.objects[id].type;
         load.dma_flag = program_.objects[id].dma_flag;
         auto origin = current_origin_;
+        origin.purpose = state.exact_copy ? "exact_copy" : state.loads ? "reload" : "input";
+        origin.logical_value = state.logical_value;
         emit_dma(load, *state.home, std::move(origin));
-        ++result_.report.reloads;
+        if (!automatic_ || state.loads++) ++result_.report.reloads;
     }
 
     void load(const VirtualInstruction& op)
@@ -474,12 +603,24 @@ private:
         state.home = op.memory;
         state.initialized = true;
         state.dirty = false;
+        state.exact_copy = op.exact_copy;
+        state.logical_value = op.logical_value;
+        if (program_.objects[id].type == 1) modulus_ = id;
+        // Immutable inputs are references, materialized at their first actual
+        // consumer. Mutable reads stay eager to preserve read-before-write.
+        if (automatic_ && program_.buffers[op.memory->buffer].read_only) return;
         // Conservative native lowering can materialize a formerly deferred
         // reload into the same storage object. DLOAD replaces that definition.
         release(id);
         auto instruction = op.instruction;
-        instruction.obj_id = allocate(id);
-        emit_dma(instruction, *op.memory, *op.origin);
+        place_load(id);
+        instruction.obj_id = *state.slot;
+        if (program_.objects[id].type == 1) modulus_ = id;
+        auto origin = *op.origin;
+        origin.purpose = op.exact_copy ? "exact_copy" : "input";
+        origin.logical_value = state.logical_value;
+        emit_dma(instruction, *op.memory, std::move(origin));
+        ++state.loads;
     }
 
     void store(const VirtualInstruction& op)
@@ -489,12 +630,42 @@ private:
             ++result_.report.deferred_scratch_stores;
             return;
         }
+        if (automatic_) {
+            // A backing is a particular memory version, not merely an address.
+            // Freeze old live versions before a write destroys their home.
+            for (ObjectId other = 0; other < states_.size(); ++other) {
+                auto& state = states_[other];
+                if (other == id || !state.initialized || !state.home || next_use(other) == kNoUse
+                    || state.home->buffer != op.memory->buffer
+                    || !overlaps({state.home->line_offset, state.home->line_count},
+                                 {op.memory->line_offset, op.memory->line_count})) continue;
+                const bool protected_before = excluded_.count(other) != 0;
+                try { ensure(other); }
+                catch (const ResourceCapacityError&) {
+                    if (!states_[id].slot) throw;
+                    // The replacement may occupy the only allowed interval.
+                    // Give it an exact backing while freezing the old version.
+                    evict(id, true);
+                    ensure(other);
+                }
+                state.dirty = true;
+                state.home.reset();
+                if (!protected_before) excluded_.erase(other);
+            }
+        }
         ensure(id);
         auto instruction = op.instruction;
         instruction.obj_id = *states_[id].slot;
-        emit_dma(instruction, *op.memory, *op.origin);
-        states_[id].slot.reset();
-        resident_.erase(id);
+        if (automatic_) instruction.type = next_use(id) == kNoUse ? 1 : 0;
+        auto origin = *op.origin;
+        origin.purpose = op.exact_copy ? "exact_copy" : "store";
+        origin.logical_value = states_[id].logical_value;
+        emit_dma(instruction, *op.memory, std::move(origin));
+        if (instruction.type == 1) {
+            allocator_.release(*states_[id].slot);
+            states_[id].slot.reset();
+            resident_.erase(id);
+        }
         states_[id].home = op.memory;
         states_[id].dirty = false;
     }
@@ -502,35 +673,67 @@ private:
     void kernel(const VirtualInstruction& op)
     {
         for (ObjectId id : op.uses) ensure(id);
+        std::vector<std::uint8_t> source_slots;
+        for (const auto id : op.uses) source_slots.push_back(*states_[id].slot);
         const ObjectId destination = op.definitions.at(0);
-        if (!states_[destination].slot) allocate(destination);
+        if (automatic_ && !states_[destination].slot
+            && op.instruction.mnemonic != hpu::Mnemonic::kPmac
+            && op.instruction.mnemonic != hpu::Mnemonic::kPntt
+            && op.instruction.mnemonic != hpu::Mnemonic::kPintt) {
+            for (const auto source : op.uses) {
+                if (op.instruction.mnemonic == hpu::Mnemonic::kPmul && op.instruction.mode == 1
+                    && source != op.uses.front()) continue;
+                if (next_use(source) != kNoUse || !states_[source].slot
+                    || program_.objects[source].type == 1) continue;
+                states_[destination].slot = states_[source].slot;
+                states_[source].slot.reset(); resident_.erase(source); resident_.insert(destination);
+                break;
+            }
+        }
+        if (!states_[destination].slot) allocate_slot(destination);
         const bool stage = op.instruction.mnemonic == hpu::Mnemonic::kPntt
             || op.instruction.mnemonic == hpu::Mnemonic::kPintt;
-        if (stage) make_room(1, false);
         auto instruction = op.instruction;
         instruction.pdst = *states_[destination].slot;
         if (stage) {
             // STG uses begin with data, then twiddle.
-            instruction.psrc1 = *states_[op.uses.at(1)].slot;
+            instruction.psrc1 = source_slots.at(1);
         } else {
-            instruction.psrc1 = *states_[op.uses.at(0)].slot;
-            if (instruction.imm8 < 0) instruction.psrc2 = *states_[op.uses.at(1)].slot;
+            instruction.psrc1 = source_slots.at(0);
+            if (instruction.imm8 < 0) instruction.psrc2 = source_slots.at(1);
         }
+        std::uint8_t allowed = 0x1f;
+        if (stage) {
+            const auto bank = allocator_.allocation(instruction.pdst)->bank;
+            if (bank < 5) allowed &= static_cast<std::uint8_t>(~(1U << bank));
+        }
+        allocate_physical([&] {
+            if (stage) allocator_.ntt(instruction.pdst);
+            else if (instruction.mnemonic == hpu::Mnemonic::kPmul && instruction.mode == 1)
+                allocator_.online_multiply(instruction.pdst, instruction.psrc1, instruction.psrc2);
+            else allocator_.arithmetic(instruction.pdst, instruction.psrc1,
+                instruction.imm8 < 0 ? std::optional<std::uint8_t>(instruction.psrc2) : std::nullopt,
+                instruction.mnemonic == hpu::Mnemonic::kPmac);
+        }, program_.objects[destination].line_count, allowed);
         emit(instruction);
         states_[destination].initialized = true;
         states_[destination].dirty = true;
-        measure(stage ? 1 : 0);
+        states_[destination].exact_copy = false;
+        states_[destination].logical_value = op.logical_value;
+        measure();
     }
 
     VirtualProgram& program_;
-    const CompileOptions& options_;
     std::vector<State> states_;
     detail::UseIndex uses_;
+    hpu::runtime::BankAllocator allocator_;
+    std::optional<ObjectId> modulus_;
     std::set<ObjectId> resident_;
     ScheduledProgram result_;
     std::set<ObjectId> excluded_;
     std::size_t cursor_ = 0;
     ResolvedDma current_origin_;
+    bool automatic_ = false;
 };
 
 std::vector<LogicalBufferPlacement> place_buffers(
@@ -551,6 +754,7 @@ std::vector<LogicalBufferPlacement> place_buffers(
         placement.first_use = buffer.first_use;
         placement.last_use = buffer.last_use;
         placement.layout = buffer.layout;
+        if (!buffer.materialized) continue;
         if (!buffer.retained && reuse_scratch) {
             scratch.push_back(id);
             continue;
@@ -618,7 +822,7 @@ VirtualProgram import_resolved_program(
     const auto lookup = dma_by_instruction(instructions, dma);
     const auto pairs = deferred_store_pairs(instructions, dma, image);
     std::map<std::size_t, ObjectId> pending_reload;
-    std::array<std::optional<ObjectId>, 8> live;
+    std::array<std::optional<ObjectId>, 64> live;
     std::map<std::string, BufferId> buffer_ids;
     VirtualProgram result;
     for (const auto& allocation : image.allocations()) {
@@ -632,7 +836,7 @@ VirtualProgram import_resolved_program(
         result.buffers.push_back(std::move(buffer));
     }
     auto object = [&](int slot) -> ObjectId {
-        if (slot < 0 || slot >= 8 || !live[slot]) {
+        if (slot < 0 || slot >= 64 || !live[slot]) {
             throw std::invalid_argument("virtual instruction references a released object");
         }
         return *live[slot];
@@ -688,7 +892,7 @@ VirtualProgram import_resolved_program(
                 op.required_store = false;
                 pending_reload.emplace(match->second, id);
             }
-            live[instruction.obj_id].reset();
+            if (instruction.type == 1) live[instruction.obj_id].reset();
             break;
         }
         case hpu::Mnemonic::kPfree:
@@ -812,13 +1016,14 @@ VirtualProgram import_operator_program(
     std::map<std::size_t, ObjectId> pending_reload;
     std::vector<std::optional<ObjectId>> objects(source.values.size());
     std::vector<std::size_t> object_last_use;
+    std::vector<std::optional<BufferRange>> initial_homes;
     const auto assign = [&](hpu::resource::ValueId value, ObjectId object) {
         objects.at(value) = object;
         object_last_use.at(object) = std::max(object_last_use.at(object), last_use.at(value));
     };
     const auto new_object = [&](VirtualObject shape) {
         const auto id = result.objects.size();
-        result.objects.push_back(shape); object_last_use.push_back(0);
+        result.objects.push_back(shape); object_last_use.push_back(0); initial_homes.push_back({});
         return id;
     };
     const auto get = [&](hpu::resource::ValueId value) {
@@ -837,6 +1042,10 @@ VirtualProgram import_operator_program(
                 origin->span.line_offset - allocation.span.line_offset, origin->span.line_count};
         }
         op.origin = origin;
+        if (!node.outputs.empty() || !node.inputs.empty()) {
+            const auto value = !node.outputs.empty() ? node.outputs.front() : node.inputs.front();
+            op.logical_value = source.values.at(value).variable.label + "/v" + std::to_string(value);
+        }
         for (const auto value : node.inputs) op.uses.push_back(get(value));
         switch (node.instruction.mnemonic) {
         case hpu::Mnemonic::kDload: {
@@ -845,6 +1054,7 @@ VirtualProgram import_operator_program(
             if (found != pending_reload.end()) { id = found->second; op.reload_retained_object = true; }
             else id = new_object({op.memory->line_count, node.instruction.type, node.instruction.dma_flag});
             assign(node.outputs.at(0), id); op.definitions = {id};
+            initial_homes[id] = op.memory;
             break;
         }
         case hpu::Mnemonic::kDstore: {
@@ -879,6 +1089,8 @@ VirtualProgram import_operator_program(
                 else {
                     // Preserve exact words through DMA. Arithmetic copies would
                     // change noncanonical/lazy residues or table payloads.
+                    const bool reload_source = initial_homes[id]
+                        && result.buffers[initial_homes[id]->buffer].read_only;
                     const auto buffer = result.buffers.size();
                     VirtualBuffer snapshot;
                     snapshot.id = "$compiler/ssa_copy/" + std::to_string(node.outputs.at(0));
@@ -887,25 +1099,32 @@ VirtualProgram import_operator_program(
                     snapshot.kind = hpu::runtime::AllocationKind::workspace;
                     snapshot.retained = false; snapshot.fully_defined_before_read = true;
                     snapshot.first_use = snapshot.last_use = i;
-                    result.buffers.push_back(std::move(snapshot));
-                    const BufferRange range{buffer, 0, shape.line_count};
+                    if (!reload_source) result.buffers.push_back(std::move(snapshot));
+                    const BufferRange range = reload_source ? *initial_homes[id]
+                        : BufferRange{buffer, 0, shape.line_count};
                     VirtualInstruction save;
                     save.instruction.mnemonic = hpu::Mnemonic::kDstore;
                     save.instruction.rs1 = 10; save.instruction.rs2 = 11;
                     save.uses = {id}; save.memory = range; save.origin = origin;
-                    result.instructions.push_back(save);
+                    save.exact_copy = true;
+                    save.logical_value = source.values.at(node.inputs.at(*node.tied_input)).variable.label
+                        + "/v" + std::to_string(node.inputs.at(*node.tied_input));
+                    if (!reload_source) result.instructions.push_back(save);
                     const auto copy = new_object(shape);
                     VirtualInstruction load;
                     load.instruction.mnemonic = hpu::Mnemonic::kDload;
                     load.instruction.rs1 = 10; load.instruction.rs2 = 11;
                     load.instruction.type = shape.type; load.instruction.dma_flag = shape.dma_flag;
                     load.definitions = {copy}; load.memory = range; load.origin = origin;
+                    load.exact_copy = true;
+                    load.logical_value = save.logical_value;
                     result.instructions.push_back(load);
                     op.uses[*node.tied_input] = copy; reuse = copy;
                 }
             }
             const auto id = reuse ? *reuse : new_object({shape.line_count, shape.type, 0});
             assign(node.outputs.at(0), id); op.definitions = {id};
+            initial_homes[id].reset();
             break;
         }
         case hpu::Mnemonic::kPfree: case hpu::Mnemonic::kPmodld: case hpu::Mnemonic::kPsync: break;
@@ -933,7 +1152,8 @@ CompiledResources compile_resources(
     const CompileOptions& options)
 {
     if (options.regular_bank_count == 0 || options.regular_bank_count > 5
-        || options.regular_bank_lines == 0 || options.regular_bank_lines > 1024) {
+        || options.regular_bank_lines == 0 || options.regular_bank_lines > 1024
+        || options.mod_table_lines == 0 || options.mod_table_lines > 16) {
         throw std::invalid_argument("invalid resource limits for HPU ISA");
     }
     for (const auto& annotation : options.buffer_layouts) {
@@ -952,7 +1172,14 @@ CompiledResources compile_resources(
     }
     const bool ssa_copies = std::any_of(program.buffers.begin(), program.buffers.end(),
         [](const auto& buffer) { return buffer.id.rfind("$compiler/ssa_copy/", 0) == 0; });
-    if (options.optimization == OptimizationMode::no_opt && !instructions.empty() && !ssa_copies) {
+    for (auto& op : program.instructions)
+        if (op.memory && op.instruction.mnemonic == hpu::Mnemonic::kDstore
+            && options.required_outputs.count(program.buffers[op.memory->buffer].id))
+            op.required_store = true;
+    for (auto& buffer : program.buffers)
+        if (options.required_outputs.count(buffer.id)) buffer.retained = true;
+    if (options.optimization == OptimizationMode::no_opt && !instructions.empty() && !ssa_copies
+        && !options.automatic_lifetimes) {
         CompiledResources result(image.capacity_lines());
         result.image = image;
         result.instructions = instructions;
@@ -963,6 +1190,8 @@ CompiledResources compile_resources(
             result.buffers.push_back({buffer.id, buffer.id, buffer.original_span,
                 buffer.original_span, true, buffer.first_use, buffer.last_use, buffer.layout});
         }
+        apply_dma_cache_policy(result, options.dma_cache_policy);
+        record_io(result, dma);
         return result;
     }
     if (options.optimization == OptimizationMode::no_opt) {
@@ -972,6 +1201,17 @@ CompiledResources compile_resources(
         }
     }
     auto scheduled = Scheduler(program, options).run();
+    if (options.prune_unused_buffers) {
+        for (auto& buffer : program.buffers) buffer.materialized = false;
+        for (const auto& entry : scheduled.dma) program.buffers[entry.range.buffer].materialized = true;
+        for (auto& buffer : program.buffers) {
+            if (buffer.kind == hpu::runtime::AllocationKind::output
+                && !options.required_outputs.count(buffer.id)) {
+                buffer.kind = hpu::runtime::AllocationKind::workspace;
+                buffer.retained = !buffer.fully_defined_before_read;
+            }
+        }
+    }
     std::uint64_t capacity = image.used_lines();
     for (const auto& buffer : program.buffers) {
         if (buffer.id.rfind("$compiler/spill/", 0) == 0 ||
@@ -1000,6 +1240,8 @@ CompiledResources compile_resources(
                             entry.range.line_count};
         result.dma.push_back(std::move(entry.origin));
     }
+    apply_dma_cache_policy(result, options.dma_cache_policy);
+    record_io(result, dma);
     return result;
 }
 
@@ -1010,7 +1252,8 @@ hpu::runtime::HpuMemSpan relocate_span(
 {
     const auto found = std::find_if(resources.buffers.begin(), resources.buffers.end(),
         [&](const auto& buffer) { return buffer.logical_id == logical_allocation_id; });
-    if (found == resources.buffers.end() || !contains(found->original_span, original_span)) {
+    if (found == resources.buffers.end() || found->physical_allocation_id.empty()
+        || !contains(found->original_span, original_span)) {
         throw std::invalid_argument("cannot relocate logical range: " + logical_allocation_id);
     }
     return {found->span.line_offset + original_span.line_offset - found->original_span.line_offset,
@@ -1030,15 +1273,29 @@ std::string render_resource_report(const CompiledResources& resources)
            << ",\n  \"dma_count\": " << report.dma_count
            << ",\n  \"peak_regular_banks\": " << report.peak_regular_banks
            << ",\n  \"peak_object_slots\": " << report.peak_object_slots
+           << ",\n  \"peak_regular_lines\": " << report.peak_regular_lines
+           << ",\n  \"peak_small_lines\": " << report.peak_small_lines
            << ",\n  \"deferred_scratch_stores\": " << report.deferred_scratch_stores
            << ",\n  \"spills\": " << report.spills
            << ",\n  \"reloads\": " << report.reloads
+           << ",\n  \"dload_bytes\": " << report.dload_bytes
+           << ",\n  \"dstore_bytes\": " << report.dstore_bytes
+           << ",\n  \"dma_bytes\": " << report.dload_bytes + report.dstore_bytes
+           << ",\n  \"original_dma_bytes\": " << report.original_dma_bytes
+           << ",\n  \"spill_write_bytes\": " << report.spill_write_bytes
+           << ",\n  \"reload_read_bytes\": " << report.reload_read_bytes
+           << ",\n  \"exact_copy_bytes\": " << report.exact_copy_bytes
+           << ",\n  \"repeated_range_read_bytes\": " << report.repeated_range_read_bytes
+           << ",\n  \"required_output_write_bytes\": " << report.required_output_write_bytes
+           << ",\n  \"initial_image_bytes\": " << report.initial_image_bytes
+           << ",\n  \"selected_schedule\": " << json_string(report.selected_schedule)
            << ",\n  \"logical_buffers\": [";
     for (std::size_t index = 0; index < resources.buffers.size(); ++index) {
         const auto& buffer = resources.buffers[index];
         output << (index ? ",\n" : "\n")
                << "    {\"logical_id\": " << json_string(buffer.logical_id)
                << ", \"allocation_id\": " << json_string(buffer.physical_allocation_id)
+               << ", \"materialized\": " << (buffer.physical_allocation_id.empty() ? "false" : "true")
                << ", \"original_line_offset\": " << buffer.original_span.line_offset
                << ", \"original_line_count\": " << buffer.original_span.line_count
                << ", \"line_offset\": " << buffer.span.line_offset
@@ -1047,6 +1304,56 @@ std::string render_resource_report(const CompiledResources& resources)
                << ", \"first_use\": " << buffer.first_use
                << ", \"last_use\": " << buffer.last_use
                << ", \"layout\": " << json_string(layout_name(buffer.layout)) << '}';
+    }
+    output << "\n  ],\n  \"io_by_allocation\": [";
+    struct Io { std::size_t reads = 0, writes = 0; std::uint64_t read_bytes = 0, write_bytes = 0; };
+    std::map<std::string, Io> by_allocation, by_value;
+    for (const auto& dma : resources.dma) {
+        auto& io = by_allocation[dma.allocation_id];
+        auto& value_io = by_value[dma.logical_value.empty() ? "$encoded_import" : dma.logical_value];
+        if (resources.instructions[dma.instruction_index].instruction.mnemonic == hpu::Mnemonic::kDload) {
+            ++io.reads; io.read_bytes += dma.span.line_count * 256;
+            ++value_io.reads; value_io.read_bytes += dma.span.line_count * 256;
+        } else {
+            ++io.writes; io.write_bytes += dma.span.line_count * 256;
+            ++value_io.writes; value_io.write_bytes += dma.span.line_count * 256;
+        }
+    }
+    bool first = true;
+    for (const auto& entry : by_allocation) {
+        if (!first) output << ',';
+        first = false;
+        output << "\n    {\"allocation_id\":" << json_string(entry.first)
+            << ",\"reads\":" << entry.second.reads << ",\"writes\":" << entry.second.writes
+            << ",\"read_bytes\":" << entry.second.read_bytes
+            << ",\"write_bytes\":" << entry.second.write_bytes << '}';
+    }
+    output << "\n  ],\n  \"io_by_value\": [";
+    first = true;
+    for (const auto& entry : by_value) {
+        if (!first) output << ',';
+        first = false;
+        output << "\n    {\"value\":" << json_string(entry.first)
+            << ",\"reads\":" << entry.second.reads << ",\"writes\":" << entry.second.writes
+            << ",\"read_bytes\":" << entry.second.read_bytes
+            << ",\"write_bytes\":" << entry.second.write_bytes << '}';
+    }
+    output << "\n  ],\n  \"io_by_kind\": [";
+    std::map<unsigned, Io> by_kind;
+    for (const auto& entry : by_allocation) {
+        auto& io = by_kind[static_cast<unsigned>(resources.image.allocation(entry.first).kind)];
+        io.reads += entry.second.reads; io.writes += entry.second.writes;
+        io.read_bytes += entry.second.read_bytes; io.write_bytes += entry.second.write_bytes;
+    }
+    constexpr const char* kinds[] = {"modulus_table", "constant", "ciphertext", "plaintext",
+        "evaluation_key", "twiddle", "workspace", "output"};
+    first = true;
+    for (const auto& entry : by_kind) {
+        if (!first) output << ',';
+        first = false;
+        output << "\n    {\"kind\":" << json_string(kinds[entry.first])
+            << ",\"read_bytes\":" << entry.second.read_bytes
+            << ",\"write_bytes\":" << entry.second.write_bytes << '}';
     }
     output << "\n  ]\n}\n";
     return output.str();
@@ -1071,7 +1378,7 @@ hpu::compiler::VirtualProgram bind_program(const OperatorProgram& program,
         const auto& a = program.operations[i].instruction;
         const auto& b = baseline[i].instruction;
         if (a.mnemonic != b.mnemonic || a.imm8 != b.imm8 || a.mod_id != b.mod_id ||
-            a.mode != b.mode || a.flag != b.flag || a.type != b.type || a.dma_flag != b.dma_flag ||
+            a.mode != b.mode || a.flag != b.flag || a.type != b.type || a.dma_flag != b.dma_flag || a.cp != b.cp ||
             ((a.mnemonic == hpu::Mnemonic::kPntt || a.mnemonic == hpu::Mnemonic::kPintt) && a.idx0 != b.idx0))
             throw std::invalid_argument("operator IR disagrees with its compatibility baseline");
     }

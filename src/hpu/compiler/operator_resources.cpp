@@ -1,6 +1,7 @@
 #include "hpu/compiler/operator_resources.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <iomanip>
 #include <sstream>
@@ -74,7 +75,7 @@ std::string transform(bool inverse, Operand data, Operand table,
 Operand make_operand(std::string label, int slot)
 {
     static std::atomic<std::size_t> next{1};
-    if (slot < -1 || slot > 7) throw std::invalid_argument("invalid compatibility slot");
+    if (slot < -1 || slot > 63) throw std::invalid_argument("invalid compatibility slot");
     return {next.fetch_add(1, std::memory_order_relaxed), std::move(label), slot};
 }
 
@@ -120,6 +121,10 @@ void OperatorProgram::append(const OperatorProgram& source, std::size_t begin, s
 void OperatorProgram::bind_port(PortId id, hpu::compiler::ResolvedDma binding)
 {
     auto& port = ports.at(id);
+    if (port.logical_binding.empty())
+        port.logical_binding = std::string(port.load ? "read:" : "write:") +
+            binding.allocation_id + "@" + std::to_string(binding.span.line_offset) +
+            ":" + std::to_string(binding.span.line_count);
     binding.instruction_index = port.operation_index;
     port.binding = std::move(binding);
 }
@@ -141,10 +146,35 @@ void OperatorProgram::bind_ports(const std::vector<hpu::compiler::ResolvedDma>& 
     }
 }
 
+void OperatorProgram::bind_named_ports(
+    const std::map<std::string, hpu::compiler::ResolvedDma>& bindings)
+{
+    for (PortId id = 0; id < ports.size(); ++id) {
+        const auto& name = ports[id].logical_binding;
+        if (name.empty()) continue;
+        const auto found = bindings.find(name);
+        if (found == bindings.end()) {
+            if (ports[id].binding) continue;
+            throw std::invalid_argument("missing named operator data binding: " + name);
+        }
+        bind_port(id, found->second);
+    }
+}
+
 Recording::Recording() : previous_(current) { current = this; }
 Recording::~Recording() { current = previous_; }
 OperatorProgram Recording::finish() { return std::move(program_); }
-void Recording::append(const OperatorProgram& program) { program_.append(program); }
+void Recording::append(const OperatorProgram& program)
+{
+    const auto begin = program_.operations.size();
+    program_.append(program);
+    for (std::size_t i = begin; i < program_.operations.size(); ++i) {
+        auto& operation = program_.operations[i];
+        if (operation.instruction.mnemonic == hpu::Mnemonic::kPmodld)
+            modulus_context_ = operation.instruction.mod_id;
+        else if (!operation.modulus_context) operation.modulus_context = modulus_context_;
+    }
+}
 std::optional<ValueId> Recording::existing(const Operand& variable) const
 {
     const auto found = program_.current_values.find(variable.symbol);
@@ -168,6 +198,9 @@ ValueId Recording::define(const Operand& variable)
 }
 void Recording::emit(Operation op)
 {
+    if (op.instruction.mnemonic == hpu::Mnemonic::kPmodld)
+        modulus_context_ = op.instruction.mod_id;
+    else if (!op.modulus_context) op.modulus_context = modulus_context_;
     if (op.instruction.mnemonic == hpu::Mnemonic::kDload || op.instruction.mnemonic == hpu::Mnemonic::kDstore) {
         if (op.port) {
             if (*op.port >= program_.ports.size()) throw std::invalid_argument("unknown data port");
@@ -177,6 +210,19 @@ void Recording::emit(Operation op)
         }
     }
     program_.operations.push_back(std::move(op));
+}
+
+void Recording::name_last_port(std::string logical_binding)
+{
+    if (program_.operations.empty() || !program_.operations.back().port)
+        throw std::logic_error("last operator operation has no data port");
+    program_.ports.at(*program_.operations.back().port).logical_binding = std::move(logical_binding);
+}
+void Recording::bind_last_port(hpu::compiler::ResolvedDma binding)
+{
+    if (program_.operations.empty() || !program_.operations.back().port)
+        throw std::logic_error("last operator operation has no data port");
+    program_.bind_port(*program_.operations.back().port, std::move(binding));
 }
 
 Operand compatibility_operand(int slot)
@@ -190,29 +236,75 @@ Operand compatibility_operand(int slot)
     case 5: return correction;
     case 6: return temporary;
     case 7: return extra;
-    default: throw std::invalid_argument("invalid compatibility object slot");
+    default:
+        if (slot < 8 || slot > 63)
+            throw std::invalid_argument("invalid compatibility object slot");
+        static const auto high = [] {
+            std::array<Operand, 56> result;
+            for (std::size_t i = 0; i < result.size(); ++i)
+                result[i] = make_operand("p" + std::to_string(i + 8), static_cast<int>(i + 8));
+            return result;
+        }();
+        return high[static_cast<std::size_t>(slot - 8)];
     }
 }
 
 std::string compatibility_name(Operand operand) { return hpu::pobj(compatibility_slot(operand)); }
 
-std::string read(Operand object, hpu::DataType type, hpu::DloadFlag flag)
+std::string read(Operand object, hpu::DataType type, hpu::DloadFlag flag, hpu::CachePolicy cp)
 {
     hpu::Instruction op;
     op.mnemonic = hpu::Mnemonic::kDload;
     op.rs1 = 10; op.rs2 = 11;
-    op.type = static_cast<std::uint8_t>(type);
-    op.dma_flag = static_cast<std::uint8_t>(flag);
+    // DataType describes the logical payload; the v1.2 wire flag is MOD only.
+    op.type = static_cast<std::uint8_t>(hpu::dma_mod_bit(type));
+    op.dma_flag = static_cast<std::uint8_t>(hpu::dma_bank_mask(type, flag));
+    op.cp = static_cast<std::uint8_t>(cp);
     emit(op, {}, {object});
-    return object.compatibility_slot < 0 ? std::string{} : hpu::dload(object.compatibility_slot, type, flag);
+    return object.compatibility_slot < 0 ? std::string{} : hpu::dload(object.compatibility_slot, type, flag, cp);
 }
-std::string publish(Operand object, int release)
+std::string read(Operand object, hpu::DataType type, const std::string& logical_binding,
+                 hpu::DloadFlag flag, hpu::CachePolicy cp)
+{
+    auto result = read(object, type, flag, cp);
+    if (current) current->name_last_port(logical_binding);
+    return result;
+}
+std::string input(Operand object, hpu::compiler::ResolvedDma binding,
+                  hpu::DataType type, hpu::DloadFlag flag, hpu::CachePolicy cp)
+{
+    auto result = read(object, type, flag, cp);
+    if (current) current->bind_last_port(std::move(binding));
+    return result;
+}
+std::string output(Operand object, hpu::CachePolicy cp)
+{
+    return publish(object, 0, cp);
+}
+std::string output(Operand object, const std::string& logical_binding, hpu::CachePolicy cp)
+{
+    auto result = output(object, cp);
+    if (current) current->name_last_port(logical_binding);
+    return result;
+}
+std::string output(Operand object, hpu::compiler::ResolvedDma binding, hpu::CachePolicy cp)
+{
+    auto result = output(object, cp);
+    if (current) current->bind_last_port(std::move(binding));
+    return result;
+}
+std::string publish(Operand object, const std::string& logical_binding)
+{
+    return output(object, logical_binding);
+}
+std::string publish(Operand object, int release, hpu::CachePolicy cp)
 {
     hpu::Instruction op;
     op.mnemonic = hpu::Mnemonic::kDstore;
     op.rs1 = 10; op.rs2 = 11; op.type = static_cast<std::uint8_t>(release);
+    op.cp = static_cast<std::uint8_t>(cp);
     emit(op, {object}, {});
-    return object.compatibility_slot < 0 ? std::string{} : hpu::dstore(object.compatibility_slot, release);
+    return object.compatibility_slot < 0 ? std::string{} : hpu::dstore(object.compatibility_slot, release, cp);
 }
 std::string discard(Operand object)
 {
@@ -223,6 +315,17 @@ std::string discard(Operand object)
 std::string add(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPadd, d, a, b); }
 std::string subtract(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPsub, d, a, b); }
 std::string multiply(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPmul, d, a, b); }
+std::string multiply_online(Operand destination, Operand data, Operand parameters)
+{
+    if (destination == parameters || data == parameters)
+        throw std::invalid_argument("online PMUL parameters must differ from data and destination");
+    hpu::Instruction instruction;
+    instruction.mnemonic = hpu::Mnemonic::kPmul;
+    instruction.mode = 1;
+    emit(instruction, {data, parameters}, {destination});
+    const auto d = compatibility_slot(destination), a = compatibility_slot(data), p = compatibility_slot(parameters);
+    return d < 0 || a < 0 || p < 0 ? std::string{} : hpu::pmul_online(d, a, p);
+}
 std::string accumulate(Operand d, Operand a, Operand b) { return arithmetic(hpu::Mnemonic::kPmac, d, a, b); }
 std::string multiply_immediate(Operand d, Operand a, int i) { return arithmetic(hpu::Mnemonic::kPmul, d, a, a, i); }
 std::string accumulate_immediate(Operand d, Operand a, int i) { return arithmetic(hpu::Mnemonic::kPmac, d, a, a, i); }
@@ -258,21 +361,27 @@ std::string render_operator_ir(const OperatorProgram& program)
         out << "] defs=[";
         for (auto id : op.outputs) out << '%' << id << ' ';
         out << ']';
+        if (op.modulus_context) out << " modulus_context=" << *op.modulus_context;
         if (op.tied_input) out << " tied_input=" << *op.tied_input;
         if (op.reuse) out << " reuse=%" << *op.reuse;
         const auto& inst = op.instruction;
+        if (inst.mnemonic == hpu::Mnemonic::kPmul && inst.mode)
+            out << " factor_mode=" << unsigned(inst.mode);
         switch (inst.mnemonic) {
         case hpu::Mnemonic::kPntt: case hpu::Mnemonic::kPintt:
             out << " stage=" << inst.idx0 << " mode=" << unsigned(inst.mode) << " flag=" << unsigned(inst.flag); break;
         case hpu::Mnemonic::kPmodld: out << " mod_id=" << inst.mod_id; break;
         case hpu::Mnemonic::kDload:
-            out << " type=" << unsigned(inst.type) << " flag=" << unsigned(inst.dma_flag); break;
-        case hpu::Mnemonic::kDstore: out << " release=" << unsigned(inst.type); break;
+            out << " mod=" << unsigned(inst.type) << " cp=" << unsigned(inst.cp)
+                << " bank_mask=" << unsigned(inst.dma_flag); break;
+        case hpu::Mnemonic::kDstore:
+            out << " release=" << unsigned(inst.type) << " cp=" << unsigned(inst.cp); break;
         default: if (inst.imm8 >= 0) out << " imm=" << inst.imm8; break;
         }
         if (op.port) {
             out << " port=" << *op.port;
             const auto& port = program.ports.at(*op.port);
+            if (!port.logical_binding.empty()) out << " role=" << std::quoted(port.logical_binding);
             if (port.binding) out << " buffer=" << std::quoted(port.binding->allocation_id)
                 << " line_offset=" << port.binding->span.line_offset << " lines=" << port.binding->span.line_count;
         }

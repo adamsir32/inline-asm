@@ -94,6 +94,7 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     evaluator.sub_plain(added, p, subtracted);
     evaluator.multiply_plain(subtracted, p, multiplied);
     app.mark_output("branch", branch);
+    app.mark_output("branch_alias", branch);
     app.mark_output("result", multiplied);
     seal::Ciphertext host_doubled, host_branch, host_joined, host_added, host_subtracted, host_multiplied;
     oracle.add(saved_input, saved_input, host_doubled);
@@ -110,6 +111,10 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     require(identical(optimized.oracle_result(saved_handle), saved_input), "inplace changed aliased input");
     require(identical(optimized.oracle_result(multiplied), host_multiplied), "frontend expression differs from independent oracle");
     require(baseline.package().outputs.size() == optimized.package().outputs.size(), "optimization lost golden results");
+    require(optimized.package().outputs.size() == 2 * host_branch.size() * host_branch.coeff_modulus_size(),
+        "marked output aliases or unmarked nodes produced extra deployment goldens");
+    require(optimized.package().operation_graph_json.find("\"exported\":false") != std::string::npos,
+        "logical intermediate nodes disappeared from graph metadata");
     for (std::size_t i = 0; i < baseline.package().outputs.size(); ++i)
         require(baseline.package().outputs[i].golden_words == optimized.package().outputs[i].golden_words,
                 "optimization changed node values");
@@ -164,7 +169,9 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     galois = seal::GaloisKeys{};
     const auto full = nonlinear.compile("frontend_nonlinear", diagnostic);
     require(full.verified(), "nonlinear graph software verification failed");
-    require(full.instruction_verified(), "natural-boundary nonlinear graph instruction verification failed");
+    require(full.package().outputs.size() == changed.size() * context->get_context_data(changed.parms_id())->parms().coeff_modulus().size(),
+        "unmarked nonlinear nodes or duplicate metadata views were exported");
+    require(full.instruction_verified(), "BR coefficient nonlinear graph instruction verification failed");
     require(full.oracle_result(square).size() == 3 && full.oracle_result(relined).size() == 2,
         "tensor/relinearization shapes were lost");
     const auto repeat = nonlinear.compile("frontend_nonlinear", diagnostic);
@@ -177,11 +184,11 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
         CompileOptions strict_nonlinear;
         const auto strict_result = nonlinear.compile("frontend_nonlinear", strict_nonlinear);
         require(strict_result.instruction_verified(), "strict nonlinear graph verification failed");
-        CompileOptions legacy = diagnostic;
-        legacy.instruction_ntt_contract = hpu::model::InstructionNttContract::legacy_raw_stage;
-        const auto raw = nonlinear.compile("frontend_nonlinear", legacy);
-        require(!raw.instruction_verified(), "legacy raw replay silently adopted new natural boundaries");
-        require(raw.package().oracle_report_json.find("\"ntt_contract\":\"legacy_raw_stage\"")
+        CompileOptions natural = diagnostic;
+        natural.instruction_ntt_contract = hpu::model::InstructionNttContract::natural_coefficient_boundaries;
+        const auto raw = nonlinear.compile("frontend_nonlinear", natural);
+        require(!raw.instruction_verified(), "natural replay silently accepted explicit BR coefficient boundaries");
+        require(raw.package().oracle_report_json.find("\"ntt_contract\":\"natural_coefficient_boundaries\"")
                     != std::string::npos
                 && raw.package().oracle_report_json.find("\"hardware_contract_verified\":false")
                     != std::string::npos,
@@ -201,10 +208,14 @@ void test_scheme(seal::scheme_type scheme, const char* package_directory = nullp
     const auto input = pointwise.import_ciphertext("input/p", saved_input);
     Ciphertext sum;
     pointwise_evaluator.add(input, input, sum);
-    pointwise.mark_output("sum", sum);
+    // With no marks, export the last computation even if another input was
+    // imported later. A read-only input is never an implicit output root.
+    pointwise.import_ciphertext("input/late", saved_input);
     CompileOptions strict; strict.require_instruction_verification = true;
     const auto checked = pointwise.compile("frontend_strict", strict);
     require(checked.instruction_verified(), "encoded pointwise oracle comparison was not verified");
+    require(checked.package().outputs.size() == sum.size() * context->get_context_data(sum.parms_id())->parms().coeff_modulus().size(),
+        "implicit output did not select the last computation");
 }
 } // namespace
 

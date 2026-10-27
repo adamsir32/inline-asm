@@ -10,6 +10,7 @@
 namespace hpu {
 
 inline constexpr std::uint32_t kSmallBankLineCount = 32;
+inline constexpr std::uint32_t kDefaultModTableLineCount = 4;
 
 struct DmaRelocation {
     std::size_t instruction_index = 0;
@@ -18,6 +19,7 @@ struct DmaRelocation {
     std::uint8_t object_id = 0;
     std::uint8_t type_or_release = 0;
     std::uint8_t flag = 0;
+    std::uint8_t cp = 0;
 };
 
 // Resolved CPU-side DMA operands, in instruction order. Wider fields allow the
@@ -42,7 +44,8 @@ std::string render_executable_header(
 std::string render_executable_source(
     const std::string& stem,
     const std::vector<EncodedInstruction>& encoded,
-    std::uint64_t hpu_mem_line_count);
+    std::uint64_t hpu_mem_line_count,
+    std::uint32_t mod_table_lines = kDefaultModTableLineCount);
 // Keeps the dynamic-spans entry unchanged and adds a fixed hpu_run_* entry.
 // Validate fixed spans before emission; only length changes write CPU x11.
 std::string render_fixed_executable_source(
@@ -50,7 +53,8 @@ std::string render_fixed_executable_source(
     const std::vector<EncodedInstruction>& encoded,
     std::uint64_t hpu_mem_line_count,
     const std::vector<ExecutableDmaSpan>& spans,
-    ExecutableTwiddleFormat twiddle_format = ExecutableTwiddleFormat::online_k8);
+    ExecutableTwiddleFormat twiddle_format = ExecutableTwiddleFormat::online_k8,
+    std::uint32_t mod_table_lines = kDefaultModTableLineCount);
 std::string render_dma_manifest(
     const std::vector<EncodedInstruction>& encoded);
 

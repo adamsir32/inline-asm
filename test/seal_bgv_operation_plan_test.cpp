@@ -93,7 +93,19 @@ int main()
         std::vector<seal::Ciphertext> snapshots{ha, hb, hs, ht, hp, hd, hu};
         auto request = hpu::seal_adapter::make_bgv_application_package(
             "bgv_graph", context, plan, application, snapshots, executor.memory().words());
-        require(request.outputs.size() == 43, "BGV graph lost a three-component or branch golden");
+        require(request.outputs.size() == hd.size() * hd.coeff_modulus_size(),
+                "BGV default delivery exported unselected intermediate or branch goldens");
+        require(request.operation_graph_json.find("\"exported\":false") != std::string::npos,
+                "BGV graph metadata omitted internal logical nodes");
+        const auto multi_output = hpu::seal_adapter::make_bgv_application_package(
+            "bgv_graph_multi", context, plan, application, snapshots, executor.memory().words(),
+            {plan.allocation_prefix(tensor), plan.allocation_prefix(switched)});
+        require(multi_output.outputs.size() == ht.size() * ht.coeff_modulus_size()
+                    + hd.size() * hd.coeff_modulus_size(),
+                "BGV explicit output selection lost a three-component or lower-level result");
+        rejects([&] { hpu::seal_adapter::make_bgv_application_package(
+            "missing_output", context, plan, application, snapshots, executor.memory().words(),
+            {"not/produced"}); });
         auto wrong = snapshots; wrong[2].correction_factor() = 2;
         rejects([&] { hpu::seal_adapter::make_bgv_application_package(
             "wrong", context, plan, application, wrong, executor.memory().words()); });

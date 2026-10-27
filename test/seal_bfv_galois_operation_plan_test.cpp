@@ -76,10 +76,11 @@ void require_automorphism(const hpu::seal_adapter::PreparedBfvRnsObject& input,
             const auto source = executor.memory().read(input.components[component].limbs[basis],
                                                        degree);
             const auto expected = hpu::model::automorphism_coefficients(
-                source, element, level.q_moduli[basis]);
+                hpu::model::bit_reverse_coefficients(source), element, level.q_moduli[basis]);
             const auto actual = executor.memory().read(
                 workspace.components[component].limbs[basis], degree);
-            require(actual == expected, "BFV rotation workspace differs from automorphism");
+            require(actual == hpu::model::bit_reverse_coefficients(expected),
+                    "BFV rotation workspace differs from bit-reversed coefficient automorphism");
         }
     }
 }
@@ -203,7 +204,7 @@ int main()
                     count_token(lowered.body_asm,
                                 hpu::dload(4, hpu::DataType::mod_ctx,
                                            hpu::DloadFlag::small_bank)) == 1 &&
-                    count_token(lowered.body_asm, hpu::pfree(4)) == 1,
+                    count_token(lowered.body_asm, hpu::pfree(4)) == 0,
                 "BFV rotation lowering selected the wrong kernel or modulus-table lifetime");
 
         const auto relocation = hpu::seal_adapter::build_bfv_relocation_schedule(

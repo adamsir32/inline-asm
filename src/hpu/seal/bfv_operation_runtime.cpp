@@ -34,10 +34,10 @@ const char* direction_name(BfvDmaDirection direction)
 void validate_encoded_binding(const hpu::DmaRelocation& encoded, const BfvDmaBinding& binding)
 {
     const bool load = encoded.direction == hpu::Mnemonic::kDload;
-    if (encoded.dma_index != binding.program_dma_index ||
+    if (encoded.cp != binding.cp || encoded.dma_index != binding.program_dma_index ||
         encoded.object_id != binding.object_slot ||
         load != (binding.direction == BfvDmaDirection::load) ||
-        (load && (encoded.type_or_release != static_cast<std::uint8_t>(binding.load_type) ||
+        (load && (encoded.type_or_release != hpu::dma_mod_bit(binding.load_type) ||
                   encoded.flag != static_cast<std::uint8_t>(binding.load_flag))) ||
         (!load && encoded.type_or_release != binding.store_release)) {
         throw std::invalid_argument(
@@ -51,7 +51,7 @@ std::string render_resolved_manifest(const BfvRuntimeProgram& program)
     std::ostringstream output;
     output << "instruction_index,dma_index,operation_index,operation_id,"
               "operation_dma_index,direction,object_slot,type_or_release,flag,"
-              "allocation_id,line_offset,line_count,word_hex,normalized_asm\n";
+              "allocation_id,line_offset,line_count,word_hex,normalized_asm,cp\n";
     for (const auto& dma : program.dma) {
         const auto& binding = dma.binding;
         const auto& instruction = program.instructions[dma.instruction_index];
@@ -61,14 +61,14 @@ std::string render_resolved_manifest(const BfvRuntimeProgram& program)
         }
         output << ',' << csv_field(binding.operation_id) << ',' << binding.operation_dma_index
                << ',' << direction_name(binding.direction) << ',' << binding.object_slot << ','
-               << (binding.direction == BfvDmaDirection::load ? static_cast<int>(binding.load_type)
+               << (binding.direction == BfvDmaDirection::load ? hpu::dma_mod_bit(binding.load_type)
                                                               : binding.store_release)
                << ','
                << (binding.direction == BfvDmaDirection::load ? static_cast<int>(binding.load_flag)
                                                               : 0)
                << ',' << csv_field(binding.allocation_id) << ',' << binding.span.line_offset << ','
                << binding.span.line_count << ',' << hpu::format_word_hex(instruction.word) << ','
-               << csv_field(instruction.normalized_asm) << '\n';
+               << csv_field(instruction.normalized_asm) << ',' << unsigned(binding.cp) << '\n';
     }
     return output.str();
 }

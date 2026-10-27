@@ -95,7 +95,7 @@ public:
         const PreparedRnsObject& coefficient_workspace,
         const PreparedRnsObject& output);
 
-    // The coefficient object uses normal logical coefficient order. Twiddle
+    // The coefficient object uses bit-reversed physical positions. Twiddle
     // payloads are read from HPU_MEM and consumed in hardware stage order.
     void forward_ntt(
         const PreparedRnsObject& coefficient,
@@ -106,6 +106,8 @@ public:
         const PreparedRnsObject& coefficient,
         const std::vector<PreparedCanonicalTwiddles>& tables);
 
+    // Coefficient exports decode to natural SEAL positions; memory() exposes
+    // the actual bit-reversed internal coefficient representation.
     HpuRnsPolynomial export_component(
         const PreparedRnsObject& object,
         std::size_t component) const;

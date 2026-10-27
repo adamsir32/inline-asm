@@ -22,16 +22,6 @@ std::uint32_t narrow(std::uint64_t value, const char* role)
     return static_cast<std::uint32_t>(value);
 }
 
-std::size_t bit_reverse(std::size_t value, std::size_t degree)
-{
-    std::size_t result = 0;
-    for (std::size_t width = degree; width > 1; width >>= 1U) {
-        result = (result << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return result;
-}
-
 std::uint32_t multiply_mod(
     std::uint32_t left,
     std::uint32_t right,
@@ -126,11 +116,8 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
         const std::string prefix = "constants/twiddle/canonical/mod"
             + std::to_string(basis);
 
-        std::vector<std::uint32_t> pre_twist(degree);
-        for (std::size_t position = 0; position < degree; ++position) {
-            pre_twist[position] = hpu::model::pow_mod(
-                psi, position, prepared.modulus);
-        }
+        const auto pre_twist = hpu::model::pack_bit_reversed_online_pmul_parameters(
+            1, psi, prepared.modulus, degree);
         prepared.pre_twist = image_.add(
             prefix + "/ntt/pre_twist", pre_twist,
             hpu::runtime::AllocationKind::twiddle, true).span;
@@ -152,19 +139,11 @@ CkksApplicationImageBuilder::add_canonical_twiddles()
                 hpu::model::pack_stage_twiddles(inverse.stages[stage], prepared.modulus, degree),
                 hpu::runtime::AllocationKind::twiddle, true).span);
         }
-        std::vector<std::uint32_t> post(degree);
-        const std::uint32_t inverse_psi = hpu::model::inverse_mod_prime(
-            psi, prepared.modulus);
-        for (std::size_t position = 0; position < degree; ++position) {
-            const std::uint32_t untwist = hpu::model::pow_mod(
-                inverse_psi, position, prepared.modulus);
-            // The last inverse stage exposes natural coefficients. Move the
-            // raw stage's lazy-scale factor to that same position before the
-            // explicit post-untwist PMUL consumes this table.
-            post[position] = multiply_mod(
-                inverse.post_scale[bit_reverse(position, degree)],
-                untwist, prepared.modulus);
-        }
+        const auto post = hpu::model::pack_online_pmul_factors(
+            hpu::model::inverse_post_factors(
+                inverse, hpu::model::inverse_mod_prime(psi, prepared.modulus),
+                prepared.modulus),
+            prepared.modulus);
         prepared.post_untwist_scale = image_.add(
             prefix + "/intt/post_untwist_scale", post,
             hpu::runtime::AllocationKind::twiddle, true).span;
@@ -663,16 +642,10 @@ CkksApplicationImageBuilder::add_fused_automorphism_twiddles(
                     tables[basis].post_untwist_scale.size()),
                 hpu::runtime::AllocationKind::twiddle, true).span);
         }
-        // The mathematical table generator supplies the raw-stage factor.
-        // The application image ABI places post factors after the inverse
-        // boundary permutation, in natural coefficient order.
-        auto post = tables[basis].post_untwist_scale;
-        for (std::size_t position = 0; position < post.size(); ++position) {
-            const auto reversed = bit_reverse(position, post.size());
-            if (position < reversed) {
-                std::swap(post[position], post[reversed]);
-            }
-        }
+        // Preserve the generator's complete lazy-scale and untwist factor
+        // in the raw inverse transform's bit-reversed coefficient positions.
+        const auto post = hpu::model::pack_online_pmul_factors(
+            tables[basis].post_untwist_scale, prepared.modulus);
         prepared.post_untwist_scale = image_.add(
             prefix + "/post_untwist_scale",
             post,

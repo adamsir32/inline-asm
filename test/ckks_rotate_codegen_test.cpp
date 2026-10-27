@@ -59,15 +59,14 @@ int main()
                     4, hpu::DataType::mod_ctx,
                     hpu::DloadFlag::small_bank)) == 1,
                 "Rotate must load the modulus table once");
-        require(count(program, hpu::pfree(4)) == 1,
-                "Rotate must release the modulus table once");
+        require(count(program, hpu::pfree(4)) == 0,
+                "native Rotate must delegate modulus-table release to the compiler");
         require(count(program, hpu::psync()) == 1,
                 "Rotate must have one terminal psync");
         require(program.rfind(hpu::psync()) + hpu::psync().size() == program.size(),
                 "Rotate psync is not terminal");
-        require(program.rfind("\"dstore ") < program.rfind(hpu::pfree(4))
-                    && program.rfind(hpu::pfree(4)) < program.rfind(hpu::psync()),
-                "Rotate must dstore final outputs before release and psync");
+        require(program.rfind("\"dstore ") < program.rfind(hpu::psync()),
+                "Rotate must declare final outputs before psync");
 
         // Fused INTT: 2Q. KeySwitch: dnum*(Q+P) NTT and 2*(Q+P)
         // INTT. The only final transforms are the two canonical Q outputs.

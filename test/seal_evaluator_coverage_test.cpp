@@ -69,7 +69,7 @@ void check_compilations(front::ApplicationBuilder& application,
     for (std::size_t i = 0; i < a.size(); ++i)
         require(a[i].object_id == b[i].object_id && a[i].component == b[i].component &&
             a[i].modulus_id == b[i].modulus_id && a[i].golden_words == b[i].golden_words,
-            "optimization changed a pinned node result");
+            "optimization changed an exported result");
     require(baseline.oracle_result(output).parms_id() == output.parms_id(),
         "compiled output oracle has wrong level");
     require(optimized.package().initial_image->used_lines() <= baseline.package().initial_image->used_lines(),
@@ -84,7 +84,8 @@ void check_compilations(front::ApplicationBuilder& application,
             require(digit != std::string::npos, "prepared evaluation key lacks digit identity");
             keys.insert(allocation.id.substr(0, digit));
         }
-        require(keys.size() == 6, "frontend duplicated or omitted per-level key resources");
+        require(keys.size() >= 5 && keys.size() <= 6,
+            "frontend duplicated or omitted reachable per-level key resources");
     }
     if (emit_directory) baseline.write(*emit_directory);
 }

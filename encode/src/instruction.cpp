@@ -76,6 +76,8 @@ std::string to_string(const Instruction& instruction) {
                 oss << instruction.imm8;
             } else {
                 oss << format_pobj(instruction.psrc2);
+                if (instruction.mode != 0)
+                    oss << ", " << static_cast<int>(instruction.mode);
             }
             break;
 
@@ -102,7 +104,8 @@ std::string to_string(const Instruction& instruction) {
             oss << ' ' << format_xreg(instruction.rs1)
                 << ", " << format_xreg(instruction.rs2)
                 << ", " << format_pobj(instruction.obj_id)
-                << ", " << static_cast<int>(instruction.type);
+                << ", " << static_cast<int>(instruction.type)
+                << ", " << static_cast<int>(instruction.cp);
             if (instruction.mnemonic == Mnemonic::kDload) {
                 oss << ", " << static_cast<int>(instruction.dma_flag);
             }

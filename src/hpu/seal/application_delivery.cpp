@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <locale>
 #include <sstream>
+#include <set>
 #include <stdexcept>
 
 #ifndef HPU_DELIVERY_REVISION
@@ -88,14 +89,18 @@ ApplicationPackageRequest base_request(
         if (i) out << ',';
         out << key->parms().coeff_modulus()[i].value();
     }
-    out << "],\"ntt_table_abi\":{\"version\":2,"
-           "\"coefficient_order\":\"natural\","
-           "\"pre_twist_order\":\"natural\","
-           "\"post_factor_order\":\"natural\","
+    out << "],\"ntt_table_abi\":{\"version\":4,"
+           "\"coefficient_order\":\"bit_reversed\","
+           "\"external_coefficient_order\":\"natural\","
+           "\"pre_twist_order\":\"bit_reversed\","
+           "\"post_factor_order\":\"bit_reversed\","
            "\"stage_twiddle_order\":\"reference_loader_batch_lane\","
            "\"stage_twiddle_format\":" << quoted(hpu::model::kStageTwiddleParameterFormat)
         << ",\"twiddle_chains\":" << hpu::model::kTwiddleChains
         << ",\"stage_parameter_lines\":" << hpu::model::kStageTwiddleParameterLines << ',' <<
+           "\"online_pmul_format\":" << quoted(hpu::model::kOnlinePmulParameterFormat)
+        << ",\"online_pmul_parameter_lines\":" << hpu::model::kOnlinePmulParameterLines
+        << ",\"online_pmul_mode\":1,\"online_pmul_parameter_bank_mask\":32," <<
            "\"canonical_ntt_layout\":\"reference_forward_layout\","
            "\"normalization\":\"explicit_post_pmul\","
            "\"twist_fused\":false},\"levels\":[";
@@ -120,7 +125,7 @@ void append_outputs(ApplicationPackageRequest& request,
                     const ::seal::SEALContext& context,
                     const std::string& allocation_prefix, std::size_t step_index,
                     const ::seal::Ciphertext& oracle,
-                    const std::vector<std::uint32_t>* model)
+                    const std::vector<std::uint32_t>* model, bool exported)
 {
     if (oracle.size() == 0 || !::seal::is_valid_for(oracle, context))
         throw std::invalid_argument("delivery oracle ciphertext is invalid");
@@ -148,13 +153,14 @@ void append_outputs(ApplicationPackageRequest& request,
                                                  " word " + std::to_string(i));
                 }
             }
+            if (!exported) continue;
             hpu::delivery::VerifiedOutputLimb output;
             output.object_id = "step_" + std::to_string(step_index);
             output.component = component;
             output.modulus_id = mod_id;
             output.modulus = words.moduli[limb];
             output.domain = request.scheme == SchemeKind::bfv
-                ? hpu::delivery::OutputDomain::coefficient
+                ? hpu::delivery::OutputDomain::coefficient_bit_reversed
                 : hpu::delivery::OutputDomain::canonical_ntt_physical;
             output.destination = allocation.span;
             output.word_count = words.degree;
@@ -207,12 +213,13 @@ const char* name(BgvPlainOperationKind kind)
 }
 
 void output_metadata(std::ostringstream& graph, const std::string& id,
-                     const ::seal::Ciphertext& oracle, std::size_t index)
+                     const ::seal::Ciphertext& oracle, std::size_t index, bool exported)
 {
     graph << ",\"operation_index\":" << index
           << ",\"output\":" << quoted(id)
-          << ",\"golden_object_id\":\"step_" << index << '"'
-          << ",\"parms_id\":" << parms_id_json(oracle.parms_id())
+          << ",\"exported\":" << (exported ? "true" : "false");
+    if (exported) graph << ",\"golden_object_id\":\"step_" << index << '"';
+    graph << ",\"parms_id\":" << parms_id_json(oracle.parms_id())
           << ",\"component_count\":" << oracle.size()
           << ",\"scale\":" << oracle.scale()
           << ",\"correction_factor\":" << oracle.correction_factor();
@@ -257,10 +264,14 @@ ApplicationPackageRequest make_planned(
     const Lowered& lowered, const Runtime& runtime, const Artifacts& artifacts,
     const hpu::runtime::HpuMemImage& image,
     const std::vector<::seal::Ciphertext>& oracles,
-    const std::vector<std::uint32_t>& executed)
+    const std::vector<std::uint32_t>& executed,
+    const std::vector<std::string>& exported_output_prefixes)
 {
     if (lowered.operations.empty() || oracles.size() != lowered.operations.size())
         throw std::invalid_argument("delivery requires one SEAL oracle snapshot per operation");
+    std::set<std::string> selected(exported_output_prefixes.begin(), exported_output_prefixes.end());
+    if (selected.empty()) selected.insert(lowered.operations.back().operation.output.id);
+    auto unmatched = selected;
     auto request = base_request(stem, context, scheme, image);
     request.program = {stem, lowered.body_asm, runtime.instructions, artifacts.header,
                        artifacts.source, artifacts.resolved_dma_manifest, runtime.spans()};
@@ -269,6 +280,32 @@ ApplicationPackageRequest make_planned(
         const auto& binding = entry.binding;
         request.program.resource_dma.push_back({entry.instruction_index, binding.allocation_id,
             binding.span, binding.operation_index, binding.operation_id, binding.operation_dma_index});
+    }
+    // BFV plaintext kind alone cannot distinguish Add/Sub's BR coefficients
+    // from MultiplyPlain's canonical NTT lift. Preserve the planned type on
+    // immutable input ports before read reuse is considered.
+    if (scheme == SchemeKind::bfv && request.program.operator_program) {
+        auto typed = std::make_shared<hpu::resource::OperatorProgram>(
+            *request.program.operator_program);
+        typed->bind_ports(request.program.resource_dma);
+        for (const auto& operation : lowered.operations) {
+            for (const auto& input : operation.operation.inputs) {
+                const auto prefix = input.id + "/c0/mod";
+                for (auto& port : typed->ports) {
+                    const auto& allocation = image.allocation(port.binding->allocation_id);
+                    if (port.load && allocation.read_only
+                        && allocation.kind == hpu::runtime::AllocationKind::plaintext
+                        && allocation.id.rfind(prefix, 0) == 0
+                        && allocation.id.size() > prefix.size()
+                        && allocation.id.find_first_not_of("0123456789", prefix.size()) == std::string::npos) {
+                        port.layout = input.domain == hpu::runtime::PolynomialDomain::coefficient
+                            ? hpu::compiler::MemoryLayout::coefficient_bit_reversed
+                            : hpu::compiler::MemoryLayout::canonical_ntt_physical;
+                    }
+                }
+            }
+        }
+        request.program.operator_program = std::move(typed);
     }
     auto graph = stream();
     graph << "{\"operations\":[";
@@ -283,7 +320,9 @@ ApplicationPackageRequest make_planned(
                 : hpu::runtime::PolynomialDomain::canonical_ntt_physical))
             throw std::invalid_argument("delivery oracle metadata differs from planned output: " + value.id);
         check_scale(value, oracle);
-        append_outputs(request, context, value.id, i, oracle, &executed);
+        const bool exported = selected.count(value.id) != 0;
+        unmatched.erase(value.id);
+        append_outputs(request, context, value.id, i, oracle, &executed, exported);
         if (i) graph << ',';
         graph << "{\"id\":" << quoted(step.id) << ",\"kind\":" << quoted(name(step.kind))
               << ",\"inputs\":[";
@@ -297,10 +336,13 @@ ApplicationPackageRequest make_planned(
             graph << quoted(step.workspaces[j].id);
         }
         graph << ']';
-        output_metadata(graph, value.id, oracle, i);
+        output_metadata(graph, value.id, oracle, i, exported);
         graph << '}';
     }
-    graph << "],\"final_output\":" << quoted(lowered.operations.back().operation.output.id) << "}\n";
+    if (!unmatched.empty())
+        throw std::invalid_argument("delivery selected output is not produced by the plan: " + *unmatched.begin());
+    graph << "],\"final_output\":" << quoted(exported_output_prefixes.empty()
+        ? lowered.operations.back().operation.output.id : exported_output_prefixes.back()) << "}\n";
     request.operation_graph_json = graph.str();
     report(request, scheme == SchemeKind::ckks ? "CkksSoftwareExecutor" : "BfvSoftwareExecutor");
     hpu::delivery::validate_application_package_request(request);
@@ -313,10 +355,11 @@ hpu::delivery::ApplicationPackageRequest make_ckks_application_package(
     const CkksLoweredProgram& lowered, const CkksRuntimeProgram& runtime,
     const CkksRuntimeArtifacts& artifacts, const hpu::runtime::HpuMemImage& image,
     const std::vector<::seal::Ciphertext>& oracles,
-    const std::vector<std::uint32_t>& executed)
+    const std::vector<std::uint32_t>& executed,
+    const std::vector<std::string>& exported_output_prefixes)
 {
     return make_planned(stem, context, SchemeKind::ckks, lowered, runtime, artifacts,
-                        image, oracles, executed);
+                        image, oracles, executed, exported_output_prefixes);
 }
 
 hpu::delivery::ApplicationPackageRequest make_bfv_application_package(
@@ -324,17 +367,19 @@ hpu::delivery::ApplicationPackageRequest make_bfv_application_package(
     const BfvLoweredProgram& lowered, const BfvRuntimeProgram& runtime,
     const BfvRuntimeArtifacts& artifacts, const hpu::runtime::HpuMemImage& image,
     const std::vector<::seal::Ciphertext>& oracles,
-    const std::vector<std::uint32_t>& executed)
+    const std::vector<std::uint32_t>& executed,
+    const std::vector<std::string>& exported_output_prefixes)
 {
     return make_planned(stem, context, SchemeKind::bfv, lowered, runtime, artifacts,
-                        image, oracles, executed);
+                        image, oracles, executed, exported_output_prefixes);
 }
 
 hpu::delivery::ApplicationPackageRequest make_bgv_application_package(
     const std::string& stem, const ::seal::SEALContext& context,
     const BgvLinearOperationPlan& plan, const BgvKeySwitchApplication& application,
     const std::vector<::seal::Ciphertext>& oracles,
-    const std::vector<std::uint32_t>& executed)
+    const std::vector<std::uint32_t>& executed,
+    const std::vector<std::string>& exported_output_prefixes)
 {
     if (oracles.empty() || oracles.size() != plan.steps().size())
         throw std::invalid_argument("BGV delivery requires one SEAL oracle snapshot per operation");
@@ -342,6 +387,9 @@ hpu::delivery::ApplicationPackageRequest make_bgv_application_package(
     if (application.parms_id != final_output.parms_id ||
         application.correction_factor != final_output.correction_factor)
         throw std::invalid_argument("BGV delivery oracle metadata differs from application");
+    std::set<std::string> selected(exported_output_prefixes.begin(), exported_output_prefixes.end());
+    if (selected.empty()) selected.insert(plan.allocation_prefix(final_output));
+    auto unmatched = selected;
     auto request = base_request(stem, context, SchemeKind::bgv, application.image);
     const auto artifacts = render_bgv_keyswitch_runtime_artifacts(stem, application);
     auto& program = request.program;
@@ -366,9 +414,11 @@ hpu::delivery::ApplicationPackageRequest make_bgv_application_package(
             oracle.correction_factor() != step.output.correction_factor ||
             oracle.size() != step.output.component_count || !oracle.is_ntt_form())
             throw std::invalid_argument("BGV delivery oracle metadata differs from planned output: " + step.id);
+        const bool exported = selected.count(prefix) != 0;
+        unmatched.erase(prefix);
         append_outputs(
             request, context, prefix, i, oracles[i],
-            &executed);
+            &executed, exported);
         if (i) graph << ',';
         graph << "{\"id\":" << quoted(step.id) << ",\"kind\":" << quoted(name(step.kind))
               << ",\"inputs\":[";
@@ -381,10 +431,13 @@ hpu::delivery::ApplicationPackageRequest make_bgv_application_package(
             step.kind == BgvPlainOperationKind::multiply)
             graph << ',' << quoted("steps/" + step.id + "/plain");
         graph << "],\"rotation_steps\":" << step.rotation_steps;
-        output_metadata(graph, prefix, oracles[i], i);
+        output_metadata(graph, prefix, oracles[i], i, exported);
         graph << '}';
     }
-    graph << "],\"final_output\":\"output\"}\n";
+    if (!unmatched.empty())
+        throw std::invalid_argument("BGV delivery selected output is not produced by the plan: " + *unmatched.begin());
+    graph << "],\"final_output\":" << quoted(exported_output_prefixes.empty()
+        ? plan.allocation_prefix(final_output) : exported_output_prefixes.back()) << "}\n";
     request.operation_graph_json = graph.str();
     report(request, "BgvSoftwareExecutor");
     hpu::delivery::validate_application_package_request(request);

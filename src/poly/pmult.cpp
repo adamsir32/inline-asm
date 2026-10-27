@@ -26,28 +26,23 @@ std::string generate_hpu_pmult_body_asm(
 
     if (manage_modulus_table) {
         asm_code << hpu::resource::read(POBJ_MOD_CTX, hpu::DataType::mod_ctx,
-                               hpu::DloadFlag::small_bank);
+                               "constants/modulus_table", hpu::DloadFlag::small_bank);
     }
     for (int i = 0; i < num_q; ++i) {
+        const auto prefix = "pointwise/mod" + std::to_string(i) + "/";
         asm_code << "        /* q_" << i << " */\n";
         asm_code << hpu::resource::select_modulus(i);
 
-        asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly);
-        asm_code << hpu::resource::read(POBJ_PT, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly, prefix + "left/c0");
+        asm_code << hpu::resource::read(POBJ_PT, hpu::DataType::poly, prefix + "plaintext");
         asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_CT, POBJ_PT);
-        asm_code << hpu::resource::discard(POBJ_CT);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1);
+        asm_code << hpu::resource::output(POBJ_OUT, prefix + "output/c0");
 
-        asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly);
+        asm_code << hpu::resource::read(POBJ_CT, hpu::DataType::poly, prefix + "left/c1");
         asm_code << generate_hpu_mm_body_asm(POBJ_OUT, POBJ_CT, POBJ_PT);
-        asm_code << hpu::resource::discard(POBJ_CT);
-        asm_code << hpu::resource::discard(POBJ_PT);
-        asm_code << hpu::resource::publish(POBJ_OUT, 1);
+        asm_code << hpu::resource::output(POBJ_OUT, prefix + "output/c1");
     }
 
-    if (manage_modulus_table) {
-        asm_code << hpu::resource::discard(POBJ_MOD_CTX);
-    }
 
     if (append_psync) {
         asm_code << hpu::resource::finish_program();

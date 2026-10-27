@@ -1,5 +1,6 @@
 # 编译器适配说明：stage 内在线 twiddle（K=8）
 
+> 历史说明：本文记录迁移时的旧 ISA。当前对象号、编码、DLOAD MOD/CP/mask 与 DSTORE REL/CP 行为以 [64 对象 v1.2 手册](../reference/HPU_PROGRAMMING_MANUAL.md) 为准；旧机器码不能直接复用。K=8 参数数学布局继续适用。
 日期：2026-10-21。交付对象：编译器的常量生成、HPU lowering、对象管理、数据镜像和 DMA relocation 维护者。
 
 ## 1. 需要完成的修改

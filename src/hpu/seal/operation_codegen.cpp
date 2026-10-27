@@ -406,6 +406,7 @@ CkksLoweredProgram lower_ckks_operation_plan(
         result.body_asm += hpu::resource::read(
             kModulusTableObject,
             hpu::DataType::mod_ctx,
+            "constants/modulus_table",
             hpu::DloadFlag::small_bank);
     }
     for (const auto& step : plan.steps()) {
@@ -419,9 +420,6 @@ CkksLoweredProgram lower_ckks_operation_plan(
         recording.append(*lowered.operator_program);
         result.body_asm += lowered.body_asm;
         result.operations.push_back(std::move(lowered));
-    }
-    if (manage_modulus_table) {
-        result.body_asm += hpu::resource::discard(kModulusTableObject);
     }
     if (append_psync) {
         result.body_asm += hpu::resource::finish_program();

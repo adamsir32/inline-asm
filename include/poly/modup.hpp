@@ -8,7 +8,8 @@ std::string generate_hpu_modup_contexts_body_asm(
     const std::vector<int>& p_contexts,
     const std::vector<int>& source_contexts,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "modup");
 
 // Extend Q[q_offset:q_offset + num_q_digit) to the complete Q union P basis.
 // Source digit limbs are retained verbatim; all other Q and P limbs are
@@ -19,7 +20,8 @@ std::string generate_hpu_modup_body_asm(
     int num_q_digit,
     int q_offset,
     bool append_psync = false,
-    bool manage_modulus_table = true);
+    bool manage_modulus_table = true,
+    const std::string& port_prefix = "modup");
 
 std::string generate_hpu_modup_asm(
     int num_q,

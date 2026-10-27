@@ -28,6 +28,14 @@ def main():
         descriptor = json.loads((package / "package.json").read_text())
         assert descriptor["scheme"] == scheme
         assert descriptor["schema_version"] == 1
+        abi = json.loads((package / "memory/abi.json").read_text())
+        assert abi["instruction_isa"] == "hpu-objects64-v1.2"
+        assert abi["object_slots"] == 64 and abi["mod_table_lines"] == 4
+        assert abi["allocation_granule_lines"] == 128
+        assert abi["stage_parameter_mod"] == 0 and abi["stage_parameter_bank_mask"] == 32
+        assert abi["dload_mask_scope"] == "load_only" and abi["dstore_rel0_retains"] is True
+        assert abi["default_cp"] == 0
+        assert abi["dma_cache_policy"] == "twiddle_loads_only"
         parameters = json.loads((package / descriptor["parameters"]).read_text())
         assert parameters["scheme"] == scheme
         assert parameters["poly_modulus_degree"] > 0
@@ -55,7 +63,7 @@ def main():
         }[scheme]
         assert report["compiler_resources"]["ir_source"] == "operator"
         assert report["compiler_resources"]["peak_regular_banks"] <= 5
-        assert report["compiler_resources"]["peak_object_slots"] <= 8
+        assert report["compiler_resources"]["peak_object_slots"] <= 64
         assert report["host_instruction_model_verified"] is True
         assert report["optimization_equivalence_verified"] is True
         assert report["host_instruction_model"]["required"] is True
@@ -66,10 +74,18 @@ def main():
         outputs = {(r["line_offset"], r["line_count"]) for r in memory if r["kind"] == "output"}
         assert outputs == {(r["line_offset"], r["line_count"]) for r in golden}
         assert report["verified_limb_count"] == len(golden)
-        assert {op["golden_object_id"] for op in graph["operations"]} == {r["object_id"] for r in golden}
+        exported = [op for op in graph["operations"] if op["exported"]]
+        assert exported
+        assert {op["golden_object_id"] for op in exported} == {r["object_id"] for r in golden}
+        assert all("golden_object_id" not in op for op in graph["operations"] if not op["exported"])
+        if graph.get("frontend") == "seal_evaluator":
+            assert {op["output"] for op in exported} == {
+                output["physical_output"] for output in graph["marked_outputs"]}
+        else:
+            assert len(exported) == 1 and exported[0]["output"] == graph["final_output"]
         image = (package / descriptor["image"]).read_bytes()
         for limb in golden:
-            assert limb["domain"] == ("coefficient" if scheme == "bfv" else "canonical_ntt_physical")
+            assert limb["domain"] == ("coefficient_bit_reversed" if scheme == "bfv" else "canonical_ntt_physical")
             begin = int(limb["line_offset"]) * 256
             length = int(limb["line_count"]) * 256
             assert not any(image[begin:begin + length]), "golden was preloaded into startup image"
@@ -79,7 +95,18 @@ def main():
         assert (package / descriptor["program_source"]).is_file()
         assert (package / descriptor["semantic_report"]).is_file()
         dma = rows(package / descriptor["dma_relocation_manifest"])
-        assert dma and len(dma[0]) == 14
+        assert dma and len(dma[0]) == 15
+        allocations = {entry["allocation_id"]: entry for entry in memory}
+        instruction_words = [int(line, 2) for line in
+                             (package / descriptor["program_inst32"]).read_text().splitlines()]
+        for binding in dma:
+            allocation = allocations[binding["allocation_id"]]
+            expected_cp = int(binding["direction"] == "dload" and
+                              allocation["kind"] == "twiddle")
+            assert int(binding["cp"]) == expected_cp, binding
+            word = instruction_words[int(binding["instruction_index"])]
+            assert ((word >> 13) & 1) == expected_cp, binding
+            assert ((int(binding["word_hex"], 16) >> 13) & 1) == expected_cp
         config = json.loads((package / descriptor["memory_config"]).read_text())
         assert config["capacity_lines"] == config["used_lines"]
         node_dma_counts = {}
@@ -92,7 +119,9 @@ def main():
             count = node_dma_counts.get(index, 0)
             assert int(binding["operation_dma_index"]) == count
             node_dma_counts[index] = count + 1
-        assert set(node_dma_counts) == set(range(len(graph["operations"])))
+        # Logical nodes remain visible when DCE or forwarding removes all of
+        # their DMA. Every emitted association must still name a valid node.
+        assert set(node_dma_counts) <= set(range(len(graph["operations"])))
         if example_args:
             assert parameters["poly_modulus_degree"] == int(example_args[example_args.index("--degree") + 1])
         if scheme == "bgv" and "plain_chain" in example:
