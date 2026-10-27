@@ -170,6 +170,16 @@ PIR 本轮审查未发现必须修复的 D 类核心语义错误，故保留应�
 字段、候选位置、接收方放置、幂次节点和多项式系数，结果通过。
 这不包含 FourQ OPRF，也不证明不同模数链下的密文表示相同。
 
+PIR 的独立参考副本使用 `test/pir_trident_native_main.py` 仅替换
+`pir_bfv/main.cpp` 的数据库输入及记录输出夹具；Trident `pir.cpp`、
+`pir_client.cpp`、`pir_server.cpp` 保持固定提交原件。
+在 65,536×288 B 的相同确定性数据库及索引 0、69、70、65534、65535 下，
+Trident 原生 `pir_bfv` 与 HPU 软件路径恢复的五条 288 字节记录均逐字节一致。
+各记录的 SHA-256 及运行日志列于验证报告。
+这将最终业务输出的证据等级提高到原生同输入实测；由于 Trident 默认关闭
+递归模数切换而 HPU 使用 31-bit Q/P 适配，中间密文层级及逐阶段明文语义仍是
+待验证项，不能把最终记录一致扩展成逐算子等价。
+
 `test/apsi_trident_counterexample_search.cpp` 使用 Kuku `LocFunc` 搜得一个
 位置 1410 的跨字段组合输入，固化于
 `test/fixtures/apsi_trident/cross_felt_native.input`。

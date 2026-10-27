@@ -213,4 +213,40 @@ PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一
 增加一个可执行目标和私有链接目录；第三方算法源码没有改动。
 `cross_felt_native.input` 的值来自固定 Kuku 2.1.0 的可重复搜索程序，
 证明 `trident` 的误匹配符合其逐 felt 独立根机制，不能归因于 HPU 计算错误。
-1M/1024 目标规模已在恢复后的构建重新启动，结果须等日志完成后再判定。
+1M/1024 目标规模已在恢复后的构建重新启动；完整结果见下表。
+
+| 目标规模实测（1,000,000 sender / 1,024 receiver） | 退出码 | 结果与证据 |
+| --- | ---: | --- |
+| `python3 test/apsi_concentrated_delivery_test.py --example ../build/hpu_bfv_apsi_concentrated_example --validator ../build/hpu_validate_package --output ../trident-target-delivery --profile target --scenario multi --match-mode trident` | 0 | 17/17 个包通过上游验证器；SEAL 逐节点、HPU 软件执行及最终交集、主机指令模型均 PASS。17 包、12593 节点、8742583 指令、3321031 DMA、最大包 5980417 HPU_MEM 行，最低输出噪声 3 bit；编译加软件验证 782.386 秒，整项墙钟 15:36.04，峰值 RSS 3810624 KiB。日志 `../trident-target-latest.log`、`../trident-target-latest.time`；真实 HPU/RTL 未运行。 |
+
+### PIR 同数据库原生对照
+
+隔离参考副本的 `pir_bfv/main.cpp` 由
+`test/pir_trident_native_main.py` 生成确定性输入/记录输出夹具，原件保存在
+`pir_bfv/main.cpp.unmodified`，完整差异保存在
+`trident-faithful-reference/trident-pir-main-only.patch`。
+未修改 `pir.cpp`、`pir_client.cpp` 或 `pir_server.cpp`。该夹具使用与 HPU 应用
+完全相同的 65,536×288 B 数据库字节生成公式及索引输入；Trident 保持原生
+Poseidon 模数参数和默认关闭递归模数切换，HPU 保持 31-bit Q/P 适配。
+
+固定 Trident 原生程序对五个索引均退出码 0，报告恢复正确；原生日志分别为
+`trident-faithful-reference/trident-pir-same-input-65535.log` 和
+`trident-alignment-20261026/trident-pir-other-records/native_{0,69,70,65534}.log`。
+HPU 三次直接运行分别查询 `0`（附加检查 `69`）、`70`、`65534`
+（附加检查 `65535`），均退出码 0、SEAL oracle 与 HPU 软件执行 PASS，
+日志 `trident-pir-other-records/hpu_{0,70,65534}.log`。
+附加检查的 69 和 65535 输出来自实际 HPU 计算，不是 CPU 数据库拷贝。
+另对索引 65535 单独运行
+`sealpir_2d_delivery_test.py --profile trident --record-index 65535`，退出码 0，
+两个应用包均被上游验证器接受，日志
+`trident-alignment-20261026/trident-pir-same-input-hpu-65535.log`。
+
+| 索引 | 原生与 HPU 288 字节输出 `cmp` 退出码 | 两者共同 SHA-256 |
+| ---: | ---: | --- |
+| 0 | 0 | `83af4fc22d0af683f404633fc20d262fc4c040efc7eab4e8cf54ba63e102fb93` |
+| 69 | 0 | `3796430a42605b34fb8fae2ee97f7cf003b68c1a7989d715276e1b00a1298c61` |
+| 70 | 0 | `0ff4fb6f0607f6d1dfd33d1648b3052ef199f3665cf1a774b945eb6f85be67e8` |
+| 65534 | 0 | `e5f164896a30d6e79c1a8ea9a21298453da871f6db964012230755ea8b1a5196` |
+| 65535 | 0 | `5a22fb801e8addf789d7a4009b6b2cf57d106994570b9060ef56da2d236d1a6d` |
+
+这证明相同业务输入的最终记录对齐，不证明不同模数链下中间密文表示相同。
