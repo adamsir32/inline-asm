@@ -191,3 +191,26 @@ PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一
 两模式应用包验证、PIR 同输入阶段差分、1M/1024 目标规模、
 `git diff --exit-code cfee951e4056660e521d55a3535d82335a49bb08 HEAD -- src include encode`
 以及最终提交 SHA。此处不把旧报告的测试记录算作新实测。
+
+### SSH 恢复后的新增实测
+
+服务器分支已快进到本地实现提交 `e15a66624aef81c6857086da82e1b2e93b56fe51`。
+快进前的两个服务器未提交文件另存为
+`trident-alignment-20261026/pre-sync-worktree.patch` 和 stash
+`pre-sync-trident-faithful-20261027`；新分支工作区干净。
+
+| 执行命令摘要 | 退出码 | 证据 |
+| --- | ---: | --- |
+| `cmake -S repo -B build -DCMAKE_PREFIX_PATH=.../reference-prefix`，随后构建 PSI 应用及 `hpu_validate_package` | 0 / 0 | `trident-faithful-configure-latest.log`、`trident-faithful-build-latest.log`。 |
+| `ctest -R 'hpu_bfv_apsi_(exact\|trident)_small\|hpu_bfv_apsi_trident_small_multi\|hpu_bfv_apsi_concentrated_small_'` | 0 | 10/10，含 exact 历史截断、跨字段、真实令牌反例及 trident 小型反例；`trident-faithful-small-ctest.log`。 |
+| `ctest -R 'hpu_bfv_apsi_exact_medium_'` | 0 | 3/3，含真实令牌、125/126 容量边界；`trident-faithful-exact-medium-ctest.log`。 |
+| `apsi_concentrated_delivery_test.py --profile small --match-mode trident ...` | 0 | 单包通过上游验证器；`trident-small-delivery.log`、`trident-small-delivery/pipeline_manifest.json`。 |
+| `apsi_concentrated_delivery_test.py --profile medium --match-mode trident ...` | 0 | 单包通过上游验证器；`trident-medium-delivery.log`、`trident-medium-delivery/pipeline_manifest.json`。 |
+| 固定 Trident APSI `bits_to_field_elts`、`polyn_with_roots`、`PowersDag` 与原生 Kuku 向量驱动，及 `apsi_trident_native_differential.py` 同输入运行 | 0 / 0 | 字段、Kuku 候选位置及接收方放置、幂次 DAG 节点、根多项式系数逐项一致；`trident-faithful-reference/trident-native-vector.log`、`trident-alignment-20261026/trident-native-diff/{native,hpu}.log`。这属于真实原生函数向量对照，不是 Trident 完整协议运行。 |
+| 原生 Kuku 搜索驱动产生 `cross_felt_native.input`，同一输入分别运行 `--match-mode trident` 与 `exact` | 0 / 0 | Kuku 公共位置 1410；原始集合交集空，trident APSI 参考及解密恢复均为 `{3}`，exact 参考及恢复均为空；两者三层软件验证通过。日志 `trident-faithful-reference/trident-cross-felt-hpu.log`、`exact-cross-felt-hpu.log`。 |
+
+原生向量驱动只调用固定参考的算法函数，独立副本的 CMake
+增加一个可执行目标和私有链接目录；第三方算法源码没有改动。
+`cross_felt_native.input` 的值来自固定 Kuku 2.1.0 的可重复搜索程序，
+证明 `trident` 的误匹配符合其逐 felt 独立根机制，不能归因于 HPU 计算错误。
+1M/1024 目标规模已在恢复后的构建重新启动，结果须等日志完成后再判定。

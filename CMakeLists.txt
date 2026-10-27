@@ -784,6 +784,13 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             set_tests_properties(hpu_bfv_apsi_trident_small_${apsi_fixture}
                 PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 1800)
         endforeach()
+        add_test(NAME hpu_bfv_apsi_trident_native_cross_felt
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_trident_cross_felt_test.py
+                --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
+                --fixture ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_trident/cross_felt_native.input)
+        set_tests_properties(hpu_bfv_apsi_trident_native_cross_felt
+            PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 2400)
     endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application_n65536 hpu_bfv_multiply_modswitch_example 65536)

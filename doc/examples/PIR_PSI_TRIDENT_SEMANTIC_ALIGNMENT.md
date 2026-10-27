@@ -162,3 +162,17 @@ PIR 本轮审查未发现必须修复的 D 类核心语义错误，故保留应�
 `rotate_rows` 对 Galois 置换属 A 类等价表达；31-bit 模数链与显式递归
 切换属 B 类 HPU 适配；测试数据库生成方式属 C 类外围差异。
 不同模数链下逐阶段明文对照仍属 E 类，最终字节 Oracle 不证明中间密文一致。
+
+固定参考的实际函数对照已补上部分 E 类证据：
+`test/apsi_trident_native_vector.cpp` 调用 Trident 原生
+`bits_to_field_elts`、`polyn_with_roots`、`PowersDag::configure` 及 Kuku 2.1，
+`test/apsi_trident_native_differential.py` 在相同注入令牌上比较 HPU 应用的
+字段、候选位置、接收方放置、幂次节点和多项式系数，结果通过。
+这不包含 FourQ OPRF，也不证明不同模数链下的密文表示相同。
+
+`test/apsi_trident_counterexample_search.cpp` 使用 Kuku `LocFunc` 搜得一个
+位置 1410 的跨字段组合输入，固化于
+`test/fixtures/apsi_trident/cross_felt_native.input`。
+原始集合交集为空，`trident` 模式独立字段根模型与 HPU 解密结果均为 `{3}`；
+`exact` 模式结果为空。此误匹配来自 Trident APSI 的概率性多字段机制，
+而不是用 CPU 集合答案替换了 HPU 输出。
