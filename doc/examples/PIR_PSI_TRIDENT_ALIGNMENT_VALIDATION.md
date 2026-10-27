@@ -1,5 +1,9 @@
 # PIR/PSI 上游集成与计算语义验证（2026-10-26）
 
+前半部分记录 2026-10-26 第一阶段的当时状态；2026-10-27 的双模式与原生
+同输入实测见文末“第二阶段独立验证记录”。前半部分的“尚未验证”不可
+代替第二阶段结论。
+
 ## 版本与工作区
 
 | 项目 | SHA / 状态 |
@@ -158,6 +162,20 @@ OPRF/哈希路径仍不同。最初将所有 sender 分区编进同一包的版�
 上游基线仍为 `cfee951e4056660e521d55a3535d82335a49bb08`。
 未向 GitHub 推送，未合并目标开发分支。
 
+相对受保护提交，本轮修改或新增的文件为：`CMakeLists.txt`、
+`examples/bfv_apsi_concentrated_application.cpp`、
+`test/apsi_concentrated_delivery_test.py`、
+`test/apsi_trident_counterexample_search.cpp`、
+`test/apsi_trident_cross_felt_test.py`、
+`test/apsi_trident_native_differential.py`、
+`test/apsi_trident_native_vector.cpp`、
+`test/fixtures/apsi_trident/README.md`、
+`test/fixtures/apsi_trident/cross_felt_native.input`、
+`test/fixtures/apsi_trident/native_input.txt`、
+`test/pir_trident_native_main.py`、
+`doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md`、本语义映射文档及本报告。
+没有新增底层算子，也没有修改公共 HPU 接口。
+
 固定 Trident `e3f819f845f3cee7425fa08a3aa64879cfd5b3c0` 在独立目录
 `/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-faithful-reference`
 构建。Poseidon 与 Kuku、Flatbuffers、jsoncpp 单独安装在该目录；
@@ -167,7 +185,7 @@ Trident PIR `pir_bfv` 原生示例完成一次默认随机数据库运行，退�
 APSI 的 `apsi` 原生静态库也编译成功，日志 `trident-apsi-build.log`。
 为了绕过参考工程硬编码的 `/usr/bin/flatc`，只在独立参考副本修改
 `apsi/CMakeLists.txt` 一行路径，记录于 `trident-apsi-build-only.patch`；
-未改 APSI 算法函数。另在参考副本附加向量驱动目标，待运行结果单独记录。
+未改 APSI 算法函数。另在参考副本附加向量驱动目标；其后续运行结果见下文。
 
 | 本轮命令（服务器集成目录 `repo`） | 退出码 | 结果与日志 |
 | --- | ---: | --- |
@@ -185,9 +203,9 @@ PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一
 
 目标规模初次运行使用旧构建，每个 sender 元素都重新初始化 Kuku `LocFunc`。
 源代码已改为每进程缓存与 `SenderDB::hash_functions` 相同的三个位置函数；
-服务器连接恢复后须重建并重新运行。当前没有目标规模通过结论。
+服务器连接恢复后已重建并重新运行；当时尚无目标规模通过结论，后续结果见下文。
 
-本轮待完成的门槛：原生向量与相同输入对拍、精确模式全部历史反例和随机差分、
+当时待完成的门槛：原生向量与相同输入对拍、精确模式全部历史反例和随机差分、
 两模式应用包验证、PIR 同输入阶段差分、1M/1024 目标规模、
 `git diff --exit-code cfee951e4056660e521d55a3535d82335a49bb08 HEAD -- src include encode`
 以及最终提交 SHA。此处不把旧报告的测试记录算作新实测。
@@ -204,7 +222,10 @@ PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一
 | `cmake -S repo -B build -DCMAKE_PREFIX_PATH=.../reference-prefix`，随后构建 PSI 应用及 `hpu_validate_package` | 0 / 0 | `trident-faithful-configure-latest.log`、`trident-faithful-build-latest.log`。 |
 | `ctest -R 'hpu_bfv_apsi_(exact\|trident)_small\|hpu_bfv_apsi_trident_small_multi\|hpu_bfv_apsi_concentrated_small_'` | 0 | 10/10，含 exact 历史截断、跨字段、真实令牌反例及 trident 小型反例；`trident-faithful-small-ctest.log`。 |
 | `ctest -R 'hpu_bfv_apsi_exact_medium_'` | 0 | 3/3，含真实令牌、125/126 容量边界；`trident-faithful-exact-medium-ctest.log`。 |
+| `python3 test/apsi_random/run_apsi_random_differential.py --example ../build/hpu_bfv_apsi_concentrated_example --out-dir ../trident-faithful-exact-random`（默认 20 组） | 0 | 每组 8192 sender / 512 receiver；独立集合答案、HPU exact 恢复结果 20/20 一致；`trident-faithful-exact-random.log`、`trident-faithful-exact-random/summary.json`。 |
+| `ctest --test-dir ../build --output-on-failure -R 'hpu_bfv_sealpir_2d_concentrated_small_record_|bfv_sealpir_2d_concentrated_small_delivery_test'` | 0 | PIR small 边界及交付 4/4 通过；`trident-faithful-pir-small-ctest.log`。 |
 | `apsi_concentrated_delivery_test.py --profile small --match-mode trident ...` | 0 | 单包通过上游验证器；`trident-small-delivery.log`、`trident-small-delivery/pipeline_manifest.json`。 |
+| `python3 test/apsi_concentrated_delivery_test.py --example ../build/hpu_bfv_apsi_concentrated_example --validator ../build/hpu_validate_package --output ../exact-small-delivery --profile small --scenario multi --match-mode exact` | 0 | 单包通过上游验证器；`exact-small-delivery.log`、`exact-small-delivery/pipeline_manifest.json`。 |
 | `apsi_concentrated_delivery_test.py --profile medium --match-mode trident ...` | 0 | 单包通过上游验证器；`trident-medium-delivery.log`、`trident-medium-delivery/pipeline_manifest.json`。 |
 | 固定 Trident APSI `bits_to_field_elts`、`polyn_with_roots`、`PowersDag` 与原生 Kuku 向量驱动，及 `apsi_trident_native_differential.py` 同输入运行 | 0 / 0 | 字段、Kuku 候选位置及接收方放置、幂次 DAG 节点、根多项式系数逐项一致；`trident-faithful-reference/trident-native-vector.log`、`trident-alignment-20261026/trident-native-diff/{native,hpu}.log`。这属于真实原生函数向量对照，不是 Trident 完整协议运行。 |
 | 原生 Kuku 搜索驱动产生 `cross_felt_native.input`，同一输入分别运行 `--match-mode trident` 与 `exact` | 0 / 0 | Kuku 公共位置 1410；原始集合交集空，trident APSI 参考及解密恢复均为 `{3}`，exact 参考及恢复均为空；两者三层软件验证通过。日志 `trident-faithful-reference/trident-cross-felt-hpu.log`、`exact-cross-felt-hpu.log`。 |
@@ -215,9 +236,27 @@ PASS，未运行实体 HPU/RTL。`trident` 的 CPU APSI 参考目前基于同一
 证明 `trident` 的误匹配符合其逐 felt 独立根机制，不能归因于 HPU 计算错误。
 1M/1024 目标规模已在恢复后的构建重新启动；完整结果见下表。
 
+small/multi 同一输入的包清单给出算子数量对照。两模式都使用 44 次密文乘法、
+8 次平方和 52 次重线性化；`trident` / `exact` 分别使用 4 / 8 次密文乘明文、
+0 / 8 次密文减法、4 / 8 次明文加法、132 / 160 次模数切换。
+相应的节点数为 244 / 288，编码指令 2891 / 7515，DMA 1161 / 3121，
+HPU_MEM 行 23025 / 50673，最低噪声均为 7 bit。
+这些是软件编译/验证得到的工作负载数量，不是实体 HPU 性能。
+
 | 目标规模实测（1,000,000 sender / 1,024 receiver） | 退出码 | 结果与证据 |
 | --- | ---: | --- |
-| `python3 test/apsi_concentrated_delivery_test.py --example ../build/hpu_bfv_apsi_concentrated_example --validator ../build/hpu_validate_package --output ../trident-target-delivery --profile target --scenario multi --match-mode trident` | 0 | 17/17 个包通过上游验证器；SEAL 逐节点、HPU 软件执行及最终交集、主机指令模型均 PASS。17 包、12593 节点、8742583 指令、3321031 DMA、最大包 5980417 HPU_MEM 行，最低输出噪声 3 bit；编译加软件验证 782.386 秒，整项墙钟 15:36.04，峰值 RSS 3810624 KiB。日志 `../trident-target-latest.log`、`../trident-target-latest.time`；真实 HPU/RTL 未运行。 |
+| `python3 test/apsi_concentrated_delivery_test.py --example ../build/hpu_bfv_apsi_concentrated_example --validator ../build/hpu_validate_package --output ../trident-target-delivery --profile target --scenario multi --match-mode trident` | 0 | 原始交集、APSI 参考匹配和 HPU 恢复均为 32；17/17 个包通过上游验证器；SEAL 逐节点、HPU 软件执行及最终交集、主机指令模型均 PASS。17 包、12593 节点、8742583 指令、3321031 DMA、最大包 5980417 HPU_MEM 行，最低输出噪声 3 bit；编译加软件验证 782.386 秒，整项墙钟 15:36.04，峰值 RSS 3810624 KiB。日志 `../trident-target-latest.log`、`../trident-target-latest.time`；真实 HPU/RTL 未运行。 |
+| `python3 test/apsi_concentrated_delivery_test.py --example ../build/hpu_bfv_apsi_concentrated_example --validator ../build/hpu_validate_package --output ../exact-target-latest-delivery --profile target --scenario multi --match-mode exact` | 0 | 原始交集、exact 参考匹配和 HPU 恢复均为 32；17/17 个包通过上游验证器；SEAL 逐节点、HPU 软件执行及最终交集、主机指令模型均 PASS。17 包、22918 节点、13556657 指令、5116973 DMA、最大包 10171877 HPU_MEM 行，最低输出噪声 3 bit；编译加软件验证 2152.635 秒，整项墙钟 39:53.31，峰值 RSS 5717296 KiB。日志 `../exact-target-latest.log`、`../exact-target-latest.time`；真实 HPU/RTL 未运行。 |
+
+目标规模的算子计数由两个包清单给出：
+
+| 模式 | 密文乘法 | 平方 | 重线性化 | 密文乘明文 | 加法 | 减法 | 明文加法 | 模数切换 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `trident` | 1017 | 102 | 1119 | 3992 | 3959 | 0 | 33 | 2371 |
+| `exact` | 1648 | 102 | 1750 | 7974 | 7908 | 66 | 66 | 3404 |
+
+这是各自算法工作负载的实测差异；不能把 `exact` 的额外开销归于
+Trident 原始 APSI。墙钟时间也仅代表当前服务器的软件编译和验证速度。
 
 ### PIR 同数据库原生对照
 
