@@ -51,7 +51,8 @@ struct Profile {
 struct Options {
     Profile profile;
     std::string scenario;
-    std::string match_mode;
+    std::string dump_preprocessing;
+    bool preprocess_only = false;
     evaluator_example::Options evaluator;
 };
 
@@ -196,25 +197,6 @@ Token test_oprf(std::uint64_t item)
     return fixture;
 }
 
-std::size_t hash_location(const Token& token, std::size_t function,
-                          std::size_t table_size)
-{
-    const auto mixed = splitmix64(token.low ^
-        splitmix64(token.high + UINT64_C(0x9e3779b97f4a7c15) * (function + 1)));
-    return static_cast<std::size_t>(mixed % table_size);
-}
-
-std::vector<std::size_t> all_locations(const Token& token, const Profile& profile)
-{
-    std::vector<std::size_t> result;
-    for (std::size_t i = 0; i < profile.hash_function_count; ++i) {
-        const auto location = hash_location(token, i, profile.table_size);
-        if (std::find(result.begin(), result.end(), location) == result.end())
-            result.push_back(location);
-    }
-    return result;
-}
-
 kuku::item_type kuku_item(const Token& token)
 {
     return kuku::make_item(token.low, token.high);
@@ -284,43 +266,6 @@ std::vector<std::uint64_t> algebraize(const Token& token, std::size_t felt_count
         }
         result[felt] = value;
     }
-    return result;
-}
-
-QueryLayout build_cuckoo_layout(const std::vector<std::uint64_t>& items,
-                                const Profile& profile)
-{
-    QueryLayout result;
-    result.table.resize(profile.table_size);
-    result.item_to_table.resize(items.size(), profile.table_size);
-    for (std::size_t input_index = 0; input_index < items.size(); ++input_index) {
-        CuckooEntry pending{true, items[input_index], test_oprf(items[input_index]), input_index};
-        std::size_t choice = 0;
-        bool inserted = false;
-        for (std::size_t attempt = 0; attempt < 500; ++attempt) {
-            const auto locations = all_locations(pending.token, profile);
-            require(!locations.empty(), "APSI cuckoo item has no candidate location");
-            const auto location = locations[choice % locations.size()];
-            if (!result.table[location].occupied) {
-                result.table[location] = pending;
-                inserted = true;
-                break;
-            }
-            std::swap(pending, result.table[location]);
-            const auto displaced = all_locations(pending.token, profile);
-            const auto current = std::find(displaced.begin(), displaced.end(), location);
-            choice = current == displaced.end()
-                ? 0
-                : (static_cast<std::size_t>(current - displaced.begin()) + 1) % displaced.size();
-        }
-        require(inserted, "APSI receiver cuckoo hashing exhausted its eviction budget");
-    }
-    for (std::size_t location = 0; location < result.table.size(); ++location)
-        if (result.table[location].occupied)
-            result.item_to_table[result.table[location].receiver_index] = location;
-    require(std::none_of(result.item_to_table.begin(), result.item_to_table.end(),
-                         [&](std::size_t value) { return value == profile.table_size; }),
-            "APSI cuckoo translation table lost an input item");
     return result;
 }
 
@@ -421,7 +366,7 @@ Profile small_profile()
 
 Profile medium_profile()
 {
-    return {"medium", 8192, 512, 32, 4096, 270337, 5, 3, 1638, 125, 5,
+    return {"medium", 8192, 512, 32, 4096, 188417, 5, 3, 1638, 125, 5,
             {1,2,3,4,5,6,18,30,42,54,60},
             "Microsoft APSI 1M-1024-com parameter shape; sender/receiver counts reduced"};
 }
@@ -442,8 +387,9 @@ Options parse_options(int argc, char** argv)
 {
     Profile profile = small_profile();
     std::string scenario = "multi";
-    std::string match_mode = "exact";
     bool optimize = false;
+    std::string dump_preprocessing;
+    bool preprocess_only = false;
     std::string test_input_path;
     std::vector<char*> remaining{argv[0]};
     for (int i = 1; i < argc; ++i) {
@@ -459,10 +405,8 @@ Options parse_options(int argc, char** argv)
             if (++i >= argc) throw std::invalid_argument("--scenario requires a value");
             scenario = argv[i];
         } else if (argument == "--match-mode") {
-            if (++i >= argc) throw std::invalid_argument("--match-mode requires exact or trident");
-            match_mode = argv[i];
-            if (match_mode != "exact" && match_mode != "trident")
-                throw std::invalid_argument("--match-mode must be exact or trident");
+            if (++i >= argc || std::string(argv[i]) != "trident")
+                throw std::invalid_argument("--match-mode accepts only trident");
         } else if (argument == "--optimize-resources") {
             optimize = true;
         } else if (argument == "--test-input") {
@@ -474,6 +418,11 @@ Options parse_options(int argc, char** argv)
             g_test_publish_mismatch = true;
         } else if (argument == "--trace-vectors") {
             g_trace_vectors = true;
+        } else if (argument == "--dump-preprocessing") {
+            if (++i >= argc) throw std::invalid_argument("--dump-preprocessing requires a path");
+            dump_preprocessing = argv[i];
+        } else if (argument == "--preprocess-only") {
+            preprocess_only = true;
         } else {
             remaining.push_back(argv[i]);
         }
@@ -487,15 +436,19 @@ Options parse_options(int argc, char** argv)
         static_cast<int>(remaining.size()), remaining.data());
     evaluator.compiler.optimize_resources = optimize;
     if (!test_input_path.empty()) load_test_input(test_input_path);
-    return {std::move(profile), std::move(scenario), std::move(match_mode),
-            std::move(evaluator)};
+    if (preprocess_only && dump_preprocessing.empty())
+        throw std::invalid_argument("--preprocess-only requires --dump-preprocessing");
+    return {std::move(profile), std::move(scenario),
+            std::move(dump_preprocessing), preprocess_only, std::move(evaluator)};
 }
 
 std::uint64_t find_item_for_location(std::size_t wanted, const Profile& profile,
                                      std::uint64_t start)
 {
     for (std::uint64_t item = start; item < start + UINT64_C(10000000); ++item)
-        if (hash_location(test_oprf(item), 0, profile.table_size) == wanted) return item;
+        if (const auto locations = trident_locations(test_oprf(item), profile);
+            std::find(locations.begin(), locations.end(), wanted) != locations.end())
+            return item;
     throw std::runtime_error("failed to synthesize APSI boundary fixture");
 }
 
@@ -536,15 +489,7 @@ Dataset build_dataset(const Options& options)
     return result;
 }
 
-using FullTokenFelts = std::array<std::uint64_t, 8>;
 using CoefficientMatrix = std::vector<std::vector<std::uint64_t>>;
-
-struct ExactSenderPolynomials {
-    // [partition][bundle][result group][coefficient][batch slot]
-    std::vector<std::vector<std::array<CoefficientMatrix, 2>>> coefficients;
-    std::vector<std::vector<bool>> occupied;
-    std::size_t maximum_degree = 0;
-};
 
 struct TridentSenderPolynomials {
     // One independent felt-root polynomial per batch slot and BinBundle.
@@ -640,132 +585,71 @@ std::vector<std::uint64_t> trident_cpu_reference(
     return matches;
 }
 
-FullTokenFelts full_token_felts(const Token& token, std::uint32_t bits_per_felt)
+void dump_trident_preprocessing(const std::string& path, const Dataset& dataset,
+                                const QueryLayout& layout, const TridentSenderPolynomials& sender,
+                                const Profile& profile, std::uint32_t bits_per_felt,
+                                const std::vector<PowersNode>& dag, std::size_t bundle_count)
 {
-    require(bits_per_felt >= 16 && bits_per_felt <= 18,
-            "exact APSI token encoding needs eight 16-to-18-bit felts");
-    const auto values = algebraize(token, 8, bits_per_felt);
-    FullTokenFelts result{};
-    std::copy(values.begin(), values.end(), result.begin());
-    return result;
-}
-
-// For distinct first felts x_i, L_j(x_i) equals the j-th felt of the SAME
-// sender token. The matching polynomial F(x) gates the interpolation: without
-// F(x)=0, arbitrary interpolated values must never be reported as a match.
-std::array<std::vector<std::uint64_t>, 7> interpolate_token_felts(
-    const std::vector<FullTokenFelts>& entries,
-    const std::vector<std::uint64_t>& matching_polynomial,
-    std::uint64_t modulus)
-{
-    const auto count = entries.size();
-    std::array<std::vector<std::uint64_t>, 7> result;
-    for (auto& polynomial : result) polynomial.assign(count, 0);
-    for (std::size_t item = 0; item < count; ++item) {
-        const auto x = entries[item][0];
-        std::vector<std::uint64_t> quotient(count);
-        quotient[count - 1] = matching_polynomial[count];
-        for (std::size_t degree = count - 1; degree > 0; --degree)
-            quotient[degree - 1] = add_mod(matching_polynomial[degree],
-                multiply_mod(x, quotient[degree], modulus), modulus);
-        std::uint64_t denominator = 0;
-        for (auto coefficient = quotient.rbegin(); coefficient != quotient.rend(); ++coefficient)
-            denominator = add_mod(multiply_mod(denominator, x, modulus),
-                                  *coefficient, modulus);
-        require(denominator != 0,
-                "sender partition contains duplicate first-felt roots");
-        const auto inverse = power_mod(denominator,
-            static_cast<std::uint32_t>(modulus - 2), modulus);
-        for (std::size_t label = 0; label < result.size(); ++label) {
-            const auto weight = multiply_mod(entries[item][label + 1], inverse, modulus);
-            for (std::size_t degree = 0; degree < count; ++degree)
-                result[label][degree] = add_mod(result[label][degree],
-                    multiply_mod(weight, quotient[degree], modulus), modulus);
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("cannot create preprocessing audit file");
+    const auto items_per_bundle = profile.degree / profile.felts_per_item;
+    out << "META sender=" << dataset.sender.size() << " receiver=" << dataset.receiver.size()
+        << " table=" << profile.table_size
+        << " bins_per_bundle=" << profile.degree << '\n';
+    for (int side = 0; side < 2; ++side) {
+        const auto& ids = side ? dataset.receiver : dataset.sender;
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            const auto token = test_oprf(ids[i]);
+            out << "TOKEN " << (side ? 'R' : 'S') << ' ' << ids[i] << " felts";
+            for (auto felt : algebraize(token, profile.felts_per_item, bits_per_felt))
+                out << ' ' << felt;
+            auto locations = trident_locations(token, profile);
+            std::sort(locations.begin(), locations.end());
+            out << " locations";
+            for (auto location : locations) out << ' ' << location;
+            if (side) out << " placed " << layout.item_to_table[i];
+            out << '\n';
         }
     }
-    return result;
-}
-
-ExactSenderPolynomials build_exact_sender_coefficients(
-    const Dataset& dataset, const Profile& profile, std::uint64_t plain_modulus,
-    std::uint32_t bits_per_felt, std::size_t bundle_count, std::size_t items_per_bundle)
-{
-    require(profile.felts_per_item >= 5,
-            "exact APSI matching needs at least five batch lanes per table item");
-    // A separate partition is needed when first-felt roots collide or a bin
-    // reaches the selected APSI degree. This also supports the reference
-    // database's multiple BinBundles at the 1M-item target size.
-    std::vector<std::vector<std::vector<FullTokenFelts>>> at_location(profile.table_size);
-    for (const auto item : dataset.sender) {
-        const auto felts = full_token_felts(test_oprf(item), bits_per_felt);
-        for (const auto location : all_locations(test_oprf(item), profile)) {
-            auto& partitions = at_location[location];
-            auto fit = std::find_if(partitions.begin(), partitions.end(), [&](const auto& part) {
-                return part.size() < profile.max_items_per_bin &&
-                    std::none_of(part.begin(), part.end(), [&](const auto& other) {
-                        return other[0] == felts[0];
-                    });
-            });
-            if (fit == partitions.end()) {
-                partitions.emplace_back();
-                fit = std::prev(partitions.end());
+    for (std::size_t p = 0; p < sender.roots.size(); ++p) {
+        for (std::size_t b = 0; b < bundle_count; ++b) {
+            if (!sender.occupied[p][b]) continue;
+            const auto& bins = sender.roots[p][b];
+            const auto& coefficients = sender.coefficients[p][b];
+            const auto degree = coefficients.size() - 1;
+            std::size_t nonempty = 0;
+            for (std::size_t slot = 0; slot < bins.size(); ++slot) {
+                const auto& roots = bins[slot];
+                if (roots.empty()) {
+                    require(coefficients[0][slot] == 1,
+                            "empty Trident bin polynomial constant differs from one");
+                    for (std::size_t c = 1; c < coefficients.size(); ++c)
+                        require(coefficients[c][slot] == 0,
+                                "empty Trident bin polynomial has a nonzero higher coefficient");
+                    continue;
+                }
+                ++nonempty;
+                out << "BIN " << p << ' ' << b << ' ' << slot << " roots";
+                for (auto root : roots) out << ' ' << root;
+                out << " coefficients";
+                for (std::size_t c = 0; c <= roots.size(); ++c)
+                    out << ' ' << coefficients[c][slot];
+                for (std::size_t c = roots.size() + 1; c < coefficients.size(); ++c)
+                    require(coefficients[c][slot] == 0,
+                            "Trident bin polynomial padding is nonzero");
+                out << '\n';
             }
-            fit->push_back(felts);
+            out << "BUNDLE " << p << ' ' << b << " degree " << degree
+                << " nonempty " << nonempty << " slots " << bins.size() << '\n';
         }
     }
-    std::size_t partition_count = 0;
-    for (const auto& partitions : at_location)
-        partition_count = std::max(partition_count, partitions.size());
-    require(partition_count > 0, "exact APSI sender database is empty");
-
-    ExactSenderPolynomials result;
-    result.coefficients.resize(partition_count);
-    result.occupied.resize(partition_count, std::vector<bool>(bundle_count, false));
-    for (std::size_t partition = 0; partition < partition_count; ++partition) {
-        result.coefficients[partition].resize(bundle_count);
-        for (std::size_t bundle = 0; bundle < bundle_count; ++bundle) {
-            std::array<std::vector<std::vector<std::uint64_t>>, 2> per_slot;
-            for (auto& group : per_slot) group.resize(profile.degree);
-            std::size_t bundle_degree = 0;
-            for (std::size_t local = 0; local < items_per_bundle; ++local) {
-                const auto location = bundle * items_per_bundle + local;
-                const auto base = local * profile.felts_per_item;
-                const auto& partitions = at_location[location];
-                const std::vector<FullTokenFelts> empty;
-                const auto& entries = partition < partitions.size()
-                    ? partitions[partition] : empty;
-                if (!entries.empty()) result.occupied[partition][bundle] = true;
-                std::vector<std::uint64_t> roots;
-                roots.reserve(entries.size());
-                for (const auto& entry : entries) roots.push_back(entry[0]);
-                auto matching = root_polynomial(roots, plain_modulus);
-                bundle_degree = std::max(bundle_degree, roots.size());
-                per_slot[0][base] = matching;
-                // An otherwise constant label-only group still has a valid
-                // nonconstant dummy slot for the standard HPU evaluator.
-                per_slot[1][base + profile.felts_per_item - 1] = std::move(matching);
-                if (entries.empty()) continue;
-                auto labels = interpolate_token_felts(entries,
-                    per_slot[0][base], plain_modulus);
-                for (std::size_t field = 1; field <= 4; ++field)
-                    per_slot[0][base + field] = std::move(labels[field - 1]);
-                for (std::size_t field = 5; field <= 7; ++field)
-                    per_slot[1][base + field - 5] = std::move(labels[field - 1]);
-            }
-            result.maximum_degree = std::max(result.maximum_degree, bundle_degree);
-            if (!result.occupied[partition][bundle]) continue;
-            for (std::size_t group = 0; group < 2; ++group) {
-                auto& matrix = result.coefficients[partition][bundle][group];
-                matrix.assign(bundle_degree + 1,
-                              std::vector<std::uint64_t>(profile.degree));
-                for (std::size_t slot = 0; slot < profile.degree; ++slot)
-                    for (std::size_t coefficient = 0;
-                         coefficient < per_slot[group][slot].size(); ++coefficient)
-                        matrix[coefficient][slot] = per_slot[group][slot][coefficient];
-            }
-        }
-    }
-    return result;
+    for (const auto& node : dag)
+        out << "POWER " << node.power << ' ' << node.depth << ' '
+            << node.parents.first << ' ' << node.parents.second << '\n';
+    for (auto item : trident_cpu_reference(layout, sender, profile, bits_per_felt,
+                                           items_per_bundle))
+        out << "MATCH " << item << '\n';
+    if (!out) throw std::runtime_error("failed to write preprocessing audit file");
 }
 
 class GraphRecorder {
@@ -1011,8 +895,8 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
     std::ofstream manifest(root / "pipeline_manifest.json");
     manifest << "{\n"
              << "  \"application\": \"APSI concentrated PSI HPU workload\",\n"
-             << "  \"match_mode\": \"" << options.match_mode << "\",\n"
-             << "  \"implementation_scope\": \"cropped protocol with deterministic OPRF-output fixture; mode-specific matching described in match_strategy\",\n"
+             << "  \"match_mode\": \"trident\",\n"
+             << "  \"implementation_scope\": \"cropped protocol with deterministic OPRF-output fixture and Trident APSI matching\",\n"
              << "  \"profile\": \"" << options.profile.name << "\",\n"
              << "  \"scenario\": \"" << options.scenario << "\",\n"
              << "  \"parameter_origin\": \"" << options.profile.parameter_origin << "\",\n"
@@ -1025,14 +909,7 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
              << "  \"plain_modulus\": " << plain_modulus << ",\n"
              << "  \"coefficient_modulus_bits\": [31,31,31,31,31],\n"
              << "  \"felts_per_item\": " << options.profile.felts_per_item << ",\n"
-             << "  \"full_token_felts\": "
-             << (options.match_mode == "trident" ? options.profile.felts_per_item : 8)
-             << ",\n"
-             << "  \"match_strategy\": \""
-             << (options.match_mode == "trident"
-                 ? "Trident APSI independent per-felt root polynomials and same-BinBundle all-zero recovery"
-                 : "first-felt matching polynomial plus seven same-sender interpolated full-token felts")
-             << "\",\n"
+             << "  \"match_strategy\": \"Trident APSI independent per-felt root polynomials and same-BinBundle all-zero recovery\",\n"
              << "  \"hash_function_count\": " << options.profile.hash_function_count << ",\n"
              << "  \"table_size\": " << options.profile.table_size << ",\n"
              << "  \"bundle_count\": " << bundle_count << ",\n"
@@ -1059,7 +936,7 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
              << ",\"add_plain\":"
              << counts.add_plain << ",\"mod_switch\":" << counts.mod_switch << "},\n"
              << "  \"cpu_steps\": [\"set preparation\",\"deterministic OPRF-output fixture\",\"cuckoo layout\",\"sender database polynomial preprocessing\",\"query source-power encoding/encryption\",\"reply decryption/intersection recovery\"],\n"
-             << "  \"hpu_steps\": [\"PowersDag missing-power generation\",\"ciphertext multiplication\",\"relinearization\",\"power modulus switching\",\"mode-specific matching polynomial evaluation\",\"Paterson-Stockmeyer when selected\",\"final modulus switching\"],\n"
+             << "  \"hpu_steps\": [\"PowersDag missing-power generation\",\"ciphertext multiplication\",\"relinearization\",\"power modulus switching\",\"independent felt-root polynomial evaluation\",\"Paterson-Stockmeyer when selected\",\"final modulus switching\"],\n"
              << "  \"execution_pipeline\": [{\"step\":\"cpu_prepare_query_and_database\"}";
     for (const auto& package : packages)
         manifest << ", {\"step\":\"hpu_concentrated_query\",\"package\":\""
@@ -1092,11 +969,11 @@ void write_delivery_files(const Options& options, const Dataset& dataset,
     std::ofstream readme(root / "README.txt");
     readme << "Generate:\n  hpu_bfv_apsi_concentrated_example --profile "
            << options.profile.name << " --scenario " << options.scenario
-           << " --match-mode " << options.match_mode
+            << " --match-mode trident"
             << " --emit-dir <dir>\n\nValidate every package directory in pipeline_manifest.json.\n\n"
             << "Each package contains the HPU graph for one or more sender partitions.\n"
            << "Its CPU OPRF step is a deterministic correctness fixture, not APSI's FourQ OPRF.\n"
-           << "The trident mode uses independent felt roots; exact adds same-token interpolation.\n"
+            << "Trident APSI uses independent felt roots within each BinBundle.\n"
            << "Software and host instruction-model checks do not constitute RTL/HPU hardware ST.\n";
 }
 
@@ -1110,7 +987,7 @@ int main(int argc, char** argv)
             *options.evaluator.delivery.poly_modulus_degree != options.profile.degree)
             throw std::invalid_argument("--degree must match the selected APSI profile");
 
-        // Build the exact APSI/Trident plaintext fields with SEAL's existing
+        // Build the Trident APSI plaintext fields with SEAL's existing
         // public parameter API, then pass the resulting context directly to
         // the pre-existing ApplicationBuilder constructor. No HPU context API
         // or compiler path is extended for this application.
@@ -1142,43 +1019,29 @@ int main(int argc, char** argv)
                 "HPU-adapted APSI plaintext modulus does not support batching");
         const auto bits_per_felt = static_cast<std::uint32_t>(
             ::seal::util::get_significant_bit_count(plain_modulus) - 1);
-        require(bits_per_felt * 7 < 128 && bits_per_felt * 8 >= 128,
-                "selected APSI field cannot encode a full token in eight felts");
+        require(bits_per_felt * options.profile.felts_per_item <= 128,
+                "selected APSI field exceeds one OPRF token");
         const auto items_per_bundle = options.profile.degree / options.profile.felts_per_item;
         require(items_per_bundle && options.profile.table_size % items_per_bundle == 0,
                 "APSI table_size is not a multiple of items_per_bundle");
         const auto bundle_count = options.profile.table_size / items_per_bundle;
 
         auto dataset = build_dataset(options);
-        const bool trident_mode = options.match_mode == "trident";
         std::sort(dataset.sender.begin(), dataset.sender.end());
         std::sort(dataset.receiver.begin(), dataset.receiver.end());
         std::sort(dataset.expected_intersection.begin(), dataset.expected_intersection.end());
-        const auto layout = trident_mode
-            ? build_trident_cuckoo_layout(dataset.receiver, options.profile)
-            : build_cuckoo_layout(dataset.receiver, options.profile);
+        const auto layout = build_trident_cuckoo_layout(dataset.receiver, options.profile);
 
         if (options.profile.name == "target")
             std::cerr << "PSI_PROGRESS sender_preprocessing_begin items="
                       << dataset.sender.size() << '\n';
-        ExactSenderPolynomials exact_sender;
-        TridentSenderPolynomials trident_sender;
-        if (trident_mode)
-            trident_sender = build_trident_sender_coefficients(
-                dataset, options.profile, plain_modulus, bits_per_felt,
-                bundle_count, items_per_bundle);
-        else
-            exact_sender = build_exact_sender_coefficients(
-                dataset, options.profile, plain_modulus, bits_per_felt,
-                bundle_count, items_per_bundle);
-        const auto partition_count = trident_mode
-            ? trident_sender.coefficients.size() : exact_sender.coefficients.size();
-        const auto observed_degree = trident_mode
-            ? trident_sender.maximum_degree : exact_sender.maximum_degree;
-        const auto reference_intersection = trident_mode
-            ? trident_cpu_reference(layout, trident_sender, options.profile,
-                                    bits_per_felt, items_per_bundle)
-            : dataset.expected_intersection;
+        const auto trident_sender = build_trident_sender_coefficients(
+            dataset, options.profile, plain_modulus, bits_per_felt,
+            bundle_count, items_per_bundle);
+        const auto partition_count = trident_sender.coefficients.size();
+        const auto observed_degree = trident_sender.maximum_degree;
+        const auto reference_intersection = trident_cpu_reference(
+            layout, trident_sender, options.profile, bits_per_felt, items_per_bundle);
         if (options.profile.name == "target")
             std::cerr << "PSI_PROGRESS sender_preprocessing_done partitions="
                       << partition_count << '\n';
@@ -1189,7 +1052,13 @@ int main(int argc, char** argv)
             options.profile.ps_low_degree,
             static_cast<std::uint32_t>(options.profile.max_items_per_bin));
         const auto dag = configure_powers_dag(options.profile.query_powers, targets);
-        if (g_trace_vectors && trident_mode) {
+        if (!options.dump_preprocessing.empty()) {
+            dump_trident_preprocessing(options.dump_preprocessing, dataset, layout,
+                                       trident_sender, options.profile, bits_per_felt,
+                                       dag, bundle_count);
+        }
+        if (options.preprocess_only) return 0;
+        if (g_trace_vectors) {
             auto print_token = [&](char side, std::uint64_t item,
                                    std::size_t table_location) {
                 const auto token = test_oprf(item);
@@ -1254,30 +1123,18 @@ int main(int argc, char** argv)
 
         std::vector<std::vector<std::uint64_t>> query_slots(
             bundle_count, std::vector<std::uint64_t>(options.profile.degree));
-        std::vector<std::array<std::vector<std::uint64_t>, 2>> expected_slots(bundle_count);
-        for (auto& bundle : expected_slots)
-            for (auto& group : bundle) group.resize(options.profile.degree);
         for (std::size_t location = 0; location < layout.table.size(); ++location) {
             if (!layout.table[location].occupied) continue;
-            const auto felts = trident_mode
-                ? algebraize(layout.table[location].token,
-                             options.profile.felts_per_item, bits_per_felt)
-                : algebraize(layout.table[location].token, 8, bits_per_felt);
+            const auto felts = algebraize(layout.table[location].token,
+                                           options.profile.felts_per_item, bits_per_felt);
             const auto bundle = location / items_per_bundle;
             const auto local = location % items_per_bundle;
             const auto base = local * options.profile.felts_per_item;
             for (std::size_t lane = 0; lane < options.profile.felts_per_item; ++lane)
-                query_slots[bundle][base + lane] = trident_mode ? felts[lane] : felts[0];
-            if (!trident_mode) {
-                for (std::size_t field = 1; field <= 4; ++field)
-                    expected_slots[bundle][0][base + field] = felts[field];
-                for (std::size_t field = 5; field <= 7; ++field)
-                    expected_slots[bundle][1][base + field - 5] = felts[field];
-            }
+                query_slots[bundle][base + lane] = felts[lane];
         }
 
         std::map<std::pair<std::size_t, std::uint32_t>, ::seal::Ciphertext> encrypted_sources;
-        std::vector<std::array<::seal::Ciphertext, 2>> encrypted_expected(bundle_count);
         for (std::size_t bundle = 0; bundle < bundle_count; ++bundle) {
             for (const auto source : options.profile.query_powers) {
                 std::vector<std::uint64_t> powered(options.profile.degree);
@@ -1288,11 +1145,6 @@ int main(int argc, char** argv)
                 ::seal::Plaintext plain;
                 encoder.encode(powered, plain);
                 encryptor.encrypt_symmetric(plain, encrypted_sources[{bundle, source}]);
-            }
-            for (std::size_t group = 0; group < (trident_mode ? 0U : 2U); ++group) {
-                ::seal::Plaintext plain;
-                encoder.encode(expected_slots[bundle][group], plain);
-                encryptor.encrypt_symmetric(plain, encrypted_expected[bundle][group]);
             }
         }
         if (options.profile.name == "target")
@@ -1317,9 +1169,8 @@ int main(int argc, char** argv)
             hpu::seal_adapter::ApplicationBuilder app(context);
             OpCounts counts;
             GraphRecorder graph(app.evaluator(), relin_keys, counts);
-            std::vector<std::vector<std::array<hpu::seal_adapter::Ciphertext, 2>>> outputs(
-                last - first, std::vector<std::array<hpu::seal_adapter::Ciphertext, 2>>(
-                                  bundle_count));
+            std::vector<std::vector<hpu::seal_adapter::Ciphertext>> outputs(
+                last - first, std::vector<hpu::seal_adapter::Ciphertext>(bundle_count));
             for (std::size_t bundle = 0; bundle < bundle_count; ++bundle) {
                 std::map<std::uint32_t, hpu::seal_adapter::Ciphertext> powers;
                 for (const auto source : options.profile.query_powers)
@@ -1341,40 +1192,20 @@ int main(int argc, char** argv)
                         ? std::size_t{2} : std::size_t{1};
                     mod_switch_to_chain(graph, entry.second, context, target_chain);
                 }
-                std::array<hpu::seal_adapter::Ciphertext, 2> expected;
-                for (std::size_t group = 0; group < (trident_mode ? 0U : 2U); ++group) {
-                    expected[group] = app.import_ciphertext(
-                        "query/bundle_" + std::to_string(bundle) + "/expected_" +
-                            std::to_string(group), encrypted_expected[bundle][group]);
-                    mod_switch_to_chain(graph, expected[group], context, 0);
-                }
                 for (std::size_t partition = first; partition < last; ++partition) {
-                    const bool occupied = trident_mode
-                        ? trident_sender.occupied[partition][bundle]
-                        : exact_sender.occupied[partition][bundle];
-                    if (!occupied) continue;
-                    for (std::size_t group = 0; group < (trident_mode ? 1U : 2U); ++group) {
-                        const auto& coefficients = trident_mode
-                            ? trident_sender.coefficients[partition][bundle]
-                            : exact_sender.coefficients[partition][bundle][group];
-                        const bool use_ps = options.profile.ps_low_degree > 1 &&
-                            options.profile.ps_low_degree < coefficients.size() - 1;
-                        const auto name = partition * bundle_count * 2 + bundle * 2 + group;
-                        auto result = use_ps
-                            ? evaluate_patstock(app, graph, encoder, powers, coefficients,
-                                                options.profile.ps_low_degree, name)
-                            : evaluate_standard(app, graph, encoder, powers, coefficients, name);
-                        mod_switch_to_chain(graph, result, context, 0);
-                        if (!trident_mode) {
-                            require(result.parms_id() == expected[group].parms_id(),
-                                    "exact APSI label and query fields have different BFV levels");
-                            graph.sub(result, expected[group]);
-                        }
-                        app.mark_output("psi_partition_" + std::to_string(partition) +
-                            "_bundle_" + std::to_string(bundle) + "_group_" +
-                            std::to_string(group), result);
-                        outputs[partition - first][bundle][group] = result;
-                    }
+                    if (!trident_sender.occupied[partition][bundle]) continue;
+                    const auto& coefficients = trident_sender.coefficients[partition][bundle];
+                    const bool use_ps = options.profile.ps_low_degree > 1 &&
+                        options.profile.ps_low_degree < coefficients.size() - 1;
+                    const auto name = partition * bundle_count * 2 + bundle * 2;
+                    auto result = use_ps
+                        ? evaluate_patstock(app, graph, encoder, powers, coefficients,
+                                            options.profile.ps_low_degree, name)
+                        : evaluate_standard(app, graph, encoder, powers, coefficients, name);
+                    mod_switch_to_chain(graph, result, context, 0);
+                    app.mark_output("psi_partition_" + std::to_string(partition) +
+                        "_bundle_" + std::to_string(bundle) + "_group_0", result);
+                    outputs[partition - first][bundle] = result;
                 }
             }
             require(counts.total() > 0, "APSI HPU graph is empty");
@@ -1397,25 +1228,18 @@ int main(int argc, char** argv)
             require(compiled.instruction_verified(),
                     "APSI encoded instruction model verification failed");
 
-            std::vector<std::vector<std::array<std::vector<std::uint64_t>, 2>>> decoded(
-                last - first,
-                std::vector<std::array<std::vector<std::uint64_t>, 2>>(bundle_count));
+            std::vector<std::vector<std::vector<std::uint64_t>>> decoded(
+                last - first, std::vector<std::vector<std::uint64_t>>(bundle_count));
             for (std::size_t partition = first; partition < last; ++partition)
                 for (std::size_t bundle = 0; bundle < bundle_count; ++bundle) {
-                    const bool occupied = trident_mode
-                        ? trident_sender.occupied[partition][bundle]
-                        : exact_sender.occupied[partition][bundle];
-                    if (!occupied) continue;
-                    for (std::size_t group = 0; group < (trident_mode ? 1U : 2U); ++group) {
-                        const auto& oracle =
-                            compiled.oracle_result(outputs[partition - first][bundle][group]);
-                        minimum_noise = std::min(minimum_noise,
-                            decryptor.invariant_noise_budget(oracle));
-                        ::seal::Plaintext oracle_plain;
-                        decryptor.decrypt(oracle, oracle_plain);
-                        encoder.decode(oracle_plain,
-                            decoded[partition - first][bundle][group]);
-                    }
+                    if (!trident_sender.occupied[partition][bundle]) continue;
+                    const auto& oracle =
+                        compiled.oracle_result(outputs[partition - first][bundle]);
+                    minimum_noise = std::min(minimum_noise,
+                        decryptor.invariant_noise_budget(oracle));
+                    ::seal::Plaintext oracle_plain;
+                    decryptor.decrypt(oracle, oracle_plain);
+                    encoder.decode(oracle_plain, decoded[partition - first][bundle]);
                 }
             require(minimum_noise > 0, "APSI reply exhausted the BFV noise budget");
 
@@ -1427,23 +1251,12 @@ int main(int argc, char** argv)
                 const auto local = location % items_per_bundle;
                 const auto base = local * options.profile.felts_per_item;
                 for (std::size_t partition = first; partition < last; ++partition) {
-                    const bool occupied = trident_mode
-                        ? trident_sender.occupied[partition][bundle]
-                        : exact_sender.occupied[partition][bundle];
-                    if (!occupied) continue;
-                    const auto& groups = decoded[partition - first][bundle];
+                    if (!trident_sender.occupied[partition][bundle]) continue;
+                    const auto& values = decoded[partition - first][bundle];
                     bool match = true;
-                    if (trident_mode) {
-                        for (std::size_t field = 0; field < options.profile.felts_per_item;
-                             ++field)
-                            match = match && groups[0][base + field] == 0;
-                    } else {
-                        match = groups[0][base] == 0;
-                        for (std::size_t field = 1; field <= 4; ++field)
-                            match = match && groups[0][base + field] == 0;
-                        for (std::size_t field = 5; field <= 7; ++field)
-                            match = match && groups[1][base + field - 5] == 0;
-                    }
+                    for (std::size_t field = 0; field < options.profile.felts_per_item;
+                         ++field)
+                        match = match && values[base + field] == 0;
                     if (match) { package_matches.push_back(entry.item); break; }
                 }
             }
@@ -1507,8 +1320,7 @@ int main(int argc, char** argv)
         write_delivery_files(options, dataset, actual_intersection, reference_intersection,
             package_summaries, total_counts, bundle_count, partition_count,
             observed_degree, minimum_noise, compile_seconds, plain_modulus,
-            bundle_count * (options.profile.query_powers.size() +
-                            (trident_mode ? 0U : 2U)));
+             bundle_count * options.profile.query_powers.size());
         if (g_test_input && g_test_publish_mismatch &&
             actual_intersection != reference_intersection)
             std::cerr << "AUDIT_SEMANTIC_MISMATCH_PACKAGE_PUBLISHED\n";
@@ -1516,7 +1328,7 @@ int main(int argc, char** argv)
                 "APSI client recovery differs from the CPU APSI reference");
         std::cout << "APSI-style concentrated PSI application: PASS\n"
                   << "Scope: cropped protocol with deterministic CPU OPRF-output fixture; not full network APSI\n"
-                  << "Match mode: " << options.match_mode << '\n'
+                  << "Match mode: trident\n"
                   << "Profile/scenario: " << options.profile.name << '/' << options.scenario << '\n'
                   << "Raw set intersection/APSI reference matches: "
                   << dataset.expected_intersection.size() << '/'

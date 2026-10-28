@@ -10,10 +10,19 @@ Kuku 2.1 for candidate locations and receiver placement.
 sender tokens and one receiver token. Kuku places the receiver at location
 1410, which is a candidate location of both senders. The receiver's first
 felt occurs in sender 1, and its fourth felt occurs in sender 2; no complete
-128-bit sender token equals the receiver. At the 5-felt, 90-bit medium
+128-bit sender token equals the receiver. At the 5-felt, 85-bit medium
 configuration the independent APSI polynomials therefore yield a match for
-receiver item 3. The original integer set intersection is empty. The exact
-mode must recover the empty set. The associated regression script checks both
-outcomes from decrypted HPU software output.
+receiver item 3. The original integer set intersection is empty. The
+regression script checks the Trident result from decrypted HPU software output.
+
+The final SenderDB audit also generates `cross_felt.raw` from native OPRF
+sender tokens and an injected receiver token. It compares the actual native
+BinBundle cache with HPU preprocessing before checking the decrypted result.
 
 These are injected OPRF-output boundary values, not FourQ OPRF protocol output.
+
+`truncation.input` and `cross_felt.input` are preserved Trident probability
+regressions moved from the historical exact-mode fixture directory. Both are
+injected token-boundary samples; the current CTest runs only their Trident
+matching path. The previous exact-only tests remain recoverable at commit
+`96837ad64523fdd181df699c416a7a22d23363db`.

@@ -15,7 +15,7 @@
 
 int main()
 {
-    const poseidon::Modulus modulus(270337);
+    const poseidon::Modulus modulus(188417);
     const std::vector<kuku::item_type> tokens{
         kuku::make_item(UINT64_C(81985529216486895), UINT64_C(18364758544493064720)),
         kuku::make_item(UINT64_C(81985529216486895), UINT64_C(18364758544493064721)),
@@ -26,7 +26,7 @@ int main()
                           kuku::make_item(0, 0));
     for (std::size_t i = 0; i < tokens.size(); ++i) {
         const auto& token = tokens[i];
-        const apsi::BitstringView<const unsigned char> bits(token.data(), 90);
+        const apsi::BitstringView<const unsigned char> bits(token.data(), 85);
         const auto felts = apsi::util::bits_to_field_elts(bits, modulus);
         std::cout << "TOKEN " << i << " felts";
         for (const auto felt : felts) std::cout << ' ' << felt;
@@ -41,8 +41,8 @@ int main()
         std::cout << "PLACED " << index << ' '
                   << table.query(tokens[index]).location() << '\n';
     }
-    const apsi::BitstringView<const unsigned char> bits0(tokens[0].data(), 90);
-    const apsi::BitstringView<const unsigned char> bits1(tokens[1].data(), 90);
+    const apsi::BitstringView<const unsigned char> bits0(tokens[0].data(), 85);
+    const apsi::BitstringView<const unsigned char> bits1(tokens[1].data(), 85);
     const auto felts0 = apsi::util::bits_to_field_elts(bits0, modulus);
     const auto felts1 = apsi::util::bits_to_field_elts(bits1, modulus);
     for (std::size_t field = 0; field < 5; ++field) {

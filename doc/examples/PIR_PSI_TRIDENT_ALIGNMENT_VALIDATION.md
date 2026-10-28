@@ -1,5 +1,13 @@
 # PIR/PSI 上游集成与计算语义验证（2026-10-26）
 
+> **最终状态以文末“2026-10-28 收尾验收”及 [交付指南](TRIDENT_PIR_PSI_FINAL_GUIDE.md) 为准。**
+> 以下旧章节是按日期保留的历史记录，其中 exact 模式、未验证状态和旧版
+> PSI `t=270337` 指标均不代表收尾分支。固定 Trident JSON 经原生
+> `PSIParams::Load` 实际得到 `t=188417`、每 felt 17 位、五 felt 共 85 位；
+> 收尾分支已修正应用参数并重新验证。已验证提交 `96837ad` 在前一轮已推送到
+> 用户 fork 的 `feature/trident-faithful-pir-psi`；收尾分支按用户后续授权
+> 推送至 `adamsir32/inline-asm`，上游仓库未修改。
+
 前半部分记录 2026-10-26 第一阶段的当时状态；2026-10-27 的双模式与原生
 同输入实测见文末“第二阶段独立验证记录”。前半部分的“尚未验证”不可
 代替第二阶段结论。
@@ -289,3 +297,128 @@ HPU 三次直接运行分别查询 `0`（附加检查 `69`）、`70`、`65534`
 | 65535 | 0 | `5a22fb801e8addf789d7a4009b6b2cf57d106994570b9060ef56da2d236d1a6d` |
 
 这证明相同业务输入的最终记录对齐，不证明不同模数链下中间密文表示相同。
+
+## 2026-10-28 收尾验收
+
+本节记录独立收尾分支 `feature/trident-pir-psi-finalization` 上的**本轮实测**；前面各节为保留的历史记录。受保护的起点是 `96837ad64523fdd181df699c416a7a22d23363db`，原 fork 长期分支 `7a060f6c0e6aa191606babc2e9d236969d8e5a1f` 未改动。上游固定基线 `cfee951e4056660e521d55a3535d82335a49bb08`，Trident 参考 `e3f819f845f3cee7425fa08a3aa64879cfd5b3c0`。收尾代码先在本地提交；用户随后明确授权推送到自己的 fork，本轮不合并、不创建 PR。
+
+### 原生预处理发现和应用修正
+
+隔离 Trident 参考副本中，审计驱动调用实际 `SenderDB::insert_or_assign`，仅为读取私有 `bin_bundles_` 缓存而给该副本 `sender_db.h` 增加只读访问器；`SenderDB` 插入、Kuku、`BinBundle` 和多项式算法源均未改写。访问器源为 `test/apsi_trident_senderdb_accessor.py`，原件及补丁在服务器 `trident-faithful-reference/trident/apsi/sender/apsi/sender_db.h.unmodified` 和 `trident-faithful-reference/senderdb-audit-accessor.patch`。`test/apsi_trident_senderdb_native.cpp` 使用固定合法 FourQ OPRF 标量 1 产生发送方令牌；跨字段反例的接收方在 OPRF 输出边界注入，且其 Kuku 实际摆放位置由原生表查询确认。
+
+原生 `PSIParams::Load` 对固定 `1M-1024-com.json` 实际给出 `t=188417`、17 bit/felt、85 bit/item，JSON 的 SHA-256 为 `ac3cb19932e4122819164a0db1c7ada934bd445538615a798e29893f3c5cfa3d`。先前应用的 `t=270337` 是**真实的参数语义错误**：它改变字段根及多项式系数，尽管 Kuku 位置可能仍相同。本轮只在 `examples/bfv_apsi_concentrated_application.cpp` 将 medium/target 参数修正为 188417，并在原生向量工具中使用 85 位。HPU 使用 4096 个批处理槽，原生 BinBundle 为 4095 个槽；多出的 HPU 槽固定为空槽多项式 1，不参与有效表位置。
+
+`test/apsi_trident_senderdb_differential.py` 对每个 BinBundle 的每个非空槽比较根与**原生缓存实际系数**，以完整实例内容的多重集合容忍合法的 BinBundle 顺序变化；还比较令牌字段、Kuku 候选与接收方摆放、幂次 DAG、原生多项式判零。位于 `trident-faithful-reference/senderdb-cases/` 的 13 组原始输入覆盖单元素、不同桶、同桶、部分字段相同、无/单/多匹配、Kuku 边界、30 次 PS、124 项容量上限、125/126 项额外分包及跨字段组合。服务器命令：
+
+```bash
+python3 test/apsi_trident_senderdb_differential.py \
+  --native ../../trident-faithful-reference/trident-apsi-build/apsi/bin/apsi_native_senderdb \
+  --params ../../trident-faithful-reference/trident/apsi/parameters/1M-1024-com.json \
+  --example ../build/hpu_bfv_apsi_concentrated_example \
+  --case-dir ../../trident-faithful-reference/senderdb-cases \
+  --output ../../trident-faithful-reference/senderdb-final-differential \
+  --full single shared_bin partial_felt ps_degree_30 extra_bundle_125 cross_felt
+```
+
+退出码 0，13/13 预处理差分通过；列出的 6 组还通过完整 SEAL 逐节点、HPU 软件执行、主机指令模型及原生最终判零对照。`senderdb-final-differential.log` 是逐样例状态，`senderdb-final-differential/summary.json` 是机读汇总，`*.native`/`*.hpu` 是逐槽数据，`*.full.log` 是完整软件运行证据。跨字段样例的原始集合交集为空，而原生和 HPU 均恢复 `{999999}`；这属于 Trident APSI 的概率性假阳性，不能用 CPU 精确交集过滤。另以 `finalization-native-vector-diff.log` 记录原生字段、位置、幂次和合成根多项式向量测试，退出码 0。
+
+### 正式代码和 Kuku 构建隔离
+
+正式 PSI 应用移除了完整令牌插值 exact 分支、第二组期望字段密文、相应的减法图和双模式恢复；保留的 `--match-mode trident` 仅作命令行兼容。`CMakeLists.txt` 新增默认关闭的 `HPU_ENABLE_TRIDENT_PSI`：只有开启时才执行 `find_package(Kuku 2.1 CONFIG REQUIRED)`、构建 PSI 和注册其测试。旧 exact 随机目标、CTest 注册及不再适用的测试源/夹具已从收尾分支移除；两个仍用于 Trident 概率性回归的夹具迁入 `test/fixtures/apsi_trident/`。完整历史均可从受保护提交 `96837ad` 恢复。
+
+无 Kuku 的**干净**目录 `build-no-kuku` 使用 `-DHPU_ENABLE_SEAL_INTEGRATION=ON -DHPU_ENABLE_TRIDENT_PSI=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Kuku=TRUE` 配置并构建 `hpu_bfv_evaluator_example`、`hpu_bfv_sealpir_2d_concentrated_example`、`hpu_validate_package`，退出码均为 0。首次配置因服务器向 GitHub 下载 GSL 时 TLS 失败，随后明确指定已有的 GSL、zlib、zstd 源码缓存，配置和构建成功；`finalization-no-kuku-config.log` 与 `finalization-no-kuku-build.log` 分别记录成功配置和实际编译。成功配置未提供 Kuku 前缀，且主动禁用 Kuku 查找。
+
+同一无 Kuku 构建的 `hpu_bfv_sealpir_2d_concentrated_example --profile small --record-index 0` 也实际运行成功，SEAL 参考和 HPU 软件执行 PASS，退出码 0，日志 `finalization-no-kuku-pir-smoke.log`；该构建的目标列表不存在 `hpu_bfv_apsi_concentrated_example`。有 Kuku 构建中 `--match-mode exact` 以退出码 1 明确拒绝。
+
+有 Kuku 的目录 `build` 使用 `-DHPU_ENABLE_TRIDENT_PSI=ON` 和独立 `reference-prefix` 配置，`finalization-config.log`、`finalization-build.log` 记录退出码 0。全部目标构建 `finalization-all-build.log` 退出码 0。参考前缀安装 Kuku 2.1.0；其参考源码固定提交为 `1338c4ae2211ab4c739022ff57f48ce5a76531d5`。Poseidon 参考 CMake 版本 1.0.0，Trident/Poseidon 等抽取源码档案 `trident-reference-sources.tar.gz` 的 SHA-256 是 `16330368bee6a4d78f20bc22334eab05ab622fe7c9e9305d7c4230c133a5bda1`；Flatbuffers/jsoncpp 等抽取档案 `apsi-native-deps.tar.gz` 的 SHA-256 是 `4ddb5e985250940b941b846b6e3a86af19a3fb656080fa6f693bdf02b35cbe76`。这些抽取档案未保留独立组件的 `.git` 元数据，不能据此声称已核实 Poseidon、Flatbuffers、jsoncpp 的完整 Git 提交；可核验的是固定档案校验值和原生运行结果。
+
+参考依赖源码中的版本字段分别为 Poseidon 1.0.0、Flatbuffers 1.12.0、jsoncpp 1.9.5、spdlog 1.17.0；独立 `spdlog-ref-src.tar.gz` 的 SHA-256 为 `c35509bd585b8f43efe5905d149e4acd8daaca6ab5c230ea267e8e7f0d243d7d`。GSL、zlib、zstd 的源码缓存目录名包含固定提交 `152d6eb989a1ecd23fe9c9cfb2fb8cfc7c0cd0c1`、`da607da739fa6047df13e66a2af6b8bec7c2a498`、`f8745da6ff1ad1e7bab384bd1f9d742439278e99`，用于 modified-SEAL 的干净配置；它们不是 Kuku 依赖。
+
+### 项目回归
+
+迁移 Trident 回归夹具后的**最终文件状态**重新执行 `cmake -S repo -B build -DHPU_ENABLE_TRIDENT_PSI=ON`、`cmake --build build -j4`，均退出码 0；`finalization-final-config.log`、`finalization-final-build.log` 是对应证据。随后 `ctest --test-dir build --output-on-failure -j4` 发现 91 项、通过 91 项、失败 0、跳过 0，退出码 0、墙钟 170.63 秒；`finalization-final-ctest-list.log` 为实际发现清单，`finalization-final-ctest.log` 为逐项结果。PIR small、PSI small 的空/单/多/边界、跨字段、应用包以及原有 HPU 单元测试均包含在这 91 项中。目标规模不包含在 CTest 默认集合里，单列如下。
+
+### PIR 正式规模与原生记录
+
+本轮实际执行：
+
+```bash
+/usr/bin/time -v -o ../finalization-pir-target.time \
+  python3 test/sealpir_2d_delivery_test.py \
+    --example ../build/hpu_bfv_sealpir_2d_concentrated_example \
+    --validator ../build/hpu_validate_package \
+    --output ../finalization-pir-target --profile trident --record-index 65535
+```
+
+退出码 0。规模 65,536×288 B、`N=8192`，记录 65535 从实际两阶段密文路径恢复；两包分别为 `finalization-pir-target/stage0_concentrated_000` 和 `stage1_concentrated_000`，均通过上游验证器。两包共 2,780 图节点、886,228 编码指令、316,196 DMA 段，最大包 2,016,645 行 HPU_MEM；两阶段最低噪声预算均为 29 bit。SEAL 参考、HPU 软件执行和主机指令模型通过；墙钟 1:57.48，峰值 RSS 6,124,484 KiB。`finalization-pir-target.log` 含数值与逐包验证，`finalization-pir-target.time` 含资源计量。包清单 SHA-256 为 `0c39bd3b91fd95743500ec734aa4b96e389d6db2d873e5ea811d6d255b00b462`。当前 `actual_record.bin` 与独立生成的 `expected_record.bin` 都是 `5a22fb801e8addf789d7a4009b6b2cf57d106994570b9060ef56da2d236d1a6d`，还与**历史** Trident 原生同输入索引 65535 的 288 字节记录相同。
+
+前一轮已对索引 0、69、70、65534、65535 分别运行固定 Trident 原生程序，并与当时的 HPU 软件恢复记录逐字节比较，五组 `cmp` 退出码均为 0，SHA-256 列于上面的“PIR 同数据库原生对照”。本轮没有重复运行这五个原生查询；本轮新运行的是索引 65535 的正式参数交付，并用新恢复文件校验其与旧原生 65535 结果同 SHA。PIR 应用源本轮未修改，故其余四组作为可追溯的历史证据保留，不能表述为本轮重新执行。
+
+PIR `full`（65,536×1,024 B、`N=4096`）的代表性索引 65535 来自**前一轮历史实测** `pir-run/pir-full-65535.log` 和 `.time`：退出码 0，阶段 0/1 最低噪声 27/28 bit，SEAL 和 HPU 软件执行通过，墙钟 3,942.55 秒，峰值 RSS 25,514,816 KiB。本轮 PIR 源码没有改动；为避免重跑同一约 65 分钟工作量，在发现历史实测记录后中止了本轮重复尝试，后者退出码 130、没有完成，记录在 `finalization-pir-full.log`、`.time`，**不算本轮通过**。本轮实际重新完成的正式 PIR 路径是上面的 Trident 参数 65,536×288 B 两包交付。
+
+PIR 交付目录实际有 196 个文件、约 1.1 GiB。服务器证据根目录的 `finalization-pir-target.FILES.tsv` 列出每个相对文件名与字节数，`finalization-pir-target.SHA256SUMS` 给出每个文件的 SHA-256；两份索引自身的 SHA-256 分别是 `ab4aac6fd6e091cd3bc984f1c6dbc51ec32f61bdd89d7e625b840f3c4b088504` 和 `79bcccd2a4b802141ecadf4a72871d5239d0313e40fd84a39ab91a136a3ad3a4`。索引由 `find` 实际遍历并对全部文件运行 `sha256sum` 生成，可在交付目录执行 `sha256sum -c ../finalization-pir-target.SHA256SUMS` 重验。
+
+### PSI 正式目标规模
+
+本轮在修正 `t=188417`、移除 exact 后实际执行：
+
+```bash
+/usr/bin/time -v -o ../finalization-psi-target.time \
+  python3 test/apsi_concentrated_delivery_test.py \
+    --example ../build/hpu_bfv_apsi_concentrated_example \
+    --validator ../build/hpu_validate_package \
+    --output ../finalization-psi-target --profile target --scenario multi
+```
+
+退出码 0。发送方 1,000,000、接收方 1,024；原始交集、APSI CPU 参考、HPU 解密恢复均为 32 项。参数 `N=4096`、`t=188417`、五字段、三 Kuku 函数、表长 1638、两个位置 bundle、17 个发送方 BinBundle 分区；配置上限 125、观察最高多项式次数 124，11 个源幂生成 25 个目标幂。17/17 个实际应用包通过上游包验证器；SEAL 逐节点、HPU 软件执行、主机指令模型均 PASS，实体 HPU/RTL 未运行。总图节点 12,593、编码指令 8,742,583、DMA 段 3,321,031、最大包 HPU_MEM 5,980,417 行；最低输出噪声 4 bit。软件编译加验证 730.907 秒，整个脚本墙钟 14:38.98，峰值 RSS 3,807,472 KiB。`finalization-psi-target.log` 包含各分区数值及 17 次包校验，`finalization-psi-target.time` 记录外层资源；`finalization-psi-target/pipeline_manifest.json` 的 SHA-256 为 `786c423aa6645e43ddbd2d24c6648fc9bc20ec65e648b15fbed5ea9ae15aa887`。
+
+旧版基线为 17 包、12,593 节点、8,742,583 指令、3,321,031 DMA、最低噪声 3 bit。本轮前四项数值不变；**推断**原因是固定输入的 Kuku 摆放、BinBundle 容量、幂次 DAG 与计算图拓扑未随明文字段模数改变。明文模数及字段根的数值已被原生差分证明改变，最低噪声由 3 增至 4 bit，不能把相同节点计数误当作参数未修正。百万级原生 SenderDB 全库逐槽对照本轮未运行；13 组边界输入已做真实原生差分，百万级运行验证的是修正后应用的完整软件交付路径。
+
+PSI 交付目录实际有 392 个文件、约 5.8 GiB；`finalization-psi-target.FILES.tsv` 列全量文件名与字节数，`finalization-psi-target.SHA256SUMS` 列每个文件的 SHA-256。两份索引自身的 SHA-256 分别为 `866ae5f099e9f39b6d8f132b2ba91df6b504c16c91a73a86fcc6a89f8372c086` 和 `ef56e3de92f08f7e960e3cb004a52b28994959b3c3e1e507e9d84fb9acdb15a9`。索引保存在交付目录的同级；在交付目录执行 `sha256sum -c ../finalization-psi-target.SHA256SUMS` 可逐文件重验。
+
+### 证据位置、验证层级和未覆盖范围
+
+服务器源码根目录为 `/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-alignment-20261026/repo`；上述 `finalization-*.log`、`finalization-*.time`、`finalization-*-target/` 和全量文件索引位于其父目录 `/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-alignment-20261026/`。原生 Trident 参考及 `senderdb-final-differential/` 位于同级的 `/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-faithful-reference/`。两个正式交付目录的汇编、编码指令、DMA 和 HPU_MEM 均由当前 HPU 构建链生成，未人工补造；逐文件清单可定位这些产物。
+
+本轮软件验证层级是：SEAL 参考逐节点系数、现有 HPU 软件执行器、主机编码指令模型、上游应用包格式验证器。包验证器通过单独表示结构有效，数值正确性依据前三级及解密结果。实体 HPU、SoC、RTL 均**未运行**。普通应用未执行 FourQ OPRF 交互式网络协议，原生差分只在固定密钥的 OPRF 输出边界审计；不能将软件耗时推算为硬件性能，也不能将概率性 PSI 匹配强制解释为精确集合交集。PIR 的 31 位系数模数适配及经过软件验证的阶段间参考密文代理维持不变。
+
+生成交付时的 HPU PSI 可执行文件 SHA-256 为 `d4f3a87941523826b933fdab4728039aec66448d8ac645941b485113ad0db7d2`，PSI 应用源码 SHA-256 为 `9495f6cd7f6665229e764bcd54ab15fab460e86c493ab4102c2950be98f21d01`；PIR 可执行文件与源码分别为 `a77d2e7c6c67fad793c167a35fe0a3f81e2dcbbb3943bb8ed7d3ed449f2b2184`、`7c56121c8b0ed729cdaea0ebf63d3ffdaf4aee401b5f2b3ff26101554a8dd1dc`。应用包从本轮待提交工作树生成；最终提交后再次校验源码哈希，以证明提交包含运行时的应用代码。包内如有历史基础提交字段，不应误读为本轮实际应用源码版本。
+
+### 上游核心保护与收尾分支变更
+
+服务器备份引用 `backup/trident-faithful-96837ad-20261027` 指向完整 `96837ad64523fdd181df699c416a7a22d23363db`。本轮未触及 `src/`、`include/`、`encode/`；最终提交后运行 `git diff --exit-code cfee951e4056660e521d55a3535d82335a49bb08 HEAD -- src include encode`，退出码 0。没有修改上游公开 API、底层算子、指令语义、DMA 或软件执行器。CMake 仅给 PSI 增加独立开关与限定依赖，原有 HPU/PIR 目标在无 Kuku 干净构建中已真实构建和运行。
+
+与受保护提交 `96837ad` 相比，收尾分支的完整文件变更清单如下；`R` 表示原内容迁移到 Trident 夹具目录：
+
+```text
+M CMakeLists.txt
+M README.md
+M doc/examples/APSI_CONCENTRATED_HPU_APPLICATION.md
+M doc/examples/PIR_PSI_TRIDENT_ALIGNMENT_VALIDATION.md
+M doc/examples/PIR_PSI_TRIDENT_SEMANTIC_ALIGNMENT.md
+A doc/examples/TRIDENT_PIR_PSI_FINAL_GUIDE.md
+M examples/bfv_apsi_concentrated_application.cpp
+M test/apsi_concentrated_delivery_test.py
+D test/apsi_random/README.md
+D test/apsi_random/generate_psi_hpu_cases.py
+D test/apsi_random/psi_cpu_model.py
+D test/apsi_random/run_apsi_random_differential.py
+M test/apsi_trident_counterexample_search.cpp
+M test/apsi_trident_cross_felt_test.py
+M test/apsi_trident_native_vector.cpp
+A test/apsi_trident_senderdb_accessor.py
+A test/apsi_trident_senderdb_cases.py
+A test/apsi_trident_senderdb_differential.py
+A test/apsi_trident_senderdb_native.cpp
+D test/fixtures/apsi_exact/README.md
+D test/fixtures/apsi_exact/capacity_125.input
+D test/fixtures/apsi_exact/capacity_126.input
+D test/fixtures/apsi_exact/real_input.input
+D test/fixtures/apsi_exact/real_input_medium.input
+M test/fixtures/apsi_trident/README.md
+R test/fixtures/apsi_exact/cross_felt.input -> test/fixtures/apsi_trident/cross_felt.input
+M test/fixtures/apsi_trident/cross_felt_native.input
+R test/fixtures/apsi_exact/truncation.input -> test/fixtures/apsi_trident/truncation.input
+```
+
+本轮尚未解决的是完整 FourQ OPRF 网络协议、实体 HPU/RTL 验收和百万级原生 SenderDB 全库逐槽对照；这些均不属于当前软件移植验收的通过项。原生 SenderDB 的 13 组差分及目标规模应用软件交付已分别完成。收尾分支按用户后续授权仅推送至 `adamsir32/inline-asm`，不推送原作者上游。

@@ -26,6 +26,12 @@ option(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE
 option(HPU_ENABLE_SEAL_INTEGRATION
         "Build the vendored modified-SEAL CKKS/BFV/BGV integration layer"
         OFF)
+option(HPU_ENABLE_TRIDENT_PSI
+        "Build the Trident APSI application and its Kuku-dependent tests"
+        OFF)
+if(HPU_ENABLE_TRIDENT_PSI AND NOT HPU_ENABLE_SEAL_INTEGRATION)
+    message(FATAL_ERROR "HPU_ENABLE_TRIDENT_PSI requires HPU_ENABLE_SEAL_INTEGRATION")
+endif()
 option(HPU_ENABLE_DEPLOYMENT_APPLICATION_TESTS
         "Register N=65536 application package tests (longer host execution)"
         OFF)
@@ -562,12 +568,13 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     target_link_libraries(hpu_bfv_sealpir_2d_concentrated_example
             PRIVATE hpu_seal_delivery hpu_filesystem_compat)
 
-    add_executable(hpu_bfv_apsi_concentrated_example
-            examples/bfv_apsi_concentrated_application.cpp
-    )
-    find_package(Kuku 2.1 CONFIG REQUIRED)
-    target_link_libraries(hpu_bfv_apsi_concentrated_example
-            PRIVATE hpu_seal_delivery hpu_filesystem_compat Kuku::kuku)
+    if(HPU_ENABLE_TRIDENT_PSI)
+        find_package(Kuku 2.1 CONFIG REQUIRED)
+        add_executable(hpu_bfv_apsi_concentrated_example
+                examples/bfv_apsi_concentrated_application.cpp)
+        target_link_libraries(hpu_bfv_apsi_concentrated_example
+                PRIVATE hpu_seal_delivery hpu_filesystem_compat Kuku::kuku)
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
@@ -672,6 +679,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         COMMENT "Generating two-package BFV PIR delivery: Trident 65536x288 N=8192 profile"
         VERBATIM)
 
+    if(HPU_ENABLE_TRIDENT_PSI)
     add_custom_target(bfv_apsi_concentrated_small_delivery
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_concentrated_delivery_test.py
             --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
@@ -705,14 +713,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         COMMENT "Generating partitioned BFV PSI delivery: 1M sender and 1024 receiver items"
         VERBATIM)
 
-    add_custom_target(bfv_apsi_exact_random_differential
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_random/run_apsi_random_differential.py
-            --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>
-            --out-dir ${CMAKE_CURRENT_BINARY_DIR}/apsi_exact_random_differential
-            --count 20
-        DEPENDS hpu_bfv_apsi_concentrated_example
-        COMMENT "Running 20 deterministic medium PSI random differential cases"
-        VERBATIM)
+    endif()
 
     if(BUILD_TESTING)
         foreach(sealpir_record 0 64 127)
@@ -731,6 +732,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         set_tests_properties(bfv_sealpir_2d_concentrated_small_delivery_test
             PROPERTIES LABELS "application-delivery;sealpir-2d;concentrated" RUN_SERIAL TRUE TIMEOUT 1200)
 
+        if(HPU_ENABLE_TRIDENT_PSI)
         foreach(apsi_scenario empty single multi boundary)
             add_test(NAME hpu_bfv_apsi_concentrated_small_${apsi_scenario}
                 COMMAND hpu_bfv_apsi_concentrated_example
@@ -747,30 +749,6 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         set_tests_properties(bfv_apsi_concentrated_small_delivery_test
             PROPERTIES LABELS "application-delivery;apsi;concentrated" RUN_SERIAL TRUE TIMEOUT 2400)
 
-        foreach(apsi_fixture truncation cross_felt real_input)
-            set(apsi_fixture_options)
-            if(apsi_fixture STREQUAL "real_input")
-                list(APPEND apsi_fixture_options --test-require-fixture-tokens)
-            endif()
-            add_test(NAME hpu_bfv_apsi_exact_small_${apsi_fixture}
-                COMMAND hpu_bfv_apsi_concentrated_example --profile small
-                    --test-input ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_exact/${apsi_fixture}.input
-                    ${apsi_fixture_options})
-            set_tests_properties(hpu_bfv_apsi_exact_small_${apsi_fixture}
-                PROPERTIES LABELS "apsi;application;exact-regression" RUN_SERIAL TRUE TIMEOUT 1800)
-        endforeach()
-        foreach(apsi_fixture real_input_medium capacity_125 capacity_126)
-            set(apsi_fixture_options)
-            if(apsi_fixture STREQUAL "real_input_medium")
-                list(APPEND apsi_fixture_options --test-require-fixture-tokens)
-            endif()
-            add_test(NAME hpu_bfv_apsi_exact_medium_${apsi_fixture}
-                COMMAND hpu_bfv_apsi_concentrated_example --profile medium
-                    --test-input ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_exact/${apsi_fixture}.input
-                    ${apsi_fixture_options})
-            set_tests_properties(hpu_bfv_apsi_exact_medium_${apsi_fixture}
-                PROPERTIES LABELS "apsi;application;exact-regression" RUN_SERIAL TRUE TIMEOUT 2400)
-        endforeach()
         add_test(NAME hpu_bfv_apsi_trident_small_multi
             COMMAND hpu_bfv_apsi_concentrated_example
                 --profile small --scenario multi --match-mode trident)
@@ -780,7 +758,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             add_test(NAME hpu_bfv_apsi_trident_small_${apsi_fixture}
                 COMMAND hpu_bfv_apsi_concentrated_example --profile small
                     --match-mode trident
-                    --test-input ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_exact/${apsi_fixture}.input)
+                    --test-input ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_trident/${apsi_fixture}.input)
             set_tests_properties(hpu_bfv_apsi_trident_small_${apsi_fixture}
                 PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 1800)
         endforeach()
@@ -791,6 +769,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
                 --fixture ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_trident/cross_felt_native.input)
         set_tests_properties(hpu_bfv_apsi_trident_native_cross_felt
             PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 2400)
+        endif()
     endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)
     hpu_application_delivery(bfv bfv_multiply_modswitch_application_n65536 hpu_bfv_multiply_modswitch_example 65536)

@@ -21,7 +21,6 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", choices=("small", "medium", "target"), required=True)
     parser.add_argument("--scenario", choices=("empty", "single", "multi", "boundary"), required=True)
-    parser.add_argument("--match-mode", choices=("exact", "trident"), default="exact")
     parser.add_argument("--optimize-resources", action="store_true")
     args = parser.parse_args()
 
@@ -32,7 +31,7 @@ def main() -> int:
         args.example,
         "--profile", args.profile,
         "--scenario", args.scenario,
-        "--match-mode", args.match_mode,
+        "--match-mode", "trident",
         "--emit-dir", str(output),
     ]
     if args.optimize_resources:
@@ -48,7 +47,7 @@ def main() -> int:
     manifest_path = output / "pipeline_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     packages = manifest.get("packages", [])
-    if manifest.get("match_mode") != args.match_mode:
+    if manifest.get("match_mode") != "trident":
         raise RuntimeError("PSI package match mode differs from request")
     if not packages or manifest.get("hpu_application_packages") != len(packages):
         raise RuntimeError("concentrated PSI delivery package count is inconsistent")
@@ -68,8 +67,7 @@ def main() -> int:
     if "fixture" not in manifest.get("oprf_mode", ""):
         raise RuntimeError("cropped OPRF boundary is not explicit")
     set_data = json.loads((output / "set_test_data.json").read_text(encoding="utf-8"))
-    expected = (set_data["apsi_reference_matches"] if args.match_mode == "trident"
-                else set_data["expected_intersection"])
+    expected = set_data["apsi_reference_matches"]
     if expected != set_data["recovered_intersection"]:
         raise RuntimeError("recovered PSI intersection differs from the selected CPU reference")
     for package in packages:

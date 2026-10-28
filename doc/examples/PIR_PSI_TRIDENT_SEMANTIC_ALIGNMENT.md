@@ -1,5 +1,13 @@
 # PIR/PSI 与 Trident 的计算语义映射
 
+> **收尾修正（2026-10-28）：**本文件早期表格按当时源码记录了
+> `t=270337`、18 bit/felt、90 bit/item 和 exact 扩展。固定 Trident
+> `1M-1024-com.json` 经原生 `PSIParams::Load` 后实际为 `t=188417`、
+> 17 bit/felt、85 bit/item。收尾分支已采用这些值，正式 PSI 只保留
+> Trident 的独立字段根多项式；原生 SenderDB/BinBundle 差分与最终实测
+> 见 [验收报告](PIR_PSI_TRIDENT_ALIGNMENT_VALIDATION.md#2026-10-28-收尾验收)。
+> 下文保留旧阶段的观察和计划，不应当成当前代码状态。
+
 本文记录修改应用前的源码基线和后续验证状态。合并提交为
 `063ee45f56a33553ba9bbe13d1f166ce3bf73fff`；其父提交分别为本 fork
 `c98b8ef3633de77e0ec724793a0a98ed68532910` 和上游
