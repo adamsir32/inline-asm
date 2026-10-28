@@ -44,6 +44,7 @@ struct Options {
     Profile profile;
     std::size_t target = 0;
     std::vector<std::size_t> extra_targets;
+    std::filesystem::path stage0_readback;
     evaluator_example::Options evaluator;
 };
 
@@ -77,6 +78,7 @@ Options parse_options(int argc, char** argv)
     bool target_set = false;
     std::size_t target = 0;
     std::vector<std::size_t> extra_targets;
+    std::filesystem::path stage0_readback;
     bool force_resource_optimization = false;
     std::vector<char*> remaining{argv[0]};
     for (int i = 1; i < argc; ++i) {
@@ -105,6 +107,9 @@ Options parse_options(int argc, char** argv)
         } else if (argument == "--test-extra-record-index") {
             if (++i >= argc) throw std::invalid_argument("--test-extra-record-index needs a value");
             extra_targets.push_back(parse_size(argv[i], "--test-extra-record-index"));
+        } else if (argument == "--stage0-readback") {
+            if (++i >= argc) throw std::invalid_argument("--stage0-readback needs a path");
+            stage0_readback = argv[i];
         } else {
             remaining.push_back(argv[i]);
         }
@@ -123,7 +128,8 @@ Options parse_options(int argc, char** argv)
     for (const auto extra : extra_targets)
         if (extra >= profile.element_count || extra / per_plain != target / per_plain)
             throw std::invalid_argument("--test-extra-record-index must share the selected plaintext");
-    return {profile, target, std::move(extra_targets), std::move(evaluator)};
+    return {profile, target, std::move(extra_targets),
+            std::move(stage0_readback), std::move(evaluator)};
 }
 
 std::size_t integer_log2_ceil(std::size_t value)
@@ -161,6 +167,102 @@ const ::seal::Ciphertext& verified_oracle_result(
     // as a stage-boundary proxy here because compile() has already compared
     // every software-executor output coefficient against this oracle.
     return compiled.oracle_result(value);
+}
+
+std::size_t bit_reverse_index(std::size_t value, std::size_t degree)
+{
+    std::size_t result = 0;
+    for (std::size_t bits = degree; bits > 1; bits >>= 1) {
+        result = (result << 1) | (value & 1);
+        value >>= 1;
+    }
+    return result;
+}
+
+std::uint64_t fnv1a_plaintexts(const std::vector<::seal::Plaintext>& values)
+{
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const auto& plain : values)
+        for (std::size_t coefficient = 0; coefficient < plain.coeff_count(); ++coefficient) {
+            const auto word = plain[coefficient];
+            for (std::size_t byte = 0; byte < 8; ++byte) {
+                hash ^= (word >> (byte * 8)) & 0xff;
+                hash *= UINT64_C(1099511628211);
+            }
+        }
+    return hash;
+}
+
+std::vector<::seal::Ciphertext> import_stage0_readback(
+    const std::filesystem::path& path,
+    const hpu::seal_adapter::CompiledApplication& compiled,
+    const std::vector<hpu::seal_adapter::Ciphertext>& outputs,
+    const ::seal::SEALContext& context)
+{
+    const auto& package = compiled.package();
+    const auto expected_bytes = package.initial_image->used_lines() * std::uint64_t{256};
+    require(std::filesystem::file_size(path) == expected_bytes,
+            "stage0 readback must be the complete post-execution HPU_MEM image");
+    std::ifstream input(path, std::ios::binary);
+    require(static_cast<bool>(input), "cannot open stage0 readback image");
+    std::vector<::seal::Ciphertext> result;
+    std::vector<std::vector<bool>> covered;
+    std::string current_object;
+    std::uint64_t checksum = UINT64_C(14695981039346656037);
+    for (const auto& limb : package.outputs) {
+        if (limb.object_id != current_object) {
+            current_object = limb.object_id;
+            require(result.size() < outputs.size(), "stage0 readback has extra output objects");
+            result.push_back(verified_oracle_result(compiled, outputs[result.size()]));
+            const auto level = context.get_context_data(result.back().parms_id());
+            require(static_cast<bool>(level) && !result.back().is_ntt_form(),
+                    "stage0 readback requires a coefficient-domain BFV ciphertext");
+            const auto count = level->parms().coeff_modulus().size();
+            covered.emplace_back(result.back().size() * count, false);
+            std::fill_n(result.back().data(), result.back().size() * count *
+                        level->parms().poly_modulus_degree(), std::uint64_t{0});
+        }
+        auto& ciphertext = result.back();
+        const auto level = context.get_context_data(ciphertext.parms_id());
+        const auto& moduli = level->parms().coeff_modulus();
+        const auto degree = level->parms().poly_modulus_degree();
+        require(limb.domain == hpu::delivery::OutputDomain::coefficient_bit_reversed &&
+                limb.word_count == degree && limb.component < ciphertext.size() &&
+                limb.modulus_id < moduli.size() &&
+                limb.modulus == moduli[limb.modulus_id].value() &&
+                limb.golden_words.size() == degree,
+                "stage0 readback output metadata differs from BFV recursive level");
+        const auto key = limb.component * moduli.size() + limb.modulus_id;
+        require(!covered.back()[key], "stage0 readback repeats a component/modulus limb");
+        covered.back()[key] = true;
+        std::vector<unsigned char> bytes(degree * sizeof(std::uint32_t));
+        input.seekg(static_cast<std::streamoff>(limb.destination.line_offset * 256));
+        input.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        require(static_cast<bool>(input), "stage0 readback is truncated at an output limb");
+        for (std::size_t physical = 0; physical < degree; ++physical) {
+            const auto offset = physical * 4;
+            const auto word = std::uint32_t(bytes[offset]) |
+                (std::uint32_t(bytes[offset + 1]) << 8) |
+                (std::uint32_t(bytes[offset + 2]) << 16) |
+                (std::uint32_t(bytes[offset + 3]) << 24);
+            require(word == limb.golden_words[physical],
+                    "stage0 readback differs from independently checked package Golden");
+            ciphertext.data(limb.component)[limb.modulus_id * degree +
+                bit_reverse_index(physical, degree)] = word;
+            for (std::size_t j = 0; j < 4; ++j) {
+                checksum ^= bytes[offset + j];
+                checksum *= UINT64_C(1099511628211);
+            }
+        }
+    }
+    require(result.size() == outputs.size(), "stage0 readback misses output objects");
+    for (const auto& object : covered)
+        require(std::all_of(object.begin(), object.end(), [](bool value) { return value; }),
+                "stage0 readback misses a component/modulus limb");
+    std::cerr << "AUDIT_STAGE0_READBACK_FNV1A64 " << std::hex << checksum << std::dec
+              << " source=" << path << '\n';
+    return result;
 }
 
 std::vector<std::size_t> dimensions(std::size_t plaintext_count)
@@ -441,6 +543,8 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
                   << '\n';
     maybe_write(options, directory, compiled);
     stats.push_back(package_stats(stage + " concentrated", directory, compiled));
+    if (stage == "stage0" && !options.stage0_readback.empty())
+        return import_stage0_readback(options.stage0_readback, compiled, outputs, context);
     std::vector<::seal::Ciphertext> actual;
     actual.reserve(outputs.size());
     for (const auto& output : outputs)
@@ -607,18 +711,28 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"first_stage_decomposed_plaintexts\": " << decomposition_count << ",\n"
              << "  \"first_stage_min_noise_budget_bits\": " << first_noise << ",\n"
              << "  \"final_stage_min_noise_budget_bits\": " << final_noise << ",\n"
-             << "  \"cross_stage_source\": \"SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification\",\n"
+             << "  \"cross_stage_source\": \""
+             << (options.stage0_readback.empty()
+                 ? "SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification"
+                 : "external post-execution HPU_MEM readback checked against Golden and converted from coefficient bit-reversed layout")
+             << "\",\n"
              << "  \"package_strategy\": \""
              << "concentrated recursive stages"
              << "\",\n"
-             << "  \"cpu_interstage_step\": \"decompose the stage0 verified-oracle proxy into plaintext chunks\",\n"
+             << "  \"cpu_interstage_step\": \"decompose the stage0 "
+             << (options.stage0_readback.empty() ? "verified-oracle proxy" : "verified external readback")
+             << " into plaintext chunks\",\n"
              << "  \"resource_optimization\": "
              << (options.evaluator.compiler.optimize_resources ? "true" : "false") << ",\n"
              << "  \"semantic_record_match\": " << (expected == actual ? "true" : "false") << ",\n"
              << "  \"real_hardware_verified\": false,\n"
              << "  \"execution_pipeline\": [\n"
              << "    {\"step\": \"hpu_stage0\", \"produces\": \"first-dimensional ciphertext replies\"},\n"
-             << "    {\"step\": \"cpu_decompose\", \"depends_on\": \"stage0 oracle proxy after exact HPU software verification\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
+             << "    {\"step\": \"cpu_decompose\", \"depends_on\": \""
+             << (options.stage0_readback.empty()
+                 ? "stage0 oracle proxy after exact HPU software verification"
+                 : "external stage0 HPU_MEM readback after Golden comparison")
+             << "\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
              << "    {\"step\": \"hpu_stage1\", \"depends_on\": \"cpu_decompose output plus second compressed query\", \"produces\": \"recursive PIR reply\"},\n"
              << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"stage1 oracle proxy after exact HPU software verification\", \"produces\": \"recovered "
              << gElementBytes << "-byte record\"}\n"
@@ -640,7 +754,10 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
     commands << "Generated by:\n"
              << "  hpu_bfv_sealpir_2d_concentrated_example"
              << " --profile " << options.profile.name
-             << " --record-index " << options.target << " --emit-dir " << root.string() << "\n\n"
+             << " --record-index " << options.target;
+    if (!options.stage0_readback.empty())
+        commands << " --stage0-readback " << options.stage0_readback.string();
+    commands << " --emit-dir " << root.string() << "\n\n"
              << "The executable is the unified pipeline runner: it executes stage0,\n"
              << "performs the required CPU ciphertext decomposition, then executes stage1.\n\n"
              << "Validate every HPU package directory listed in pipeline_manifest.json:\n"
@@ -759,6 +876,10 @@ int run(int argc, char** argv)
         }
         require(decomposed.size() == shape[1] * expansion_ratio(recursive_parameters) * 2,
                 "first-stage ciphertext decomposition has the wrong size");
+        if (!options.stage0_readback.empty())
+            std::cerr << "AUDIT_STAGE1_INPUT_FNV1A64 " << std::hex
+                      << fnv1a_plaintexts(decomposed) << std::dec
+                      << " plaintexts=" << decomposed.size() << '\n';
 
         require(decomposed.size() % shape[1] == 0,
                 "second-stage recursive matrix is not divisible by its dimension");
@@ -787,6 +908,15 @@ int run(int argc, char** argv)
         if (!gTestOutputRecord.empty()) write_bytes(gTestOutputRecord, actual_record);
         require(actual_record == expected_record,
                 "two-dimensional recursive PIR returned the wrong record bytes");
+        if (!options.stage0_readback.empty()) {
+            std::uint64_t record_hash = UINT64_C(14695981039346656037);
+            for (const auto byte : actual_record) {
+                record_hash ^= byte;
+                record_hash *= UINT64_C(1099511628211);
+            }
+            std::cerr << "AUDIT_RECORD_FNV1A64 " << std::hex << record_hash
+                      << std::dec << " bytes=" << actual_record.size() << '\n';
+        }
         for (const auto extra : options.extra_targets) {
             const auto begin = (extra % per_plain) * coefficients_per_element();
             std::vector<std::uint64_t> extra_coefficients(

@@ -716,7 +716,7 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
     endif()
 
     if(BUILD_TESTING)
-        foreach(sealpir_record 0 64 127)
+        foreach(sealpir_record 0 8 9 64 127)
             add_test(NAME hpu_bfv_sealpir_2d_concentrated_small_record_${sealpir_record}
                 COMMAND hpu_bfv_sealpir_2d_concentrated_example
                     --profile small --record-index ${sealpir_record})
@@ -731,6 +731,12 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
                 --profile small --record-index 127)
         set_tests_properties(bfv_sealpir_2d_concentrated_small_delivery_test
             PROPERTIES LABELS "application-delivery;sealpir-2d;concentrated" RUN_SERIAL TRUE TIMEOUT 1200)
+        add_test(NAME hpu_bfv_sealpir_stage0_readback_adapter
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_stage0_readback_test.py
+                --example $<TARGET_FILE:hpu_bfv_sealpir_2d_concentrated_example>)
+        set_tests_properties(hpu_bfv_sealpir_stage0_readback_adapter
+            PROPERTIES LABELS "sealpir-2d;application;readback-adapter" RUN_SERIAL TRUE TIMEOUT 900)
 
         if(HPU_ENABLE_TRIDENT_PSI)
         foreach(apsi_scenario empty single multi boundary)
@@ -769,6 +775,17 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
                 --fixture ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/apsi_trident/cross_felt_native.input)
         set_tests_properties(hpu_bfv_apsi_trident_native_cross_felt
             PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 2400)
+        add_test(NAME hpu_bfv_apsi_trident_duplicate_input
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_trident_duplicate_input_test.py
+                --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>)
+        set_tests_properties(hpu_bfv_apsi_trident_duplicate_input
+            PROPERTIES LABELS "apsi;application;trident-regression" RUN_SERIAL TRUE TIMEOUT 180)
+        add_test(NAME hpu_bfv_apsi_senderdb_driver_failures
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_trident_senderdb_differential_self_test.py)
+        set_tests_properties(hpu_bfv_apsi_senderdb_driver_failures
+            PROPERTIES LABELS "apsi;application;trident-regression" TIMEOUT 30)
         endif()
     endif()
     hpu_application_delivery(ckks ckks_composed_application_n65536 hpu_ckks_composed_application_example 65536)

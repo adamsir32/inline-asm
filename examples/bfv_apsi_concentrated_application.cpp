@@ -81,6 +81,8 @@ void load_test_input(const std::string& filename)
     std::ifstream file(filename);
     if (!file) throw std::runtime_error("cannot open --test-input file");
     std::string line;
+    std::unordered_set<std::uint64_t> seen_sender, seen_receiver;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> token_owners;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
         std::istringstream input(line);
@@ -94,8 +96,15 @@ void load_test_input(const std::string& filename)
         const auto previous = g_test_tokens.find(item);
         if (previous != g_test_tokens.end() && !(previous->second == value))
             throw std::invalid_argument("conflicting test token for item");
+        const auto owner = token_owners.emplace(std::make_pair(low, high), item);
+        if (!owner.second && owner.first->second != item)
+            throw std::invalid_argument("distinct test items share one token");
         g_test_tokens[item] = value;
-        (side == 'S' ? g_test_sender : g_test_receiver).push_back(item);
+        // SenderDB and the receiver query represent sets of raw items. A
+        // repeated item with the same token is one item, not another root.
+        auto& seen = side == 'S' ? seen_sender : seen_receiver;
+        if (seen.insert(item).second)
+            (side == 'S' ? g_test_sender : g_test_receiver).push_back(item);
     }
     if (g_test_sender.empty() || g_test_receiver.empty())
         throw std::invalid_argument("test input needs sender and receiver items");

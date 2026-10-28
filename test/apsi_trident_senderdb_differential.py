@@ -95,14 +95,22 @@ def main():
     parser.add_argument("--full", nargs="*", default=[])
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    cases = sorted(args.case_dir.glob("*.raw"))
     requested_full = set(args.full)
     summary = []
-    for raw in sorted(args.case_dir.glob("*.raw")):
+    configuration_errors = []
+    if not cases:
+        configuration_errors.append(f"no *.raw cases in {args.case_dir}")
+    missing_full = sorted(requested_full - {raw.stem for raw in cases})
+    if missing_full:
+        configuration_errors.append(f"--full cases not found: {', '.join(missing_full)}")
+    for raw in cases:
         name = raw.stem
         fixture = args.output / f"{name}.input"
         native_dump = args.output / f"{name}.native"
         hpu_dump = args.output / f"{name}.hpu"
-        record = {"case": name, "status": "FAIL"}
+        record = {"case": name, "status": "FAIL", "full_hpu_requested": name in requested_full,
+                  "full_hpu_verified": False}
         try:
             run([args.native, args.params, str(raw), str(fixture), str(native_dump)],
                 args.output / f"{name}.native.log")
@@ -150,9 +158,20 @@ def main():
             record["error"] = str(error)
         summary.append(record)
         print(f"{name}: {record['status']} {record.get('error', '')}", flush=True)
-    (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n",
+    report = {"case_directory": str(args.case_dir.resolve()),
+              "input_case_count": len(cases), "run_case_count": len(summary),
+              "full_hpu_requested": sorted(requested_full),
+              "full_hpu_verified_count": sum(bool(row["full_hpu_verified"]) for row in summary),
+              "configuration_errors": configuration_errors,
+              "status": "PASS" if not configuration_errors and
+                        len(summary) == len(cases) and
+                        all(row["status"] == "PASS" for row in summary) else "FAIL",
+              "cases": summary}
+    (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n",
                                                 encoding="utf-8")
-    if any(record["status"] != "PASS" for record in summary):
+    for error in configuration_errors:
+        print(f"configuration: FAIL {error}", flush=True)
+    if report["status"] != "PASS":
         raise SystemExit(1)
 
 
