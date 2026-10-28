@@ -34,3 +34,22 @@
 | 最终 PIR 代码 CTest：0/8/9/64/127 与读回适配 | PASS，6/6 | `../readiness-pir-final-ctest.log` |
 
 本轮没有重新生成正式规模包。现有 19 个包是静态审计对象，其来源字段仍标示旧提交且 `dirty-at-configure`；不能把本轮新分支代码与旧包声明为同一构建。真正独立的第一阶段执行后内存读回尚缺，见[阶段交接报告](PIR_STAGE_HANDOFF_VALIDATION.md)。
+
+上述 PASS 命令的退出码均为 **0**；预期拒绝的重复原生 raw、空目录/错 `--full` 和损坏读回则为**非零**。应用测试所用代码树在首个提交 `115c3debb81a77fd7a6d3fe156701bfe2e953c6a` 中保存；本报告后续文字变更不改变可执行代码。完整可复现命令（在服务器 `repo/` 目录运行）：
+
+```sh
+cmake -S . -B ../build -DBUILD_TESTING=ON
+cmake --build ../build --target hpu_bfv_apsi_concentrated_example hpu_bfv_sealpir_2d_concentrated_example -j4
+ctest --test-dir ../build -R 'hpu_bfv_sealpir_stage0_readback_adapter|hpu_bfv_sealpir_2d_concentrated_small_record_(0|8|9|64|127)$' --output-on-failure
+python3 test/apsi_trident_senderdb_differential.py \
+  --native ../../trident-faithful-reference/trident-apsi-build/apsi/bin/apsi_native_senderdb \
+  --params ../../trident-faithful-reference/trident/apsi/parameters/1M-1024-com.json \
+  --example ../build/hpu_bfv_apsi_concentrated_example \
+  --case-dir ../../trident-faithful-reference/senderdb-cases \
+  --output ../readiness-senderdb-full-single --full single
+python3 test/pir_psi_package_audit.py \
+  --pir ../finalization-pir-target --psi ../finalization-psi-target \
+  --output doc/delivery/PIR_PSI_PACKAGE_MANIFEST.csv
+```
+
+包校验以每个目录执行 `../build/hpu_validate_package <package-directory>`，19 条实际退出码见逐包 TSV。`../readiness-senderdb-full-single/summary.json` 明列 `input_case_count=13`、`run_case_count=13`、`full_hpu_verified_count=1`。原生重复 raw 失败是审计驱动在进入 SenderDB 前的输入限制，不计入正常案例失败。
