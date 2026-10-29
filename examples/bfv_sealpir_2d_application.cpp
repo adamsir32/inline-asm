@@ -2,6 +2,7 @@
 #include "hpu/seal/ntt_bridge.hpp"
 
 #include <seal/seal.h>
+#include <seal/util/ntt.h>
 #include <seal/util/numth.h>
 
 #include <algorithm>
@@ -886,6 +887,47 @@ void write_words_le(const std::filesystem::path& path,
     write_bytes(path, bytes);
 }
 
+void write_cpu_plaintext_fixture(const std::filesystem::path& path,
+                                 const std::vector<::seal::Plaintext>& plains)
+{
+    require(plains.size() == 32, "CPU fixture requires 32 decomposed plaintexts");
+    std::vector<std::uint32_t> words;
+    words.reserve(plains.size() * gDegree);
+    for (const auto& plain : plains) {
+        require(plain.coeff_count() == gDegree,
+                "CPU fixture plaintext degree mismatch");
+        for (std::size_t i = 0; i < gDegree; ++i) {
+            require(plain[i] <= UINT32_MAX, "CPU fixture coefficient exceeds uint32");
+            words.push_back(static_cast<std::uint32_t>(plain[i]));
+        }
+    }
+    write_words_le(path, words);
+}
+
+void write_cpu_parameters_fixture(const std::filesystem::path& path,
+                                  const ::seal::SEALContext& context,
+                                  const ::seal::EncryptionParameters& recursive)
+{
+    const auto top = context.first_context_data();
+    require(static_cast<bool>(top) && top->parms().coeff_modulus().size() == 3 &&
+            recursive.coeff_modulus().size() == 2,
+            "CPU fixture BFV levels differ from the small PIR contract");
+    std::ofstream output(path);
+    require(static_cast<bool>(output), "cannot create CPU fixture parameters");
+    output << "{\"degree\":" << gDegree << ",\"plain_bits\":20,\"plain_modulus\":"
+           << top->parms().plain_modulus().value() << ",\"stage0_output_moduli\":[";
+    for (std::size_t i = 0; i < 2; ++i)
+        output << (i ? "," : "") << recursive.coeff_modulus()[i].value();
+    output << "],\"stage1_input_moduli\":[";
+    for (std::size_t i = 0; i < 3; ++i)
+        output << (i ? "," : "") << top->parms().coeff_modulus()[i].value();
+    output << "],\"stage1_psi\":[";
+    for (std::size_t i = 0; i < 3; ++i)
+        output << (i ? "," : "") << top->small_ntt_tables()[i].get_root();
+    output << "]}\n";
+    require(static_cast<bool>(output), "cannot write CPU fixture parameters");
+}
+
 std::vector<std::uint32_t> read_words_le(const std::filesystem::path& path,
                                          std::size_t expected_words)
 {
@@ -1298,6 +1340,14 @@ int run(int argc, char** argv)
                 require(decomposed[i][j] == reference_decomposed[i][j],
                         "stage0 CPU decomposition coefficient differs from SEAL");
         }
+        if (!options.dynamic_replay_dir.empty()) {
+            const auto fixture_dir = options.dynamic_replay_dir / "cpu-fixture";
+            std::filesystem::create_directories(fixture_dir);
+            write_cpu_plaintext_fixture(fixture_dir / "baseline-plains.u32.bin",
+                                        decomposed);
+            write_cpu_parameters_fixture(fixture_dir / "parameters.json", context,
+                                         recursive_parameters);
+        }
         if (!options.stage0_readback.empty() || !options.stage0_executed_image.empty())
             std::cerr << "AUDIT_STAGE1_INPUT_FNV1A64 " << std::hex
                       << fnv1a_plaintexts(decomposed) << std::dec
@@ -1345,6 +1395,9 @@ int run(int argc, char** argv)
             }
             require(fnv1a_plaintexts(changed_decomposed) != fnv1a_plaintexts(decomposed),
                     "changed database did not change stage1 dynamic input");
+            write_cpu_plaintext_fixture(
+                options.dynamic_replay_dir / "cpu-fixture" / "changed-plains.u32.bin",
+                changed_decomposed);
             const auto changed_replay = replay_patched_stage1(
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
                 decomposed, changed_decomposed, package_path,

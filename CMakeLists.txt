@@ -72,6 +72,8 @@ add_library(hpu_runtime_core STATIC
         src/hpu/runtime/memory_image.cpp
         src/hpu/runtime/software_executor.cpp
 )
+add_executable(pir_cpu_encoded_replay test/pir_cpu_encoded_replay.cpp)
+target_link_libraries(pir_cpu_encoded_replay PRIVATE hpu_hardware_model)
 target_include_directories(hpu_runtime_core
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
