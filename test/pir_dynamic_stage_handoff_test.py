@@ -60,6 +60,8 @@ def main():
     require(result.stderr.count("AUDIT_STAGE1_REPLAY_PASS") == 2 and
             "AUDIT_DYNAMIC_TWO_INPUTS_PASS" in result.stderr,
             "two fixed-instruction numerical replays did not complete")
+    require(result.stderr.count("AUDIT_STAGE0_METADATA_NEGATIVE_PASS cases=4") == 2,
+            "stage0 malformed metadata was not rejected in both executions")
 
     stage0_package = root / "packages" / "stage0_concentrated_000"
     stage1_package = root / "packages" / "stage1_concentrated_000"
@@ -115,8 +117,8 @@ def main():
     require((changed / "record.bin").read_bytes() == expected_record(8, changed_seed, 1024),
             "changed recovered record differs from independent record oracle")
 
-    # These are file boundary checks. Duplicate metadata and modulus-ID mismatch
-    # are checked in C++ against the in-memory compiled package on every run.
+    # Image corruption is tested here; in-memory output metadata mutations are
+    # tested inside the same C++ run that compiled each stage0 package.
     readback_command = [example, "--profile", "small", "--record-index", "8",
                         "--stage0-readback", str(root / "invalid-readback.bin")]
     first_offset = int(golden0[0]["line_offset"]) * 256
@@ -172,7 +174,9 @@ def main():
             (changed / "stage1-executed.u32.bin").read_bytes()),
         "dynamic_input_limbs": len(mapping),
         "negative_cases": sorted(invalid_cases) +
-            ["missing-dynamic-limb", "noncanonical-dynamic-limb"],
+            ["missing-dynamic-limb", "noncanonical-dynamic-limb",
+             "duplicate-output-metadata", "missing-output-metadata",
+             "wrong-modulus-metadata", "missing-output-object-metadata"],
         "two_input_numeric_replay": "PASS",
         "rtl": "NOT RUN", "hardware": "NOT RUN",
     }

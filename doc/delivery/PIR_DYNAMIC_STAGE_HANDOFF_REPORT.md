@@ -7,7 +7,7 @@ This work starts from `adamsir32/inline-asm` commit
 `adamsir32/nexus-am` commit `bb1f11cb1436abbc3b27fc4d28792443dfacb809`.
 Both checkouts use the independent branch `feature/pir-dynamic-stage-handoff`.
 The generated artifacts live on the test server under
-`/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-alignment-20261026/pir-dynamic-acceptance`.
+`/home/zhaozhengyi/independent-pir-psi-audit-20261026/trident-alignment-20261026/pir-dynamic-acceptance-v2`.
 Previously delivered packages were not overwritten.
 
 ## A. Final stage0 HPU memory
@@ -53,9 +53,11 @@ coefficient. The observed two-input run has two stage0 readback and replay
 passes. It never reconstructs final DDR from Golden or a SEAL ciphertext.
 
 The validation entry rejected truncated, corrupted, missing-output, wrong-bit
-order and wrong-run images. Duplicate component/modulus metadata and modulus
-mismatch are also checked at the importer boundary; the standalone binary
-image has no metadata fields that could express those two mutations.
+order and wrong-run images. It also mutates the in-memory output metadata of
+both compiled stage0 packages and proves that a duplicate limb, missing limb,
+wrong modulus and missing output object are rejected. The standalone binary
+image has no metadata fields, so these four faults are injected at the
+metadata interface within the same C++ process.
 
 ## C. Dynamic stage1 input and fixed instruction replay
 

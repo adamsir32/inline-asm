@@ -224,7 +224,8 @@ std::vector<::seal::Ciphertext> import_stage0_readback(
     const std::filesystem::path& path,
     const hpu::seal_adapter::CompiledApplication& compiled,
     const std::vector<hpu::seal_adapter::Ciphertext>& outputs,
-    const ::seal::SEALContext& context)
+    const ::seal::SEALContext& context,
+    const std::vector<hpu::delivery::VerifiedOutputLimb>* metadata_override = nullptr)
 {
     const auto& package = compiled.package();
     const auto expected_bytes = package.initial_image->used_lines() * std::uint64_t{256};
@@ -236,7 +237,7 @@ std::vector<::seal::Ciphertext> import_stage0_readback(
     std::vector<std::vector<bool>> covered;
     std::string current_object;
     std::uint64_t checksum = UINT64_C(14695981039346656037);
-    for (const auto& limb : package.outputs) {
+    for (const auto& limb : metadata_override ? *metadata_override : package.outputs) {
         if (limb.object_id != current_object) {
             current_object = limb.object_id;
             require(result.size() < outputs.size(), "stage0 readback has extra output objects");
@@ -290,6 +291,37 @@ std::vector<::seal::Ciphertext> import_stage0_readback(
     std::cerr << "AUDIT_STAGE0_READBACK_FNV1A64 " << std::hex << checksum << std::dec
               << " source=" << path << '\n';
     return result;
+}
+
+void verify_stage0_metadata_rejection(
+    const std::filesystem::path& path,
+    const hpu::seal_adapter::CompiledApplication& compiled,
+    const std::vector<hpu::seal_adapter::Ciphertext>& outputs,
+    const ::seal::SEALContext& context)
+{
+    const auto& baseline = compiled.package().outputs;
+    require(baseline.size() >= 2, "stage0 needs multiple output limbs for metadata tests");
+    auto reject = [&](auto mutation, const char* name) {
+        auto altered = baseline;
+        mutation(altered);
+        bool rejected = false;
+        try {
+            (void)import_stage0_readback(path, compiled, outputs, context, &altered);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        require(rejected, std::string("stage0 accepted malformed output metadata: ") + name);
+    };
+    reject([](auto& limbs) { limbs.insert(limbs.begin() + 1, limbs.front()); },
+           "duplicate component/modulus");
+    reject([](auto& limbs) { limbs.erase(limbs.begin()); }, "missing component/modulus");
+    reject([](auto& limbs) { ++limbs.front().modulus; }, "wrong modulus");
+    reject([](auto& limbs) {
+        const auto missing = limbs.back().object_id;
+        limbs.erase(std::remove_if(limbs.begin(), limbs.end(),
+            [&](const auto& limb) { return limb.object_id == missing; }), limbs.end());
+    }, "missing output object");
+    std::cerr << "AUDIT_STAGE0_METADATA_NEGATIVE_PASS cases=4\n";
 }
 
 std::vector<std::size_t> dimensions(std::size_t plaintext_count)
@@ -609,6 +641,9 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
     if (retained) *retained = compiled;
     if (stage == "stage0" && !options.stage0_executed_image.empty()) {
         write_executed_image(options.stage0_executed_image, compiled);
+        if (!options.dynamic_replay_dir.empty())
+            verify_stage0_metadata_rejection(options.stage0_executed_image,
+                                            compiled, outputs, context);
         return import_stage0_readback(options.stage0_executed_image, compiled, outputs, context);
     }
     if (stage == "stage0" && !options.stage0_readback.empty())
