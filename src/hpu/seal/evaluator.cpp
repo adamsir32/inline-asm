@@ -71,6 +71,9 @@ struct CompiledFrontend {
     std::size_t node_count = 0;
     std::string resource_report;
     bool verified = false;
+    bool execution_memory_captured = false;
+    std::vector<std::uint32_t> execution_memory_words;
+    std::map<std::string, std::vector<std::string>> plaintext_allocation_ids;
 };
 } // namespace detail
 namespace {
@@ -779,6 +782,13 @@ void compile_bfv(const State& state, const std::string& stem,
                         ? builder.add_multiply_plaintext(id, *plain.imported, level)
                         : builder.add_add_subtract_plaintext(id, *plain.imported, level);
                 });
+                auto& binding = data.plaintext_allocation_ids[plain.id];
+                for (const auto& component : p.components)
+                    for (const auto modulus_id : component.modulus_ids) {
+                        const auto allocation_id = component.id + "/mod" + std::to_string(modulus_id);
+                        if (std::find(binding.begin(), binding.end(), allocation_id) == binding.end())
+                            binding.push_back(allocation_id);
+                    }
                 if (value.kind == Kind::add_plain) {
                     output = plan.append_add_plain(step, a, p, value.id);
                     execute.push_back([a, p, output](auto& e) { e.add_plain(a, p, output); });
@@ -971,7 +981,9 @@ CompiledApplication ApplicationBuilder::compile(const std::string& stem, Compile
     add_frontend_graph(snapshot, physical_ids, *data);
     data->resource_report = detail::finalize_frontend_package(data->request, data->image,
         options.optimize_resources, options.require_instruction_verification,
-        options.instruction_ntt_contract);
+        options.instruction_ntt_contract,
+        options.capture_execution_memory ? &data->execution_memory_words : nullptr);
+    data->execution_memory_captured = options.capture_execution_memory;
     data->verified = true;
     return CompiledApplication(std::move(data));
 }
@@ -994,5 +1006,14 @@ bool CompiledApplication::instruction_verified() const noexcept
     return data_->request.oracle_report_json.find("\"host_instruction_model_verified\":true") != std::string::npos;
 }
 const std::string& CompiledApplication::resource_report_json() const { return data_->resource_report; }
+const std::map<std::string, std::vector<std::string>>&
+CompiledApplication::plaintext_allocation_ids() const
+{ return data_->plaintext_allocation_ids; }
+const std::vector<std::uint32_t>& CompiledApplication::execution_memory_words() const
+{
+    if (!data_->verified || !data_->execution_memory_captured)
+        throw std::logic_error("encoded execution memory was not captured");
+    return data_->execution_memory_words;
+}
 
 } // namespace hpu::seal_adapter

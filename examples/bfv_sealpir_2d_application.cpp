@@ -1,4 +1,5 @@
 #include "evaluator_application.hpp"
+#include "hpu/seal/ntt_bridge.hpp"
 
 #include <seal/seal.h>
 #include <seal/util/numth.h>
@@ -16,10 +17,14 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 
@@ -45,6 +50,9 @@ struct Options {
     std::size_t target = 0;
     std::vector<std::size_t> extra_targets;
     std::filesystem::path stage0_readback;
+    std::filesystem::path stage0_executed_image;
+    std::filesystem::path dynamic_replay_dir;
+    std::filesystem::path stage1_patch_script;
     evaluator_example::Options evaluator;
 };
 
@@ -79,6 +87,9 @@ Options parse_options(int argc, char** argv)
     std::size_t target = 0;
     std::vector<std::size_t> extra_targets;
     std::filesystem::path stage0_readback;
+    std::filesystem::path stage0_executed_image;
+    std::filesystem::path dynamic_replay_dir;
+    std::filesystem::path stage1_patch_script;
     bool force_resource_optimization = false;
     std::vector<char*> remaining{argv[0]};
     for (int i = 1; i < argc; ++i) {
@@ -110,6 +121,15 @@ Options parse_options(int argc, char** argv)
         } else if (argument == "--stage0-readback") {
             if (++i >= argc) throw std::invalid_argument("--stage0-readback needs a path");
             stage0_readback = argv[i];
+        } else if (argument == "--stage0-executed-image") {
+            if (++i >= argc) throw std::invalid_argument("--stage0-executed-image needs a path");
+            stage0_executed_image = argv[i];
+        } else if (argument == "--dynamic-replay-dir") {
+            if (++i >= argc) throw std::invalid_argument("--dynamic-replay-dir needs a path");
+            dynamic_replay_dir = argv[i];
+        } else if (argument == "--stage1-patch-script") {
+            if (++i >= argc) throw std::invalid_argument("--stage1-patch-script needs a path");
+            stage1_patch_script = argv[i];
         } else {
             remaining.push_back(argv[i]);
         }
@@ -123,13 +143,20 @@ Options parse_options(int argc, char** argv)
         static_cast<int>(remaining.size()), remaining.data());
     if (!force_resource_optimization)
         evaluator.compiler.optimize_resources = false;
+    if (!stage0_readback.empty() && !stage0_executed_image.empty())
+        throw std::invalid_argument("choose one stage0 readback source");
+    if (!dynamic_replay_dir.empty() && (profile.name != "small" ||
+        stage0_executed_image.empty() || stage1_patch_script.empty() ||
+        !evaluator.delivery.emit_directory))
+        throw std::invalid_argument("dynamic replay requires small profile, --stage0-executed-image, --stage1-patch-script and --emit-dir");
     const auto per_plain = gDegree /
         ((gElementBytes * 8 + kUsablePlainBits - 1) / kUsablePlainBits);
     for (const auto extra : extra_targets)
         if (extra >= profile.element_count || extra / per_plain != target / per_plain)
             throw std::invalid_argument("--test-extra-record-index must share the selected plaintext");
     return {profile, target, std::move(extra_targets),
-            std::move(stage0_readback), std::move(evaluator)};
+            std::move(stage0_readback), std::move(stage0_executed_image),
+            std::move(dynamic_replay_dir), std::move(stage1_patch_script), std::move(evaluator)};
 }
 
 std::size_t integer_log2_ceil(std::size_t value)
@@ -423,6 +450,32 @@ void maybe_write(const Options& options, const std::string& directory,
         std::cout << "\n# " << directory << "\n" << compiled.package().program.assembly;
 }
 
+void write_executed_image(const std::filesystem::path& path,
+                          const hpu::seal_adapter::CompiledApplication& compiled)
+{
+    const auto& words = compiled.execution_memory_words();
+    require(words.size() == compiled.package().initial_image->used_lines() * 64,
+            "encoded execution image has the wrong line count");
+    require(!std::filesystem::exists(path), "refusing to overwrite an executed image");
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(words.size() * 4);
+    std::uint64_t checksum = UINT64_C(14695981039346656037);
+    for (const auto word : words)
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto byte = static_cast<std::uint8_t>(word >> (8 * i));
+            bytes.push_back(byte);
+            checksum ^= byte;
+            checksum *= UINT64_C(1099511628211);
+        }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    require(static_cast<bool>(output), "cannot create executed image");
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(static_cast<bool>(output), "failed to write executed image");
+    std::cerr << "AUDIT_STAGE0_EXECUTED_IMAGE_FNV1A64 " << std::hex << checksum
+              << std::dec << " bytes=" << bytes.size() << " source=encoded_instruction_executor\n";
+}
+
 std::vector<hpu::seal_adapter::Ciphertext> record_expand_query(
     hpu::seal_adapter::ApplicationBuilder& app,
     hpu::seal_adapter::Evaluator& evaluator,
@@ -519,7 +572,9 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
     const ::seal::Ciphertext& encrypted_query, std::size_t query_count,
     const ::seal::GaloisKeys& galois_keys,
     const std::vector<::seal::Plaintext>& database, std::size_t output_count,
-    bool mod_switch, const std::string& stage, std::vector<StageStats>& stats)
+    bool mod_switch, const std::string& stage, std::vector<StageStats>& stats,
+    std::optional<hpu::seal_adapter::CompiledApplication>* retained = nullptr,
+    std::vector<::seal::Ciphertext>* reference = nullptr)
 {
     require(database.size() == query_count * output_count,
             stage + " concentrated matrix shape is inconsistent");
@@ -533,9 +588,12 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
         app.mark_output("reply_" + std::to_string(index), outputs[index]);
     const auto directory = stage + "_concentrated_000";
     const auto audit_compile_started = std::chrono::steady_clock::now();
+    auto compile_options = options.evaluator.compiler;
+    if (stage == "stage0" && !options.stage0_executed_image.empty())
+        compile_options.capture_execution_memory = true;
     const auto compiled = app.compile(
         "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
-        options.evaluator.compiler);
+        compile_options);
     if (!gTestOutputRecord.empty())
         std::cerr << "AUDIT_STAGE_COMPILE_AND_VERIFY_SECONDS " << stage << ' '
                   << std::chrono::duration<double>(
@@ -543,6 +601,16 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
                   << '\n';
     maybe_write(options, directory, compiled);
     stats.push_back(package_stats(stage + " concentrated", directory, compiled));
+    if (reference) {
+        reference->clear();
+        for (const auto& output : outputs)
+            reference->push_back(verified_oracle_result(compiled, output));
+    }
+    if (retained) *retained = compiled;
+    if (stage == "stage0" && !options.stage0_executed_image.empty()) {
+        write_executed_image(options.stage0_executed_image, compiled);
+        return import_stage0_readback(options.stage0_executed_image, compiled, outputs, context);
+    }
     if (stage == "stage0" && !options.stage0_readback.empty())
         return import_stage0_readback(options.stage0_readback, compiled, outputs, context);
     std::vector<::seal::Ciphertext> actual;
@@ -550,6 +618,90 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
     for (const auto& output : outputs)
         actual.push_back(verified_oracle_result(compiled, output));
     return actual;
+}
+
+// Independent native SEAL calculation for a changed stage1 plaintext matrix.
+// No ApplicationBuilder or HPU compilation occurs in this path.
+std::vector<::seal::Ciphertext> native_stage1_reference(
+    const ::seal::SEALContext& context, const ::seal::Ciphertext& encrypted,
+    std::size_t query_count, const ::seal::GaloisKeys& keys,
+    const std::vector<::seal::Plaintext>& database)
+{
+    ::seal::Evaluator evaluator(context);
+    const auto logm = integer_log2_ceil(query_count);
+    std::vector<::seal::Ciphertext> expanded{encrypted};
+    ::seal::Plaintext two("2");
+    auto multiply_power_of_x = [&](const ::seal::Ciphertext& input,
+                                   std::uint32_t exponent) {
+        exponent %= static_cast<std::uint32_t>(2 * gDegree);
+        ::seal::Ciphertext result;
+        evaluator.multiply_plain(input, monomial(exponent), result);
+        if (exponent >= gDegree) evaluator.negate_inplace(result);
+        return result;
+    };
+    for (std::size_t level = 0; level < logm; ++level) {
+        const auto old_size = expanded.size();
+        std::vector<::seal::Ciphertext> next(old_size * 2);
+        const auto element = static_cast<std::uint32_t>(
+            gDegree / (std::size_t{1} << level) + 1);
+        const auto raw = static_cast<std::uint32_t>(
+            2 * gDegree - (std::size_t{1} << level));
+        const auto shifted = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(raw) * element) % (2 * gDegree));
+        for (std::size_t index = 0; index < old_size; ++index) {
+            const bool corner = level + 1 == logm
+                && index >= query_count - (std::size_t{1} << (logm - 1));
+            if (corner) {
+                evaluator.multiply_plain(expanded[index], two, next[index]);
+                continue;
+            }
+            ::seal::Ciphertext rotated;
+            evaluator.rotate_rows(expanded[index],
+                rotate_rows_steps_for_galois_element(gDegree, element), keys, rotated);
+            evaluator.add(expanded[index], rotated, next[index]);
+            auto left = multiply_power_of_x(expanded[index], raw);
+            auto right = multiply_power_of_x(rotated, shifted);
+            evaluator.add(left, right, next[index + old_size]);
+        }
+        expanded = std::move(next);
+    }
+    expanded.resize(query_count);
+    require(database.size() % query_count == 0,
+            "native stage1 database shape is invalid");
+    const auto output_count = database.size() / query_count;
+    std::vector<::seal::Ciphertext> outputs;
+    for (std::size_t k = 0; k < output_count; ++k) {
+        ::seal::Ciphertext sum;
+        evaluator.multiply_plain(expanded[0], database[k], sum);
+        for (std::size_t j = 1; j < query_count; ++j) {
+            ::seal::Ciphertext term;
+            evaluator.multiply_plain(expanded[j], database[k + j * output_count], term);
+            evaluator.add_inplace(sum, term);
+        }
+        evaluator.mod_switch_to_next_inplace(sum);
+        outputs.push_back(std::move(sum));
+    }
+    return outputs;
+}
+
+void require_ciphertexts_equal(const std::vector<::seal::Ciphertext>& a,
+                               const std::vector<::seal::Ciphertext>& b,
+                               const std::string& reason)
+{
+    require(a.size() == b.size(), reason + " object count");
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        require(a[i].parms_id() == b[i].parms_id() &&
+                a[i].size() == b[i].size() &&
+                a[i].poly_modulus_degree() == b[i].poly_modulus_degree() &&
+                a[i].coeff_modulus_size() == b[i].coeff_modulus_size(),
+                reason + " ciphertext shape");
+        const auto count = a[i].size() * a[i].poly_modulus_degree() *
+                           a[i].coeff_modulus_size();
+        for (std::size_t coefficient = 0; coefficient < count; ++coefficient)
+            require(a[i].data()[coefficient] == b[i].data()[coefficient],
+                    reason + " coefficient mismatch at object " +
+                    std::to_string(i) + " coefficient " + std::to_string(coefficient));
+    }
 }
 
 std::size_t expansion_ratio(const ::seal::EncryptionParameters& parameters)
@@ -677,6 +829,217 @@ void write_bytes(const std::filesystem::path& path,
     if (!output) throw std::runtime_error("failed to write " + path.string());
 }
 
+std::uint64_t fnv1a_words(const std::vector<std::uint32_t>& words)
+{
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const auto word : words)
+        for (std::size_t j = 0; j < 4; ++j) {
+            hash ^= (word >> (8 * j)) & 0xff;
+            hash *= UINT64_C(1099511628211);
+        }
+    return hash;
+}
+
+void write_words_le(const std::filesystem::path& path,
+                    const std::vector<std::uint32_t>& words)
+{
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(words.size() * 4);
+    for (const auto word : words)
+        for (std::size_t j = 0; j < 4; ++j)
+            bytes.push_back(static_cast<std::uint8_t>(word >> (8 * j)));
+    write_bytes(path, bytes);
+}
+
+std::vector<std::uint32_t> read_words_le(const std::filesystem::path& path,
+                                         std::size_t expected_words)
+{
+    require(std::filesystem::file_size(path) == expected_words * 4,
+            "patched stage1 image size mismatch");
+    std::ifstream input(path, std::ios::binary);
+    require(static_cast<bool>(input), "cannot open patched stage1 image");
+    std::vector<std::uint8_t> bytes(expected_words * 4);
+    input.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    require(static_cast<bool>(input), "cannot read patched stage1 image");
+    std::vector<std::uint32_t> words(expected_words);
+    for (std::size_t i = 0; i < expected_words; ++i)
+        for (std::size_t j = 0; j < 4; ++j)
+            words[i] |= std::uint32_t(bytes[4 * i + j]) << (8 * j);
+    return words;
+}
+
+void invoke_stage1_patch(const std::filesystem::path& script,
+                         const std::filesystem::path& package,
+                         const std::filesystem::path& dynamic_dir,
+                         const std::filesystem::path& patched)
+{
+    const auto pid = fork();
+    require(pid >= 0, "cannot fork stage1 patch tool");
+    if (pid == 0) {
+        execlp("python3", "python3", script.c_str(), "materialize",
+               "--package", package.c_str(), "--directory", dynamic_dir.c_str(),
+               "--output", patched.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    require(waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                WEXITSTATUS(status) == 0,
+            "stage1_patch.py materialize failed");
+}
+
+std::vector<::seal::Ciphertext> replay_patched_stage1(
+    const hpu::seal_adapter::CompiledApplication& compiled,
+    const ::seal::SEALContext& context, const ::seal::Ciphertext& query,
+    const ::seal::GaloisKeys& keys,
+    const std::vector<::seal::Plaintext>& original,
+    const std::vector<::seal::Plaintext>& replacement,
+    const std::filesystem::path& package_path,
+    const std::filesystem::path& script,
+    const std::filesystem::path& output_dir)
+{
+    namespace fs = std::filesystem;
+    require(!fs::exists(output_dir), "dynamic replay output already exists");
+    fs::create_directories(output_dir / "dynamic");
+    const auto& package = compiled.package();
+    const auto& source = *package.initial_image;
+    const auto& bindings = compiled.plaintext_allocation_ids();
+    require(original.size() == replacement.size() && replacement.size() == 32,
+            "stage1 dynamic plaintext count must be 32");
+    const std::size_t output_count = replacement.size() / 4;
+    std::ofstream mapping(output_dir / "dynamic" / "dynamic_inputs.tsv");
+    require(static_cast<bool>(mapping), "cannot create stage1 dynamic mapping");
+    std::size_t changed_limbs = 0;
+    std::size_t encoded_limbs = 0;
+    for (std::size_t k = 0; k < output_count; ++k)
+        for (std::size_t j = 0; j < 4; ++j) {
+            const auto index = k + j * output_count;
+            const auto name = "database/output_" + std::to_string(k) +
+                              "_term_" + std::to_string(j);
+            const auto found = bindings.find(name);
+            require(found != bindings.end() && found->second.size() == 3,
+                    "stage1 dynamic plaintext physical binding is incomplete: " + name);
+            const auto old_encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
+                original[index], query.parms_id(), context);
+            const auto new_encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
+                replacement[index], query.parms_id(), context);
+            require(old_encoded.degree == gDegree && new_encoded.degree == gDegree &&
+                    old_encoded.modulus_ids == new_encoded.modulus_ids &&
+                    old_encoded.modulus_ids.size() == found->second.size(),
+                    "stage1 physical plaintext encoding shape changed");
+            for (std::size_t limb = 0; limb < found->second.size(); ++limb) {
+                const auto& id = found->second[limb];
+                const auto& allocation = source.allocation(id);
+                require(allocation.kind == hpu::runtime::AllocationKind::plaintext &&
+                        allocation.read_only && allocation.word_count == gDegree &&
+                        id.size() >= 5 && id.compare(id.size() -
+                            (4 + std::to_string(old_encoded.modulus_ids[limb]).size()),
+                            std::string::npos,
+                            "/mod" + std::to_string(old_encoded.modulus_ids[limb])) == 0,
+                        "stage1 dynamic binding is not a plaintext Q limb");
+                const auto begin = allocation.span.line_offset * 64;
+                std::vector<std::uint32_t> words(
+                    new_encoded.words.begin() + limb * gDegree,
+                    new_encoded.words.begin() + (limb + 1) * gDegree);
+                for (std::size_t coefficient = 0; coefficient < gDegree; ++coefficient) {
+                    require(source.words().at(begin + coefficient) ==
+                            old_encoded.words[limb * gDegree + coefficient],
+                            "baseline decomposition encoding differs from compiler image");
+                    require(words[coefficient] < new_encoded.moduli[limb],
+                            "replacement contains noncanonical plaintext coefficient");
+                    changed_limbs += words[coefficient] != source.words()[begin + coefficient];
+                }
+                const auto filename = "dynamic_" + std::to_string(encoded_limbs++) + ".u32.bin";
+                write_words_le(output_dir / "dynamic" / filename, words);
+                mapping << id << '\t' << filename << '\n';
+            }
+        }
+    mapping.close();
+    require(encoded_limbs == 96, "stage1 must encode exactly 96 dynamic Q limbs");
+    const auto patched_path = output_dir / "stage1-patched.u32.bin";
+    invoke_stage1_patch(script, package_path, output_dir / "dynamic", patched_path);
+    const auto patched_words = read_words_le(patched_path, source.words().size());
+    hpu::runtime::HpuMemImage replay_image(source.capacity_lines());
+    for (const auto& allocation : source.allocations()) {
+        const auto begin = allocation.span.line_offset * 64;
+        std::vector<std::uint32_t> values(
+            patched_words.begin() + begin,
+            patched_words.begin() + begin + allocation.word_count);
+        const auto cloned = replay_image.add(allocation.id, values,
+                                             allocation.kind, allocation.read_only);
+        require(cloned.span.line_offset == allocation.span.line_offset &&
+                cloned.span.line_count == allocation.span.line_count,
+                "replay image changed a physical address");
+    }
+    require(replay_image.words() == patched_words,
+            "replay image differs from stage1_patch.py output");
+    const auto native = native_stage1_reference(context, query, 4, keys, replacement);
+    const auto execution = hpu::model::execute_instructions(
+        package.program.instructions, package.program.ordered_dma_spans, replay_image);
+    require(execution.report.completed(),
+            "fixed stage1 encoded instructions did not complete: " + execution.report.message);
+    std::vector<::seal::Ciphertext> actual = native;
+    for (auto& cipher : actual)
+        std::fill_n(cipher.data(), cipher.size() * cipher.coeff_modulus_size() *
+                    cipher.poly_modulus_degree(), std::uint64_t{0});
+    std::vector<std::vector<bool>> covered;
+    for (const auto& cipher : actual)
+        covered.emplace_back(cipher.size() * cipher.coeff_modulus_size(), false);
+    std::size_t object = 0;
+    std::string object_id;
+    for (const auto& limb : package.outputs) {
+        if (limb.object_id != object_id) {
+            if (!object_id.empty()) ++object;
+            object_id = limb.object_id;
+        }
+        require(object < actual.size(), "stage1 replay has extra output object");
+        const auto level = context.get_context_data(native[object].parms_id());
+        require(static_cast<bool>(level), "stage1 reference has unknown level");
+        const auto degree = level->parms().poly_modulus_degree();
+        const auto& moduli = level->parms().coeff_modulus();
+        require(limb.domain == hpu::delivery::OutputDomain::coefficient_bit_reversed &&
+                limb.word_count == degree && limb.component < native[object].size() &&
+                limb.modulus_id < moduli.size() &&
+                limb.modulus == moduli[limb.modulus_id].value(),
+                "stage1 output metadata differs from independent SEAL reference");
+        const auto key = limb.component * moduli.size() + limb.modulus_id;
+        require(!covered[object][key], "stage1 replay duplicate output limb");
+        covered[object][key] = true;
+        const auto begin = limb.destination.line_offset * 64;
+        for (std::size_t physical = 0; physical < degree; ++physical) {
+            const auto value = execution.words.at(begin + physical);
+            const auto natural = bit_reverse_index(physical, degree);
+            require(value == native[object].data(limb.component)[
+                limb.modulus_id * degree + natural],
+                "stage1 encoded replay differs from new SEAL reference at object " +
+                std::to_string(object) + " component " + std::to_string(limb.component) +
+                " modulus " + std::to_string(limb.modulus_id) +
+                " coefficient " + std::to_string(natural));
+            actual[object].data(limb.component)[limb.modulus_id * degree + natural] = value;
+        }
+    }
+    require(object + 1 == actual.size(), "stage1 replay missing output objects");
+    for (const auto& object_covered : covered)
+        require(std::all_of(object_covered.begin(), object_covered.end(),
+                            [](bool value) { return value; }),
+                "stage1 replay missing component/modulus limb");
+    require_ciphertexts_equal(actual, native, "stage1 replay versus SEAL");
+    write_words_le(output_dir / "stage1-executed.u32.bin", execution.words);
+    std::ofstream summary(output_dir / "replay_summary.json");
+    summary << "{\"status\":\"PASS\",\"fixed_instructions\":"
+            << package.program.instructions.size() << ",\"dynamic_spans\":"
+            << encoded_limbs << ",\"changed_coefficients\":" << changed_limbs
+            << ",\"patched_image_fnv1a64\":\"" << std::hex
+            << fnv1a_words(patched_words) << "\",\"executed_image_fnv1a64\":\""
+            << fnv1a_words(execution.words) << "\"}\n";
+    require(static_cast<bool>(summary), "cannot write replay summary");
+    std::cerr << "AUDIT_STAGE1_REPLAY_PASS changed_coefficients=" << changed_limbs
+              << " dynamic_spans=" << encoded_limbs
+              << " executed_instructions=" << std::dec
+              << execution.report.executed_instructions << '\n';
+    return actual;
+}
+
 void write_manifest(const Options& options, const std::vector<std::size_t>& shape,
                     std::size_t used_plaintexts, std::size_t selected_plaintext,
                     std::size_t selected_offset, std::size_t decomposition_count,
@@ -712,15 +1075,18 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"first_stage_min_noise_budget_bits\": " << first_noise << ",\n"
              << "  \"final_stage_min_noise_budget_bits\": " << final_noise << ",\n"
              << "  \"cross_stage_source\": \""
-             << (options.stage0_readback.empty()
-                 ? "SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification"
-                 : "external post-execution HPU_MEM readback checked against Golden and converted from coefficient bit-reversed layout")
+             << (!options.stage0_executed_image.empty()
+                 ? "captured final encoded-instruction executor HPU_MEM checked against Golden and converted from coefficient bit-reversed layout"
+                 : options.stage0_readback.empty()
+                     ? "SEAL oracle ciphertext accepted only after coefficient-exact HPU software and instruction-model verification"
+                     : "external post-execution HPU_MEM readback checked against Golden and converted from coefficient bit-reversed layout")
              << "\",\n"
              << "  \"package_strategy\": \""
              << "concentrated recursive stages"
              << "\",\n"
              << "  \"cpu_interstage_step\": \"decompose the stage0 "
-             << (options.stage0_readback.empty() ? "verified-oracle proxy" : "verified external readback")
+             << (options.stage0_readback.empty() && options.stage0_executed_image.empty()
+                 ? "verified-oracle proxy" : "verified executed memory readback")
              << " into plaintext chunks\",\n"
              << "  \"resource_optimization\": "
              << (options.evaluator.compiler.optimize_resources ? "true" : "false") << ",\n"
@@ -729,9 +1095,9 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"execution_pipeline\": [\n"
              << "    {\"step\": \"hpu_stage0\", \"produces\": \"first-dimensional ciphertext replies\"},\n"
              << "    {\"step\": \"cpu_decompose\", \"depends_on\": \""
-             << (options.stage0_readback.empty()
+             << (options.stage0_readback.empty() && options.stage0_executed_image.empty()
                  ? "stage0 oracle proxy after exact HPU software verification"
-                 : "external stage0 HPU_MEM readback after Golden comparison")
+                 : "stage0 executed HPU_MEM readback after Golden comparison")
              << "\", \"produces\": \"20-bit BFV plaintext chunks\"},\n"
              << "    {\"step\": \"hpu_stage1\", \"depends_on\": \"cpu_decompose output plus second compressed query\", \"produces\": \"recursive PIR reply\"},\n"
              << "    {\"step\": \"cpu_recompose_decrypt\", \"depends_on\": \"stage1 oracle proxy after exact HPU software verification\", \"produces\": \"recovered "
@@ -757,6 +1123,8 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << " --record-index " << options.target;
     if (!options.stage0_readback.empty())
         commands << " --stage0-readback " << options.stage0_readback.string();
+    if (!options.stage0_executed_image.empty())
+        commands << " --stage0-executed-image " << options.stage0_executed_image.string();
     commands << " --emit-dir " << root.string() << "\n\n"
              << "The executable is the unified pipeline runner: it executes stage0,\n"
              << "performs the required CPU ciphertext decomposition, then executes stage1.\n\n"
@@ -854,9 +1222,12 @@ int run(int argc, char** argv)
         }
 
         std::vector<StageStats> stats;
+        std::vector<::seal::Ciphertext> stage0_reference;
         auto first_actual = concentrated_stage_hpu(
             options, context, compressed_queries[0], shape[0], galois_keys,
-            database, shape[1], true, "stage0", stats);
+            database, shape[1], true, "stage0", stats, nullptr, &stage0_reference);
+        require_ciphertexts_equal(first_actual, stage0_reference,
+                                  "stage0 real readback versus SEAL");
         const auto first_noise = minimum_noise_budget(
             context, keygen.secret_key(), first_actual);
         require(first_noise > 0, "first recursive stage exhausted its BFV noise budget");
@@ -876,16 +1247,95 @@ int run(int argc, char** argv)
         }
         require(decomposed.size() == shape[1] * expansion_ratio(recursive_parameters) * 2,
                 "first-stage ciphertext decomposition has the wrong size");
-        if (!options.stage0_readback.empty())
+        std::vector<::seal::Plaintext> reference_decomposed;
+        for (const auto& ciphertext : stage0_reference) {
+            auto chunks = decompose_to_plaintexts(recursive_parameters, ciphertext);
+            reference_decomposed.insert(reference_decomposed.end(),
+                std::make_move_iterator(chunks.begin()),
+                std::make_move_iterator(chunks.end()));
+        }
+        require(decomposed.size() == reference_decomposed.size(),
+                "stage0 CPU decomposition count differs from SEAL");
+        for (std::size_t i = 0; i < decomposed.size(); ++i) {
+            require(decomposed[i].coeff_count() == reference_decomposed[i].coeff_count(),
+                    "stage0 CPU decomposition shape differs from SEAL");
+            for (std::size_t j = 0; j < decomposed[i].coeff_count(); ++j)
+                require(decomposed[i][j] == reference_decomposed[i][j],
+                        "stage0 CPU decomposition coefficient differs from SEAL");
+        }
+        if (!options.stage0_readback.empty() || !options.stage0_executed_image.empty())
             std::cerr << "AUDIT_STAGE1_INPUT_FNV1A64 " << std::hex
                       << fnv1a_plaintexts(decomposed) << std::dec
                       << " plaintexts=" << decomposed.size() << '\n';
 
         require(decomposed.size() % shape[1] == 0,
                 "second-stage recursive matrix is not divisible by its dimension");
+        std::optional<hpu::seal_adapter::CompiledApplication> fixed_stage1;
         auto final_actual = concentrated_stage_hpu(
             options, context, compressed_queries[1], shape[1], galois_keys,
-            decomposed, decomposed.size() / shape[1], true, "stage1", stats);
+            decomposed, decomposed.size() / shape[1], true, "stage1", stats,
+            options.dynamic_replay_dir.empty() ? nullptr : &fixed_stage1);
+        if (!options.dynamic_replay_dir.empty()) {
+            require(static_cast<bool>(fixed_stage1), "stage1 fixed package was not retained");
+            const auto native_baseline = native_stage1_reference(
+                context, compressed_queries[1], shape[1], galois_keys, decomposed);
+            require_ciphertexts_equal(final_actual, native_baseline,
+                                      "baseline stage1 versus independent SEAL");
+            const auto package_path = *options.evaluator.delivery.emit_directory /
+                                      "stage1_concentrated_000";
+            const auto baseline_replay = replay_patched_stage1(
+                *fixed_stage1, context, compressed_queries[1], galois_keys,
+                decomposed, decomposed, package_path, options.stage1_patch_script,
+                options.dynamic_replay_dir / "baseline");
+            require_ciphertexts_equal(baseline_replay, native_baseline,
+                                      "baseline fixed instruction replay");
+            const auto original_seed = gDatabaseSeed;
+            gDatabaseSeed ^= UINT64_C(0x9e3779b97f4a7c15);
+            auto changed_database = build_database(context, options.profile.element_count, shape);
+            auto changed_options = options;
+            changed_options.stage0_executed_image =
+                options.dynamic_replay_dir / "changed-stage0-executed.u32.bin";
+            changed_options.evaluator.delivery.emit_directory =
+                options.dynamic_replay_dir / "changed-stage0-packages";
+            std::vector<StageStats> changed_stats;
+            const auto changed_first = concentrated_stage_hpu(
+                changed_options, context, compressed_queries[0], shape[0], galois_keys,
+                changed_database, shape[1], true, "stage0", changed_stats);
+            std::vector<::seal::Plaintext> changed_decomposed;
+            for (const auto& ciphertext : changed_first) {
+                auto chunks = decompose_to_plaintexts(recursive_parameters, ciphertext);
+                changed_decomposed.insert(changed_decomposed.end(),
+                    std::make_move_iterator(chunks.begin()),
+                    std::make_move_iterator(chunks.end()));
+            }
+            require(fnv1a_plaintexts(changed_decomposed) != fnv1a_plaintexts(decomposed),
+                    "changed database did not change stage1 dynamic input");
+            const auto changed_replay = replay_patched_stage1(
+                *fixed_stage1, context, compressed_queries[1], galois_keys,
+                decomposed, changed_decomposed, package_path,
+                options.stage1_patch_script, options.dynamic_replay_dir / "changed");
+            auto check_record = [&](const std::vector<::seal::Ciphertext>& reply,
+                                    const std::filesystem::path& record_path) {
+                auto decoded_plain = decode_recursive_reply(context, keygen.secret_key(), reply);
+                ::seal::BatchEncoder batch_encoder(context);
+                std::vector<std::uint64_t> decoded_slots;
+                batch_encoder.decode(decoded_plain, decoded_slots);
+                const auto start = selected_offset * coefficients_per_element();
+                std::vector<std::uint64_t> selected(
+                    decoded_slots.begin() + static_cast<std::ptrdiff_t>(start),
+                    decoded_slots.begin() + static_cast<std::ptrdiff_t>(
+                        start + coefficients_per_element()));
+                const auto record = coefficients_to_bytes(selected);
+                require(record == database_element(options.target),
+                        "fixed stage1 instruction replay returned incorrect record");
+                write_bytes(record_path, record);
+            };
+            check_record(changed_replay, options.dynamic_replay_dir / "changed" / "record.bin");
+            gDatabaseSeed = original_seed;
+            check_record(baseline_replay, options.dynamic_replay_dir / "baseline" / "record.bin");
+            std::cerr << "AUDIT_DYNAMIC_TWO_INPUTS_PASS same_stage1_compiled_object=1"
+                      << " same_instruction_stream=1\n";
+        }
         for (const auto& ciphertext : final_actual)
             require(ciphertext.parms_id() == recursive_context->parms_id(),
                     "final HPU reply was not switched to the recursive modulus level");
@@ -908,7 +1358,7 @@ int run(int argc, char** argv)
         if (!gTestOutputRecord.empty()) write_bytes(gTestOutputRecord, actual_record);
         require(actual_record == expected_record,
                 "two-dimensional recursive PIR returned the wrong record bytes");
-        if (!options.stage0_readback.empty()) {
+        if (!options.stage0_readback.empty() || !options.stage0_executed_image.empty()) {
             std::uint64_t record_hash = UINT64_C(14695981039346656037);
             for (const auto byte : actual_record) {
                 record_hash ^= byte;
@@ -965,7 +1415,12 @@ int run(int argc, char** argv)
                   << "\nResource optimizer: "
                   << (options.evaluator.compiler.optimize_resources ? "enabled" : "disabled")
                   << "\n"
-                  << "Cross-stage source: SEAL oracle proxy accepted only after exact HPU software verification\n"
+                  << "Cross-stage source: "
+                  << (!options.stage0_executed_image.empty()
+                      ? "encoded-instruction execution memory readback"
+                      : !options.stage0_readback.empty()
+                          ? "external full HPU_MEM readback"
+                          : "verified SEAL oracle proxy") << '\n'
                   << (options.profile.name == "trident"
                       ? "HPU adaptation: Trident's N=8192 example uses a different coefficient chain and disables recursive mod-switch;\n"
                         "  this application uses 31/31/31/31-bit Q/P and transfers at the two-Q level.\n"

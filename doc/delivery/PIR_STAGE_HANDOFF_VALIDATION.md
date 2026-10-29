@@ -1,5 +1,7 @@
 # PIR 两阶段交接验证边界
 
+> 后续进展（独立分支）：真实编码指令模型的执行后内存导出、CPU 逐系数读回与分解、第二阶段固定指令动态重放已完成软件数值验证。见 [动态交接报告](PIR_DYNAMIC_STAGE_HANDOFF_REPORT.md)。下文保留此前基线的状态和分析，文中的 BLOCKED 指当时状态。
+
 ## 现有路径与真实包格式
 
 `concentrated_stage_hpu` 对每个导出结果调用 `verified_oracle_result`；该函数先要求软件模型与 SEAL 逐系数相等、主机指令模型验证通过，随后返回 **SEAL oracle 密文**。默认 `decompose_to_plaintexts` 因此处理的是已核对的参考代理，而非从最终 HPU_MEM 取出的数据。`CompiledApplication` 公开 `package()` 和 `oracle_result()`，没有执行后完整内存的读回 API。`package().outputs[].golden_words` 来自 SEAL 参考，编译阶段逐 word 与内部 `BfvSoftwareExecutor::memory().words()` 核过，仍不能把 Golden 称为独立读回。

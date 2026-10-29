@@ -103,7 +103,8 @@ void render_program(ProgramArtifacts& program, const hpu::compiler::CompiledReso
 std::string compile_application_resources(
     hpu::delivery::ApplicationPackageRequest& request,
     hpu::runtime::HpuMemImage& image, bool optimize, bool require_instruction_verification,
-    hpu::model::InstructionNttContract instruction_ntt_contract)
+    hpu::model::InstructionNttContract instruction_ntt_contract,
+    std::vector<std::uint32_t>* final_execution_words)
 {
     if (request.program.resources_compiled)
         throw std::invalid_argument("application resources are already compiled");
@@ -260,7 +261,7 @@ std::string compile_application_resources(
         ",\"removed_checkpoint_min_write_bytes\":" + std::to_string(removed_checkpoint_bytes));
     image = std::move(resources.image);
     request.initial_image = &image;
-    const auto execution = hpu::model::execute_instructions(
+    auto execution = hpu::model::execute_instructions(
         request.program.instructions, request.program.ordered_dma_spans, image, execution_options);
     std::vector<hpu::model::InstructionMemoryExpectation> expected;
     for (const auto& output : request.outputs)
@@ -316,6 +317,12 @@ std::string compile_application_resources(
         ",\"optimization_equivalence_verified\":" + (optimization_verified ? "true" : "false"));
     request.program.resources_compiled = true;
     hpu::delivery::validate_application_package_request(request);
+    if (final_execution_words) {
+        if (!comparison.verified ||
+            execution.words.size() != image.used_lines() * hpu::runtime::kHpuMemLineWords)
+            throw std::runtime_error("cannot capture an incomplete encoded execution image");
+        *final_execution_words = std::move(execution.words);
+    }
     return resource_report;
 }
 
