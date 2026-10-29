@@ -7,7 +7,7 @@ import pathlib
 import shutil
 import subprocess
 
-from pir_record_oracle import expected_record
+from pir_record_oracle import DEFAULT_SEED, expected_record
 
 
 def main() -> int:
@@ -17,26 +17,25 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", choices=("small", "full", "trident"), required=True)
     parser.add_argument("--record-index", type=int, required=True)
+    parser.add_argument("--test-database-seed", type=int)
     args = parser.parse_args()
 
     output = pathlib.Path(args.output)
     if output.exists():
         shutil.rmtree(output)
-    subprocess.run(
-        [
-            args.example,
-            "--profile",
-            args.profile,
-            "--record-index",
-            str(args.record_index),
-            "--emit-dir",
-            str(output),
-        ],
-        check=True,
-    )
+    command = [args.example, "--profile", args.profile,
+               "--record-index", str(args.record_index), "--emit-dir", str(output)]
+    if args.test_database_seed is not None:
+        command += ["--test-database-seed", str(args.test_database_seed)]
+    subprocess.run(command, check=True)
 
     manifest_path = output / "pipeline_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    seed = DEFAULT_SEED if args.test_database_seed is None else args.test_database_seed
+    if manifest.get("database_seed") != str(seed):
+        raise RuntimeError("SealPIR database seed manifest differs from the requested seed")
+    if manifest.get("seal_random_seed") != f"0x{seed:x},1,2,3,4,5,6,7":
+        raise RuntimeError("SealPIR random seed manifest differs from the SEAL PRNG seed")
     if manifest.get("semantic_record_match") is not True:
         raise RuntimeError("SealPIR pipeline manifest reports a record mismatch")
     expected_source = (
@@ -48,8 +47,8 @@ def main() -> int:
     actual_record = (output / "actual_record.bin").read_bytes()
     if (output / "expected_record.bin").read_bytes() != actual_record:
         raise RuntimeError("SealPIR binary golden differs from the recovered record")
-    independent_record = expected_record(args.record_index,
-        int(manifest["database_seed"]), int(manifest["record_bytes"]))
+    independent_record = expected_record(args.record_index, seed,
+                                         int(manifest["record_bytes"]))
     if actual_record != independent_record:
         raise RuntimeError("SealPIR recovered record differs from the external byte oracle")
     packages = manifest.get("packages", [])

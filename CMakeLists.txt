@@ -733,6 +733,14 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
                 --profile small --record-index 127)
         set_tests_properties(bfv_sealpir_2d_concentrated_small_delivery_test
             PROPERTIES LABELS "application-delivery;sealpir-2d;concentrated" RUN_SERIAL TRUE TIMEOUT 1200)
+        add_test(NAME bfv_sealpir_2d_concentrated_seed_manifest_test
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_2d_delivery_test.py
+                --example $<TARGET_FILE:hpu_bfv_sealpir_2d_concentrated_example>
+                --validator $<TARGET_FILE:hpu_validate_package>
+                --output ${CMAKE_CURRENT_BINARY_DIR}/sealpir_2d_seed_manifest_test
+                --profile small --record-index 9 --test-database-seed 305419896)
+        set_tests_properties(bfv_sealpir_2d_concentrated_seed_manifest_test
+            PROPERTIES LABELS "application-delivery;sealpir-2d;seed-manifest" RUN_SERIAL TRUE TIMEOUT 1200)
         add_test(NAME hpu_bfv_sealpir_stage0_readback_adapter
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/test/sealpir_stage0_readback_test.py

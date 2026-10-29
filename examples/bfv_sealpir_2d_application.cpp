@@ -1120,7 +1120,9 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
 void write_manifest(const Options& options, const std::vector<std::size_t>& shape,
                     std::size_t used_plaintexts, std::size_t selected_plaintext,
                     std::size_t selected_offset, std::size_t decomposition_count,
-                    int first_noise, int final_noise, const std::vector<StageStats>& stats,
+                    int first_noise, int final_noise,
+                    const std::array<std::uint64_t, 8>& seal_random_seed,
+                    const std::vector<StageStats>& stats,
                     const std::vector<std::uint8_t>& expected,
                     const std::vector<std::uint8_t>& actual)
 {
@@ -1131,6 +1133,10 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
     write_bytes(root / "actual_record.bin", actual);
     std::ofstream manifest(root / "pipeline_manifest.json");
     if (!manifest) throw std::runtime_error("failed to create pipeline_manifest.json");
+    std::ostringstream random_seed_text;
+    random_seed_text << "0x" << std::hex << seal_random_seed.front() << std::dec;
+    for (std::size_t i = 1; i < seal_random_seed.size(); ++i)
+        random_seed_text << ',' << seal_random_seed[i];
     manifest << "{\n"
              << "  \"application\": \"Microsoft SealPIR two-dimensional BFV HPU port\",\n"
              << "  \"profile\": \"" << options.profile.name << "\",\n"
@@ -1144,7 +1150,7 @@ void write_manifest(const Options& options, const std::vector<std::size_t>& shap
              << "  \"selected_plaintext\": " << selected_plaintext << ",\n"
              << "  \"selected_offset\": " << selected_offset << ",\n"
              << "  \"database_seed\": \"" << gDatabaseSeed << "\",\n"
-             << "  \"seal_random_seed\": \"0x5345414c50495232,1,2,3,4,5,6,7\",\n"
+             << "  \"seal_random_seed\": \"" << random_seed_text.str() << "\",\n"
              << "  \"coefficient_modulus_bits\": [31, 31, 31, 31],\n"
              << "  \"recursive_modulus_target\": \"two 31-bit Q primes after one HPU mod-switch\",\n"
              << "  \"parameter_adaptation\": \"SealPIR's one approximately 36-bit-Q last level is not representable by the 31-bit HPU ABI; a two-Q 62-bit recursive level is used without removing modulus switching\",\n"
@@ -1472,6 +1478,7 @@ int run(int argc, char** argv)
 
         write_manifest(options, shape, used_plaintexts, selected_plaintext,
                        selected_offset, decomposed.size(), first_noise, final_noise,
+                       seed_words,
                        stats, expected_record, actual_record);
 
         std::size_t instructions = 0;
