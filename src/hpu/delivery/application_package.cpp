@@ -8,6 +8,7 @@
 #include "hpu/model/hardware_ntt.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cctype>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <spawn.h>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -22,7 +24,10 @@
 #include <utility>
 
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern "C" char** environ;
 
 namespace hpu::delivery {
 namespace {
@@ -30,6 +35,87 @@ namespace {
 constexpr std::size_t kLineWords = hpu::runtime::kHpuMemLineWords;
 constexpr std::size_t kLineBytes = kLineWords * sizeof(std::uint32_t);
 constexpr const char* kFilesManifestPath = "provenance/files.csv";
+
+std::string git_output(const std::filesystem::path& source_root,
+                       std::vector<std::string> arguments)
+{
+    arguments.insert(arguments.begin(), {"git", "-C", source_root.string()});
+    std::vector<char*> argv;
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+
+    int pipe_fds[2];
+    if (::pipe(pipe_fds) != 0)
+        throw std::system_error(errno, std::generic_category(), "Git pipe");
+    posix_spawn_file_actions_t actions;
+    const int initialized = ::posix_spawn_file_actions_init(&actions);
+    if (initialized != 0) {
+        ::close(pipe_fds[0]);
+        ::close(pipe_fds[1]);
+        throw std::system_error(initialized, std::generic_category(), "Git spawn setup");
+    }
+    const int stdout_action = ::posix_spawn_file_actions_adddup2(
+        &actions, pipe_fds[1], STDOUT_FILENO);
+    const int stderr_action = stdout_action == 0
+        ? ::posix_spawn_file_actions_adddup2(&actions, pipe_fds[1], STDERR_FILENO)
+        : stdout_action;
+    const int close_read_action = stderr_action == 0
+        ? ::posix_spawn_file_actions_addclose(&actions, pipe_fds[0])
+        : stderr_action;
+    const int close_write_action = close_read_action == 0
+        ? ::posix_spawn_file_actions_addclose(&actions, pipe_fds[1])
+        : close_read_action;
+    if (close_write_action != 0) {
+        ::posix_spawn_file_actions_destroy(&actions);
+        ::close(pipe_fds[0]);
+        ::close(pipe_fds[1]);
+        throw std::system_error(close_write_action, std::generic_category(), "Git spawn actions");
+    }
+    pid_t child = -1;
+    const int spawned = ::posix_spawnp(
+        &child, "git", &actions, nullptr, argv.data(), ::environ);
+    ::posix_spawn_file_actions_destroy(&actions);
+    ::close(pipe_fds[1]);
+    if (spawned != 0) {
+        ::close(pipe_fds[0]);
+        throw std::system_error(spawned, std::generic_category(), "Git spawn");
+    }
+
+    std::string output;
+    std::array<char, 4096> buffer{};
+    for (;;) {
+        const auto received = ::read(pipe_fds[0], buffer.data(), buffer.size());
+        if (received > 0) {
+            if (output.size() < 8192)
+                output.append(buffer.data(), std::min<std::size_t>(
+                    static_cast<std::size_t>(received), 8192 - output.size()));
+        } else if (received == 0) break;
+        else if (errno != EINTR) {
+            const int error_number = errno;
+            ::close(pipe_fds[0]);
+            int ignored;
+            while (::waitpid(child, &ignored, 0) < 0 && errno == EINTR) {}
+            throw std::system_error(error_number, std::generic_category(), "Git pipe read");
+        }
+    }
+    ::close(pipe_fds[0]);
+    int status = 0;
+    while (::waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR)
+            throw std::system_error(errno, std::generic_category(), "Git wait");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        throw std::runtime_error("Git provenance command failed for '"
+            + source_root.string() + "': " + output);
+    return output;
+}
+
+std::string trim_git_line(std::string value)
+{
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r'))
+        value.pop_back();
+    return value;
+}
 
 struct FileArtifact {
     std::string path;
@@ -1866,6 +1952,32 @@ std::filesystem::path create_private_staging(
 
 } // namespace
 
+ProducerIdentity verified_producer_identity(
+    const std::string& repository, const std::string& configured_commit,
+    const std::string& configured_worktree_state,
+    const std::filesystem::path& source_root)
+{
+    if (source_root.empty() || configured_commit.empty()
+        || configured_commit == "unknown")
+        throw std::runtime_error("producer Git provenance is unavailable; configure and rebuild from the source checkout");
+    const auto current_commit = trim_git_line(git_output(
+        source_root, {"rev-parse", "--verify", "HEAD"}));
+    if (current_commit != configured_commit)
+        throw std::runtime_error("producer binary was configured for commit "
+            + configured_commit + " but source HEAD is " + current_commit
+            + "; reconfigure and rebuild before generating packages");
+    if (configured_worktree_state != "clean-at-configure"
+        && configured_worktree_state != "dirty-at-configure")
+        throw std::runtime_error("producer has an unknown configured worktree state");
+    const auto current_status = git_output(
+        source_root, {"status", "--porcelain=v1", "--untracked-files=normal"});
+    const auto state = configured_worktree_state == "dirty-at-configure"
+        ? "dirty-at-configure"
+        : current_status.empty() ? "clean-at-configure" : "dirty-at-generation";
+    return {repository, current_commit, state, source_root,
+        configured_worktree_state};
+}
+
 void validate_application_package_request(
     const ApplicationPackageRequest& request)
 {
@@ -2131,9 +2243,15 @@ ApplicationPackageReport write_application_package(
     const std::filesystem::path& output_root,
     const ApplicationPackageRequest& original_request)
 {
-    if (!original_request.program.operator_program || original_request.program.resources_compiled)
-        validate_application_package_request(original_request);
-    else if (!original_request.initial_image)
+    auto request = original_request;
+    if (!request.producer.source_root.empty())
+        request.producer = verified_producer_identity(
+            request.producer.repository, request.producer.commit,
+            request.producer.configured_worktree_state,
+            request.producer.source_root);
+    if (!request.program.operator_program || request.program.resources_compiled)
+        validate_application_package_request(request);
+    else if (!request.initial_image)
         throw std::invalid_argument("native application package requires an initial image");
     if (output_root.empty()) {
         throw std::invalid_argument("application package output root is empty");
@@ -2154,7 +2272,6 @@ ApplicationPackageReport write_application_package(
             + "' already exists; v1 never removes or overwrites a target");
     }
 
-    auto request = original_request;
     std::optional<hpu::runtime::HpuMemImage> compiled_image;
     if (request.program.operator_program && !request.program.resources_compiled) {
         compiled_image = *request.initial_image;

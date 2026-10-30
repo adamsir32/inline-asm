@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <iomanip>
 #include <locale>
 #include <sstream>
@@ -19,6 +18,9 @@
 #endif
 #ifndef HPU_DELIVERY_TREE_STATE
 #define HPU_DELIVERY_TREE_STATE "unknown"
+#endif
+#ifndef HPU_DELIVERY_SOURCE_DIR
+#define HPU_DELIVERY_SOURCE_DIR ""
 #endif
 
 namespace hpu::seal_adapter {
@@ -73,10 +75,9 @@ ApplicationPackageRequest base_request(
     request.case_name = stem;
     request.initial_image = &image;
     request.program.stem = stem;
-    const char* commit = std::getenv("HPU_DELIVERY_COMMIT");
-    const char* state = std::getenv("HPU_DELIVERY_WORKTREE_STATE");
-    request.producer = {"inline-asm", commit ? commit : HPU_DELIVERY_REVISION,
-                        state ? state : HPU_DELIVERY_TREE_STATE};
+    request.producer = hpu::delivery::verified_producer_identity(
+        "inline-asm", HPU_DELIVERY_REVISION, HPU_DELIVERY_TREE_STATE,
+        HPU_DELIVERY_SOURCE_DIR);
     auto out = stream();
     const auto key = context.key_context_data();
     out << "{\"scheme\":" << quoted(scheme == SchemeKind::ckks ? "ckks" :

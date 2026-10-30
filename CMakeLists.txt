@@ -176,7 +176,8 @@ add_executable(hpu_native_kernel_application_example examples/native_kernel_appl
 target_link_libraries(hpu_native_kernel_application_example PRIVATE hpu_fhe_codegen hpu_delivery_core hpu_hardware_model)
 target_compile_definitions(hpu_native_kernel_application_example PRIVATE
     HPU_DELIVERY_REVISION="${HPU_PACKAGE_REVISION}"
-    HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}")
+    HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}"
+    HPU_DELIVERY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 set(HPU_APPLICATION_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/outputs" CACHE PATH
     "Directory for scheme-neutral application packages")
 find_package(Python3 COMPONENTS Interpreter QUIET)
@@ -235,6 +236,10 @@ if(BUILD_TESTING)
     add_test(NAME delivery_io_test COMMAND delivery_io_test)
     add_executable(application_package_test test/application_package_test.cpp)
     target_link_libraries(application_package_test PRIVATE hpu_delivery_core)
+    target_compile_definitions(application_package_test PRIVATE
+        HPU_PACKAGE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        HPU_PACKAGE_TEST_REVISION="${HPU_PACKAGE_REVISION}"
+        HPU_PACKAGE_TEST_TREE_STATE="${HPU_PACKAGE_TREE}")
     add_test(NAME application_package_test COMMAND application_package_test)
     set_tests_properties(delivery_io_test application_package_test PROPERTIES LABELS application-delivery)
     add_executable(hpu_hardware_ntt_model_test
@@ -583,7 +588,8 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
         "Directory for scheme-neutral application packages")
     target_compile_definitions(hpu_seal_ckks_codegen PRIVATE
         HPU_DELIVERY_REVISION="${HPU_PACKAGE_REVISION}"
-        HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}")
+        HPU_DELIVERY_TREE_STATE="${HPU_PACKAGE_TREE}"
+        HPU_DELIVERY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_custom_target(hpu_io_benchmark
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark_io.py
             --build-dir ${CMAKE_BINARY_DIR}

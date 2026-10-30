@@ -1489,6 +1489,47 @@ void test_native_writer_preserves_caller()
             "native writer did not apply the default application cache policy");
 }
 
+void test_producer_identity_rejects_stale_binary()
+{
+    const auto source_root = std::filesystem::path(HPU_PACKAGE_TEST_SOURCE_DIR);
+    const auto current = hpu::delivery::verified_producer_identity(
+        "inline-asm", HPU_PACKAGE_TEST_REVISION, HPU_PACKAGE_TEST_TREE_STATE,
+        source_root);
+    require(current.repository == "inline-asm"
+            && current.commit == HPU_PACKAGE_TEST_REVISION,
+            "producer provenance did not retain the configured revision");
+    require(current.worktree_state == "clean-at-configure"
+            || current.worktree_state == "dirty-at-configure"
+            || current.worktree_state == "dirty-at-generation",
+            "producer provenance has an unknown generation state");
+
+    const std::string stale_commit(40,
+        current.commit == std::string(40, '0') ? '1' : '0');
+    require_throws_with_fragments(
+        [&] {
+            (void)hpu::delivery::verified_producer_identity(
+                "inline-asm", stale_commit, "clean-at-configure",
+                source_root);
+        },
+        {"configured for commit", "source HEAD", "reconfigure and rebuild"},
+        "stale producer binary was accepted against a newer checkout");
+
+    Fixture fixture;
+    fixture.request.producer = current;
+    fixture.request.producer.commit = stale_commit;
+    ScratchDirectory scratch;
+    const auto destination = scratch.path() / "stale_producer";
+    require_throws_with_fragments(
+        [&] {
+            (void)hpu::delivery::write_application_package(
+                destination, fixture.request);
+        },
+        {"configured for commit", "source HEAD"},
+        "package writer accepted a producer whose source changed after compilation");
+    require(!std::filesystem::exists(destination),
+            "stale producer created a package directory");
+}
+
 template <typename Function>
 void run_test(
     const char* name,
@@ -1509,6 +1550,8 @@ void run_test(
 int main()
 {
     std::vector<std::string> failures;
+    run_test("reject stale producer provenance",
+        test_producer_identity_rejects_stale_binary, failures);
     run_test("native writer preserves caller", test_native_writer_preserves_caller, failures);
     run_test("twiddle cache policy contract", test_twiddle_cache_policy_contract, failures);
     run_test("happy path package", test_happy_path_package, failures);

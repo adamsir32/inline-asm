@@ -32,7 +32,18 @@ struct ProducerIdentity {
     std::string repository;
     std::string commit;
     std::string worktree_state;
+    // In-memory generation guard. These fields are not serialized in package v1.
+    std::filesystem::path source_root;
+    std::string configured_worktree_state;
 };
+
+// Verify that a producer executable still runs against the Git revision it
+// was configured for. A newer checkout must rebuild the producer, rather than
+// relabel an older binary with the newer commit.
+ProducerIdentity verified_producer_identity(
+    const std::string& repository, const std::string& configured_commit,
+    const std::string& configured_worktree_state,
+    const std::filesystem::path& source_root);
 
 struct ProgramArtifacts {
     std::string stem;
