@@ -52,4 +52,4 @@
 
 ## 最终 Git 与发布核对
 
-最终报告提交后还须在服务器运行 `git diff --exit-code cfee951e HEAD -- include/ src/`、两目录树 ID 对照、未跟踪文件检查，并对两条个人仓库远端分支读取完整 SHA。对应结果以本次交付的最终记录为准。
+PASS：在报告提交 `880a23785d2d3313cdd6428551ae2675e8c6c022` 上，`git diff --exit-code cfee951e HEAD -- include/ src/` 退出码 0；`include` 树均为 `4a22d29badc7956d6dab442d67768aedfd06c6bd`，`src` 树均为 `b5056b999ea0464118538101dd6716c3df5778bc`；两目录额外未跟踪文件 0，生产者和 Nexus-AM 工作树均干净。个人仓库远端分支已快进发布并用 `git ls-remote --heads` 核验：`adamsir32/inline-asm` 为 `880a23785d2d3313cdd6428551ae2675e8c6c022`，`adamsir32/nexus-am` 为 `821c1194b96171c5e92752a728258f4815bd674b`。此段是发布后补记，最终分支 SHA 请以远端查询为准。
