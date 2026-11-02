@@ -4,6 +4,7 @@
 #include "hpu/delivery/resource_compiler.hpp"
 
 #include <filesystem>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -15,10 +16,6 @@
 #ifndef HPU_DELIVERY_TREE_STATE
 #define HPU_DELIVERY_TREE_STATE "unknown"
 #endif
-#ifndef HPU_DELIVERY_SOURCE_DIR
-#define HPU_DELIVERY_SOURCE_DIR ""
-#endif
-
 namespace {
 struct Options {
     std::string kernel = "cmult";
@@ -49,10 +46,11 @@ int main(int argc, char** argv)
         const auto options = parse_options(argc, argv);
         auto fixture = options.kernel == "cmult" ? native_kernel_example::cmult_fixture()
             : native_kernel_example::transform_fixture(options.kernel == "intt");
+        const char* commit = std::getenv("HPU_DELIVERY_COMMIT");
+        const char* state = std::getenv("HPU_DELIVERY_WORKTREE_STATE");
         auto request = native_kernel_example::package_request(fixture, options.kernel,
-            hpu::delivery::verified_producer_identity("inline-asm",
-                HPU_DELIVERY_REVISION, HPU_DELIVERY_TREE_STATE,
-                HPU_DELIVERY_SOURCE_DIR));
+            {"inline-asm", commit ? commit : HPU_DELIVERY_REVISION,
+             state ? state : HPU_DELIVERY_TREE_STATE});
         hpu::delivery::compile_application_resources(request, fixture.image);
         hpu::delivery::write_application_package(options.destination, request);
         std::cout << "Native " << options.kernel << " application package: "

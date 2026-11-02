@@ -10,8 +10,6 @@
 #include <filesystem>
 #include <memory>
 #include <string>
-#include <vector>
-#include <map>
 
 namespace hpu::seal_adapter {
 namespace detail {
@@ -23,8 +21,7 @@ std::string finalize_frontend_package(
     hpu::runtime::HpuMemImage& image, bool optimize_resources,
     bool require_instruction_verification,
     hpu::model::InstructionNttContract instruction_ntt_contract =
-        hpu::model::InstructionNttContract::raw_bit_reversed_coefficients,
-    std::vector<std::uint32_t>* final_execution_words = nullptr);
+        hpu::model::InstructionNttContract::raw_bit_reversed_coefficients);
 }
 
 class ApplicationBuilder;
@@ -73,8 +70,6 @@ struct CompileOptions {
     // Strict compilation requires final instruction-model words to match.
     // False allows explicit diagnostic export while retaining the failure.
     bool require_instruction_verification = true;
-    // Retain the verified encoded-instruction replay's final DDR words.
-    bool capture_execution_memory = false;
     // Selects a documented host model contract, not a hardware ABI change.
     hpu::model::InstructionNttContract instruction_ntt_contract =
         hpu::model::InstructionNttContract::raw_bit_reversed_coefficients;
@@ -91,8 +86,6 @@ public:
     bool verified() const noexcept;
     bool instruction_verified() const noexcept;
     const std::string& resource_report_json() const;
-    const std::vector<std::uint32_t>& execution_memory_words() const;
-    const std::map<std::string, std::vector<std::string>>& plaintext_allocation_ids() const;
 private:
     friend class ApplicationBuilder;
     explicit CompiledApplication(std::shared_ptr<const detail::CompiledFrontend> data);

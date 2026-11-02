@@ -1,5 +1,6 @@
 #include "evaluator_application.hpp"
 #include "hpu/seal/ntt_bridge.hpp"
+#include "pir_physical_binding.hpp"
 
 #include <seal/seal.h>
 #include <seal/util/ntt.h>
@@ -20,6 +21,7 @@
 #include <numeric>
 #include <optional>
 #include <sstream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -486,7 +488,23 @@ void maybe_write(const Options& options, const std::string& directory,
 void write_executed_image(const std::filesystem::path& path,
                           const hpu::seal_adapter::CompiledApplication& compiled)
 {
-    const auto& words = compiled.execution_memory_words();
+    const auto& package = compiled.package();
+    const auto execution = hpu::model::execute_instructions(
+        package.program.instructions, package.program.ordered_dma_spans,
+        *package.initial_image);
+    require(execution.report.completed(),
+            "stage0 encoded instruction execution did not complete: " +
+            execution.report.message);
+    std::vector<hpu::model::InstructionMemoryExpectation> expected;
+    expected.reserve(package.outputs.size());
+    for (const auto& limb : package.outputs)
+        expected.push_back({limb.object_id, limb.destination, limb.golden_words});
+    const auto comparison = hpu::model::compare_instruction_memory(execution, expected);
+    require(comparison.verified && comparison.compared_words ==
+            package.outputs.size() * gDegree,
+            "stage0 encoded execution memory differs from complete Golden: " +
+            comparison.message);
+    const auto& words = execution.words;
     require(words.size() == compiled.package().initial_image->used_lines() * 64,
             "encoded execution image has the wrong line count");
     require(!std::filesystem::exists(path), "refusing to overwrite an executed image");
@@ -621,12 +639,9 @@ std::vector<::seal::Ciphertext> concentrated_stage_hpu(
         app.mark_output("reply_" + std::to_string(index), outputs[index]);
     const auto directory = stage + "_concentrated_000";
     const auto audit_compile_started = std::chrono::steady_clock::now();
-    auto compile_options = options.evaluator.compiler;
-    if (stage == "stage0" && !options.stage0_executed_image.empty())
-        compile_options.capture_execution_memory = true;
     const auto compiled = app.compile(
         "bfv_sealpir_2d_" + options.profile.name + '_' + directory,
-        compile_options);
+        options.evaluator.compiler);
     if (!gTestOutputRecord.empty())
         std::cerr << "AUDIT_STAGE_COMPILE_AND_VERIFY_SECONDS " << stage << ' '
                   << std::chrono::duration<double>(
@@ -980,7 +995,6 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     fs::create_directories(output_dir / "dynamic");
     const auto& package = compiled.package();
     const auto& source = *package.initial_image;
-    const auto& bindings = compiled.plaintext_allocation_ids();
     require(original.size() == replacement.size() && replacement.size() == 32,
             "stage1 dynamic plaintext count must be 32");
     const std::size_t output_count = replacement.size() / 4;
@@ -988,32 +1002,32 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     require(static_cast<bool>(mapping), "cannot create stage1 dynamic mapping");
     std::size_t changed_limbs = 0;
     std::size_t encoded_limbs = 0;
+    std::set<std::string> assigned_ids;
+    std::set<std::uint64_t> assigned_lines;
     for (std::size_t k = 0; k < output_count; ++k)
         for (std::size_t j = 0; j < 4; ++j) {
             const auto index = k + j * output_count;
-            const auto name = "database/output_" + std::to_string(k) +
-                              "_term_" + std::to_string(j);
-            const auto found = bindings.find(name);
-            require(found != bindings.end() && found->second.size() == 3,
-                    "stage1 dynamic plaintext physical binding is incomplete: " + name);
             const auto old_encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
                 original[index], query.parms_id(), context);
             const auto new_encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
                 replacement[index], query.parms_id(), context);
             require(old_encoded.degree == gDegree && new_encoded.degree == gDegree &&
                     old_encoded.modulus_ids == new_encoded.modulus_ids &&
-                    old_encoded.modulus_ids.size() == found->second.size(),
+                    old_encoded.modulus_ids.size() == 3,
                     "stage1 physical plaintext encoding shape changed");
-            for (std::size_t limb = 0; limb < found->second.size(); ++limb) {
-                const auto& id = found->second[limb];
-                const auto& allocation = source.allocation(id);
-                require(allocation.kind == hpu::runtime::AllocationKind::plaintext &&
-                        allocation.read_only && allocation.word_count == gDegree &&
-                        id.size() >= 5 && id.compare(id.size() -
-                            (4 + std::to_string(old_encoded.modulus_ids[limb]).size()),
-                            std::string::npos,
-                            "/mod" + std::to_string(old_encoded.modulus_ids[limb])) == 0,
-                        "stage1 dynamic binding is not a plaintext Q limb");
+            for (std::size_t limb = 0; limb < old_encoded.modulus_ids.size(); ++limb) {
+                const std::vector<std::uint32_t> old_words(
+                    old_encoded.words.begin() + limb * gDegree,
+                    old_encoded.words.begin() + (limb + 1) * gDegree);
+                const auto& allocation = pir_physical_binding::unique_plaintext_limb(
+                    source, old_encoded.modulus_ids[limb], old_words);
+                const auto& id = allocation.id;
+                require(assigned_ids.insert(id).second,
+                        "stage1 logical plaintexts share a physical allocation: " + id);
+                for (std::uint64_t line = allocation.span.line_offset;
+                     line < allocation.span.line_offset + allocation.span.line_count; ++line)
+                    require(assigned_lines.insert(line).second,
+                            "stage1 dynamic plaintext physical allocations overlap");
                 const auto begin = allocation.span.line_offset * 64;
                 std::vector<std::uint32_t> words(
                     new_encoded.words.begin() + limb * gDegree,
@@ -1033,6 +1047,13 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
         }
     mapping.close();
     require(encoded_limbs == 96, "stage1 must encode exactly 96 dynamic Q limbs");
+    const auto plaintext_count = std::count_if(
+        source.allocations().begin(), source.allocations().end(),
+        [](const auto& allocation) {
+            return allocation.kind == hpu::runtime::AllocationKind::plaintext;
+        });
+    require(plaintext_count == 102 && assigned_ids.size() == 96,
+            "stage1 requires 96 dynamic and 6 fixed plaintext allocations");
     const auto patched_path = output_dir / "stage1-patched.u32.bin";
     invoke_stage1_patch(script, package_path, output_dir / "dynamic", patched_path);
     const auto patched_words = read_words_le(patched_path, source.words().size());
