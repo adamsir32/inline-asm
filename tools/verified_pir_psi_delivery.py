@@ -117,6 +117,7 @@ def deliver(args):
     scratch = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
     staging = scratch / "delivery"
     environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     # Upstream application_delivery permits these overrides. The release tool
     # fixes them to the checked source and validates the serialized result.
     environment["HPU_DELIVERY_COMMIT"] = args.expected_commit
