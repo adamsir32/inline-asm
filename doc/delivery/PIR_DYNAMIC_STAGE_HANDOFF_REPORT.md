@@ -1,5 +1,12 @@
 # PIR two-stage dynamic handoff: software-model report
 
+> Historical report for the earlier branch. The non-invasive refactor on
+> `feature/pir-psi-non-invasive-refactor` removes the compiler capture and
+> plaintext binding getters described below. The application now replays the
+> public encoded instruction stream and matches encoded plaintext content to
+> public physical allocations, rejecting ambiguous matches. See
+> `PIR_PSI_NON_INVASIVE_REFACTOR.md` for the current implementation.
+
 ## Scope and source
 
 This work starts from `adamsir32/inline-asm` commit

@@ -1,5 +1,8 @@
 # PIR dynamic stage handoff: acceptance, 2026-10-29
 
+> Historical acceptance for the earlier branch. Current non-invasive source
+> and replacement tests are documented in `PIR_PSI_NON_INVASIVE_ACCEPTANCE.md`.
+
 ## Revisions and evidence location
 
 - Producer branch: `feature/pir-dynamic-stage-handoff`, fixed base
