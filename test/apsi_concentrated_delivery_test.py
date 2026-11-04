@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--profile", choices=("small", "medium", "target"), required=True)
     parser.add_argument("--scenario", choices=("empty", "single", "multi", "boundary"), required=True)
     parser.add_argument("--optimize-resources", action="store_true")
+    parser.add_argument("--executed-image", type=pathlib.Path)
     args = parser.parse_args()
 
     output = pathlib.Path(args.output)
@@ -36,8 +37,14 @@ def main() -> int:
     ]
     if args.optimize_resources:
         command.append("--optimize-resources")
+    if args.executed_image is not None:
+        if args.executed_image.exists():
+            raise RuntimeError("refusing to overwrite a PSI executed image")
+        command.extend(("--executed-image", str(args.executed_image)))
     started = time.monotonic()
     subprocess.run(command, check=True)
+    if args.executed_image is not None and not args.executed_image.is_file():
+        raise RuntimeError("PSI encoded execution did not produce the requested image")
     wall_seconds = time.monotonic() - started
     peak_kib = (
         resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss

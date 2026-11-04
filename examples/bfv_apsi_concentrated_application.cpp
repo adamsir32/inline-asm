@@ -52,6 +52,7 @@ struct Options {
     Profile profile;
     std::string scenario;
     std::string dump_preprocessing;
+    std::filesystem::path executed_image;
     bool preprocess_only = false;
     evaluator_example::Options evaluator;
 };
@@ -398,6 +399,7 @@ Options parse_options(int argc, char** argv)
     std::string scenario = "multi";
     bool optimize = false;
     std::string dump_preprocessing;
+    std::filesystem::path executed_image;
     bool preprocess_only = false;
     std::string test_input_path;
     std::vector<char*> remaining{argv[0]};
@@ -430,6 +432,9 @@ Options parse_options(int argc, char** argv)
         } else if (argument == "--dump-preprocessing") {
             if (++i >= argc) throw std::invalid_argument("--dump-preprocessing requires a path");
             dump_preprocessing = argv[i];
+        } else if (argument == "--executed-image") {
+            if (++i >= argc) throw std::invalid_argument("--executed-image requires a path");
+            executed_image = argv[i];
         } else if (argument == "--preprocess-only") {
             preprocess_only = true;
         } else {
@@ -447,8 +452,11 @@ Options parse_options(int argc, char** argv)
     if (!test_input_path.empty()) load_test_input(test_input_path);
     if (preprocess_only && dump_preprocessing.empty())
         throw std::invalid_argument("--preprocess-only requires --dump-preprocessing");
+    if (!executed_image.empty() && (profile.name != "small" || preprocess_only))
+        throw std::invalid_argument("--executed-image requires a full small-profile execution");
     return {std::move(profile), std::move(scenario),
-            std::move(dump_preprocessing), preprocess_only, std::move(evaluator)};
+            std::move(dump_preprocessing), std::move(executed_image),
+            preprocess_only, std::move(evaluator)};
 }
 
 std::uint64_t find_item_for_location(std::size_t wanted, const Profile& profile,
@@ -873,6 +881,44 @@ std::string json_array(const std::vector<std::uint64_t>& values)
     return out.str();
 }
 
+void write_executed_image(const std::filesystem::path& path,
+                          const hpu::seal_adapter::CompiledApplication& compiled)
+{
+    const auto& package = compiled.package();
+    const auto execution = hpu::model::execute_instructions(
+        package.program.instructions, package.program.ordered_dma_spans,
+        *package.initial_image);
+    require(execution.report.completed(),
+            "PSI encoded instruction execution did not complete: " +
+            execution.report.message);
+    std::vector<hpu::model::InstructionMemoryExpectation> expected;
+    std::size_t expected_words = 0;
+    for (const auto& limb : package.outputs) {
+        expected.push_back({limb.object_id, limb.destination, limb.golden_words});
+        expected_words += limb.golden_words.size();
+    }
+    require(!expected.empty(), "PSI package has no expected output limbs");
+    const auto comparison = hpu::model::compare_instruction_memory(execution, expected);
+    require(comparison.verified && comparison.compared_words == expected_words,
+            "PSI encoded execution memory differs from complete Golden: " +
+            comparison.message);
+    require(execution.words.size() == package.initial_image->used_lines() * 64,
+            "PSI encoded execution image has the wrong line count");
+    require(!std::filesystem::exists(path), "refusing to overwrite a PSI executed image");
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(execution.words.size() * 4);
+    for (const auto word : execution.words)
+        for (std::size_t i = 0; i < 4; ++i)
+            bytes.push_back(static_cast<std::uint8_t>(word >> (8 * i)));
+    std::ofstream out(path, std::ios::binary);
+    require(static_cast<bool>(out), "cannot create PSI executed image");
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    require(static_cast<bool>(out), "failed to write PSI executed image");
+    std::cerr << "PSI_EXECUTED_IMAGE_VERIFIED bytes=" << bytes.size()
+              << " source=encoded_instruction_executor\n";
+}
+
 void write_delivery_files(const Options& options, const Dataset& dataset,
                           const std::vector<std::uint64_t>& actual,
                           const std::vector<std::uint64_t>& reference,
@@ -1276,6 +1322,11 @@ int main(int argc, char** argv)
                                        package_matches.begin(), package_matches.end());
 
             const auto& package = compiled.package();
+            if (!options.executed_image.empty()) {
+                require(per_package == partition_count && first == 0,
+                        "PSI executed image requires one complete package");
+                write_executed_image(options.executed_image, compiled);
+            }
             const auto directory = per_package == partition_count
                 ? std::string("hpu_query")
                 : "hpu_query_partition_" + std::to_string(first);
