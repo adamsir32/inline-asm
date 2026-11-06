@@ -988,7 +988,8 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     const std::vector<::seal::Plaintext>& replacement,
     const std::filesystem::path& package_path,
     const std::filesystem::path& script,
-    const std::filesystem::path& output_dir)
+    const std::filesystem::path& output_dir,
+    const std::filesystem::path& materialized_package = {})
 {
     namespace fs = std::filesystem;
     require(!fs::exists(output_dir), "dynamic replay output already exists");
@@ -1019,8 +1020,8 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
                 const std::vector<std::uint32_t> old_words(
                     old_encoded.words.begin() + limb * gDegree,
                     old_encoded.words.begin() + (limb + 1) * gDegree);
-                const auto& allocation = pir_physical_binding::unique_plaintext_limb(
-                    source, old_encoded.modulus_ids[limb], old_words);
+                const auto& allocation = pir_physical_binding::logical_plaintext_limb(
+                    source, encoded_limbs / 3, old_encoded.modulus_ids[limb], old_words);
                 const auto& id = allocation.id;
                 require(assigned_ids.insert(id).second,
                         "stage1 logical plaintexts share a physical allocation: " + id);
@@ -1122,6 +1123,39 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
                             [](bool value) { return value; }),
                 "stage1 replay missing component/modulus limb");
     require_ciphertexts_equal(actual, native, "stage1 replay versus SEAL");
+    if (!materialized_package.empty()) {
+        for (const auto& allocation : source.allocations()) {
+            if (assigned_ids.count(allocation.id)) continue;
+            const auto begin = allocation.span.line_offset * 64;
+            const auto end = begin + allocation.span.line_count * 64;
+            require(std::equal(source.words().begin() + begin,
+                               source.words().begin() + end,
+                               replay_image.words().begin() + begin),
+                    "sentinel materialization changed fixed image data");
+        }
+        auto delivered = package;
+        delivered.initial_image = &replay_image;
+        for (auto& limb : delivered.outputs) {
+            const auto begin = limb.destination.line_offset * 64;
+            limb.golden_words.assign(execution.words.begin() + begin,
+                                     execution.words.begin() + begin + limb.word_count);
+        }
+        std::ifstream template_report(package_path / "oracle/report.json");
+        require(static_cast<bool>(template_report), "missing sentinel compiler report");
+        std::ostringstream report_stream;
+        report_stream << template_report.rdbuf();
+        auto report = report_stream.str();
+        const auto close = report.find_last_of('}');
+        require(close != std::string::npos, "malformed sentinel compiler report");
+        report.insert(close, R"json(,
+  "materialized_from_unique_sentinels": true,
+  "materialized_input_model_verified": true,
+  "materialized_golden_matches_native_seal": true,
+  "materialized_fixed_instructions": true
+)json");
+        delivered.oracle_report_json = std::move(report);
+        hpu::delivery::write_application_package(materialized_package, delivered);
+    }
     write_words_le(output_dir / "stage1-executed.u32.bin", execution.words);
     std::ofstream summary(output_dir / "replay_summary.json");
     summary << "{\"status\":\"PASS\",\"fixed_instructions\":"
@@ -1383,24 +1417,85 @@ int run(int argc, char** argv)
         require(decomposed.size() % shape[1] == 0,
                 "second-stage recursive matrix is not divisible by its dimension");
         std::optional<hpu::seal_adapter::CompiledApplication> fixed_stage1;
+        auto stage1_template = decomposed;
+        auto stage1_options = options;
+        if (!options.dynamic_replay_dir.empty()) {
+            // Unique, public placeholders prevent frontend content deduplication.
+            // They exist only in the template package; actual data is materialized
+            // into the release package after exact instruction/SEAL comparison.
+            for (std::size_t i = 0; i < stage1_template.size(); ++i) {
+                stage1_template[i].set_zero();
+                stage1_template[i][0] = 1000 + i;
+                stage1_template[i][1] = 2000 + i;
+            }
+            stage1_options.evaluator.delivery.emit_directory =
+                options.dynamic_replay_dir / "sentinel-template-packages";
+        }
         auto final_actual = concentrated_stage_hpu(
-            options, context, compressed_queries[1], shape[1], galois_keys,
-            decomposed, decomposed.size() / shape[1], true, "stage1", stats,
+            stage1_options, context, compressed_queries[1], shape[1], galois_keys,
+            stage1_template, stage1_template.size() / shape[1], true, "stage1", stats,
             options.dynamic_replay_dir.empty() ? nullptr : &fixed_stage1);
         if (!options.dynamic_replay_dir.empty()) {
-            require(static_cast<bool>(fixed_stage1), "stage1 fixed package was not retained");
+            require(static_cast<bool>(fixed_stage1), "stage1 sentinel template missing");
             const auto native_baseline = native_stage1_reference(
                 context, compressed_queries[1], shape[1], galois_keys, decomposed);
-            require_ciphertexts_equal(final_actual, native_baseline,
-                                      "baseline stage1 versus independent SEAL");
-            const auto package_path = *options.evaluator.delivery.emit_directory /
-                                      "stage1_concentrated_000";
+            const auto template_path =
+                *stage1_options.evaluator.delivery.emit_directory / "stage1_concentrated_000";
+            const auto package_path =
+                *options.evaluator.delivery.emit_directory / "stage1_concentrated_000";
+            {
+                std::ofstream sentinels(template_path / "sentinel_manifest.tsv");
+                require(static_cast<bool>(sentinels), "cannot create sentinel manifest");
+                sentinels << "plain_index\tmodulus_id\tallocation_id\tline_offset\tfnv1a64\n";
+                std::array<std::set<std::vector<std::uint32_t>>, 3> unique_words;
+                const auto& image = *fixed_stage1->package().initial_image;
+                for (std::size_t rank = 0; rank < stage1_template.size(); ++rank) {
+                    const std::size_t index = rank / 4 + (rank % 4) * (stage1_template.size() / 4);
+                    const auto encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
+                        stage1_template[index], compressed_queries[1].parms_id(), context);
+                    require(encoded.modulus_ids.size() == 3,
+                            "sentinel template has wrong Q basis");
+                    for (std::size_t mod = 0; mod < 3; ++mod) {
+                        std::vector<std::uint32_t> words(
+                            encoded.words.begin() + mod * gDegree,
+                            encoded.words.begin() + (mod + 1) * gDegree);
+                        require(unique_words[mod].insert(words).second,
+                                "duplicate encoded sentinel in one modulus");
+                        const auto& allocation = pir_physical_binding::logical_plaintext_limb(
+                            image, rank, encoded.modulus_ids[mod], words);
+                        sentinels << rank << '\t' << mod << '\t' << allocation.id
+                                  << '\t' << allocation.span.line_offset << '\t'
+                                  << std::hex << fnv1a_words(words) << std::dec << '\n';
+                    }
+                }
+                require(static_cast<bool>(sentinels), "cannot write sentinel manifest");
+            }
+            // This is a diagnostic compile template, not a released application package.
+            std::filesystem::remove_all(template_path / "provenance");
             const auto baseline_replay = replay_patched_stage1(
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
-                decomposed, decomposed, package_path, options.stage1_patch_script,
-                options.dynamic_replay_dir / "baseline");
+                stage1_template, decomposed, template_path, options.stage1_patch_script,
+                options.dynamic_replay_dir / "baseline", package_path);
             require_ciphertexts_equal(baseline_replay, native_baseline,
-                                      "baseline fixed instruction replay");
+                                      "sentinel materialized Stage 1 versus SEAL");
+            final_actual = baseline_replay;
+            hpu::delivery::validate_application_package_on_disk(package_path);
+            auto duplicate_replacement = decomposed;
+            for (auto& plain : duplicate_replacement) {
+                plain.set_zero();
+                plain[0] = 1000;
+                plain[1] = 2000;
+            }
+            const auto duplicate_replay = replay_patched_stage1(
+                *fixed_stage1, context, compressed_queries[1], galois_keys,
+                stage1_template, duplicate_replacement, template_path,
+                options.stage1_patch_script,
+                options.dynamic_replay_dir / "duplicate-template");
+            require(duplicate_replay.size() == baseline_replay.size(),
+                    "duplicate-content replay output shape changed");
+            std::cerr << "AUDIT_SENTINEL_TEMPLATE_PASS plaintexts=32 limbs=96"
+                      << " fixed_instructions="
+                      << fixed_stage1->package().program.instructions.size() << '\n';
             const auto original_seed = gDatabaseSeed;
             gDatabaseSeed ^= UINT64_C(0x9e3779b97f4a7c15);
             auto changed_database = build_database(context, options.profile.element_count, shape);
@@ -1427,7 +1522,7 @@ int run(int argc, char** argv)
                 changed_decomposed);
             const auto changed_replay = replay_patched_stage1(
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
-                decomposed, changed_decomposed, package_path,
+                stage1_template, changed_decomposed, template_path,
                 options.stage1_patch_script, options.dynamic_replay_dir / "changed");
             auto check_record = [&](const std::vector<::seal::Ciphertext>& reply,
                                     const std::filesystem::path& record_path) {

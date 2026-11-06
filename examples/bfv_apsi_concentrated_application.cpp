@@ -1,4 +1,5 @@
 #include "evaluator_application.hpp"
+#include "psi_client_readback.hpp"
 
 #include <seal/seal.h>
 #include <seal/util/numth.h>
@@ -53,6 +54,7 @@ struct Options {
     std::string scenario;
     std::string dump_preprocessing;
     std::filesystem::path executed_image;
+    std::filesystem::path client_readback_image;
     bool preprocess_only = false;
     evaluator_example::Options evaluator;
 };
@@ -400,6 +402,7 @@ Options parse_options(int argc, char** argv)
     bool optimize = false;
     std::string dump_preprocessing;
     std::filesystem::path executed_image;
+    std::filesystem::path client_readback_image;
     bool preprocess_only = false;
     std::string test_input_path;
     std::vector<char*> remaining{argv[0]};
@@ -435,6 +438,9 @@ Options parse_options(int argc, char** argv)
         } else if (argument == "--executed-image") {
             if (++i >= argc) throw std::invalid_argument("--executed-image requires a path");
             executed_image = argv[i];
+        } else if (argument == "--client-readback-image") {
+            if (++i >= argc) throw std::invalid_argument("--client-readback-image needs a path");
+            client_readback_image = argv[i];
         } else if (argument == "--preprocess-only") {
             preprocess_only = true;
         } else {
@@ -444,8 +450,10 @@ Options parse_options(int argc, char** argv)
     if (profile.name != "small" && scenario != "multi")
         throw std::invalid_argument("medium and target profiles support the multi scenario only");
     if (profile.name == "small" && scenario != "empty" && scenario != "single" &&
-        scenario != "multi" && scenario != "boundary")
-        throw std::invalid_argument("small --scenario must be empty, single, multi, or boundary");
+        scenario != "multi" && scenario != "boundary" &&
+        scenario != "collision-first" && scenario != "collision-second" &&
+        scenario != "collision-miss")
+        throw std::invalid_argument("small --scenario must be empty, single, multi, boundary, or collision-*");
     auto evaluator = evaluator_example::options(
         static_cast<int>(remaining.size()), remaining.data());
     evaluator.compiler.optimize_resources = optimize;
@@ -454,8 +462,12 @@ Options parse_options(int argc, char** argv)
         throw std::invalid_argument("--preprocess-only requires --dump-preprocessing");
     if (!executed_image.empty() && (profile.name != "small" || preprocess_only))
         throw std::invalid_argument("--executed-image requires a full small-profile execution");
+    if (!client_readback_image.empty() && (profile.name != "small" || preprocess_only ||
+        client_readback_image == executed_image))
+        throw std::invalid_argument("client readback requires small full execution and a distinct file");
     return {std::move(profile), std::move(scenario),
             std::move(dump_preprocessing), std::move(executed_image),
+            std::move(client_readback_image),
             preprocess_only, std::move(evaluator)};
 }
 
@@ -467,6 +479,31 @@ std::uint64_t find_item_for_location(std::size_t wanted, const Profile& profile,
             std::find(locations.begin(), locations.end(), wanted) != locations.end())
             return item;
     throw std::runtime_error("failed to synthesize APSI boundary fixture");
+}
+
+std::pair<std::uint64_t, std::uint64_t> collision_pair(const Profile& profile)
+{
+    // Actual Kuku placement is used, including the four receiver decoys.
+    std::map<std::size_t, std::uint64_t> first_at;
+    for (std::uint64_t item = 1; item < 100000; ++item) {
+        const auto slot = build_trident_cuckoo_layout({item}, profile).item_to_table[0];
+        const auto found = first_at.find(slot);
+        if (found == first_at.end()) { first_at.emplace(slot, item); continue; }
+        const auto first = found->second;
+        const auto positions = trident_locations(test_oprf(first), profile);
+        const auto second_positions = trident_locations(test_oprf(item), profile);
+        if (std::find(positions.begin(), positions.end(), slot) == positions.end() ||
+            std::find(second_positions.begin(), second_positions.end(), slot) == second_positions.end())
+            continue;
+        const auto receiver_first = build_trident_cuckoo_layout(
+            {first, 10001, 10002, 10003, 10004}, profile);
+        const auto receiver_second = build_trident_cuckoo_layout(
+            {item, 10001, 10002, 10003, 10004}, profile);
+        if (receiver_first.item_to_table[0] == slot &&
+            receiver_second.item_to_table[0] == slot)
+            return {first, item};
+    }
+    throw std::runtime_error("no deterministic Kuku two-root collision");
 }
 
 Dataset build_dataset(const Options& options)
@@ -483,6 +520,20 @@ Dataset build_dataset(const Options& options)
             result.receiver.push_back(static_cast<std::uint64_t>(i + 1));
         for (std::size_t i = result.receiver.size(); i < profile.receiver_size; ++i)
             result.receiver.push_back(UINT64_C(1000000) + i);
+    } else if (options.scenario.rfind("collision-", 0) == 0) {
+        const auto pair = collision_pair(profile);
+        result.sender = {pair.first, pair.second};
+        for (std::uint64_t item = 30000; result.sender.size() < profile.sender_size; ++item) {
+            if (item == pair.first || item == pair.second) continue;
+            const auto target = build_trident_cuckoo_layout({pair.first}, profile).item_to_table[0];
+            const auto positions = trident_locations(test_oprf(item), profile);
+            if (std::find(positions.begin(), positions.end(), target) == positions.end())
+                result.sender.push_back(item);
+        }
+        result.receiver = options.scenario == "collision-miss"
+            ? std::vector<std::uint64_t>{20001, 20002, 20003, 20004, 20005}
+            : std::vector<std::uint64_t>{options.scenario == "collision-first"
+                ? pair.first : pair.second, 10001, 10002, 10003, 10004};
     } else if (options.scenario == "boundary") {
         const auto first = find_item_for_location(0, profile, UINT64_C(2000000));
         const auto last = find_item_for_location(profile.table_size - 1, profile,
@@ -536,7 +587,7 @@ TridentSenderPolynomials build_trident_sender_coefficients(
                 const auto& bins = partitions[p - 1];
                 bool fit = true;
                 for (std::size_t field = 0; field < profile.felts_per_item; ++field)
-                    fit = fit && bins[base + field].size() + 1 < profile.max_items_per_bin;
+                    fit = fit && bins[base + field].size() + 1 <= profile.max_items_per_bin;
                 if (fit) { selected = p - 1; break; }
             }
             if (selected == partitions.size())
@@ -1093,8 +1144,29 @@ int main(int argc, char** argv)
         const auto trident_sender = build_trident_sender_coefficients(
             dataset, options.profile, plain_modulus, bits_per_felt,
             bundle_count, items_per_bundle);
+        if (options.scenario.rfind("collision-", 0) == 0) {
+            const auto pair = collision_pair(options.profile);
+            const auto slot = build_trident_cuckoo_layout({pair.first}, options.profile)
+                                  .item_to_table[0];
+            const auto first_locations = trident_locations(test_oprf(pair.first), options.profile);
+            const auto second_locations = trident_locations(test_oprf(pair.second), options.profile);
+            require(std::find(first_locations.begin(), first_locations.end(), slot) != first_locations.end() &&
+                    std::find(second_locations.begin(), second_locations.end(), slot) != second_locations.end(),
+                    "collision pair does not share an actual Kuku sender bin");
+            if (options.scenario != "collision-miss") {
+                const auto selected = options.scenario == "collision-first" ? pair.first : pair.second;
+                const auto selected_it = std::find(dataset.receiver.begin(), dataset.receiver.end(), selected);
+                require(selected_it != dataset.receiver.end() &&
+                        layout.item_to_table[static_cast<std::size_t>(selected_it - dataset.receiver.begin())] == slot,
+                        "collision receiver did not enter the shared Kuku bin");
+            }
+            std::cerr << "AUDIT_KUKU_COLLISION slot=" << slot << " first=" << pair.first
+                      << " second=" << pair.second << " scenario=" << options.scenario << '\n';
+        }
         const auto partition_count = trident_sender.coefficients.size();
         const auto observed_degree = trident_sender.maximum_degree;
+        if (options.scenario.rfind("collision-", 0) == 0)
+            require(observed_degree == 2, "collision scenario did not build a two-root polynomial");
         const auto reference_intersection = trident_cpu_reference(
             layout, trident_sender, options.profile, bits_per_felt, items_per_bundle);
         if (options.profile.name == "target")
@@ -1283,6 +1355,19 @@ int main(int argc, char** argv)
             require(compiled.instruction_verified(),
                     "APSI encoded instruction model verification failed");
 
+            const auto& package = compiled.package();
+            std::vector<std::uint32_t> client_words;
+            std::vector<std::string> object_ids;
+            if (!options.client_readback_image.empty()) {
+                require(per_package == partition_count && first == 0,
+                        "PSI C readback requires one complete package");
+                client_words = psi_client_readback::read_image(
+                    options.client_readback_image, package.initial_image->words().size());
+                for (const auto& limb : package.outputs)
+                    if (std::find(object_ids.begin(), object_ids.end(), limb.object_id) == object_ids.end())
+                        object_ids.push_back(limb.object_id);
+            }
+            std::size_t client_object = 0;
             std::vector<std::vector<std::vector<std::uint64_t>>> decoded(
                 last - first, std::vector<std::vector<std::uint64_t>>(bundle_count));
             for (std::size_t partition = first; partition < last; ++partition)
@@ -1290,12 +1375,25 @@ int main(int argc, char** argv)
                     if (!trident_sender.occupied[partition][bundle]) continue;
                     const auto& oracle =
                         compiled.oracle_result(outputs[partition - first][bundle]);
+                    ::seal::Ciphertext readback;
+                    const ::seal::Ciphertext* client_cipher = &oracle;
+                    if (!client_words.empty()) {
+                        require(client_object < object_ids.size(), "PSI C readback extra output");
+                        readback = psi_client_readback::reconstruct(
+                            oracle, package, object_ids[client_object++], client_words, context);
+                        client_cipher = &readback;
+                    }
                     minimum_noise = std::min(minimum_noise,
-                        decryptor.invariant_noise_budget(oracle));
-                    ::seal::Plaintext oracle_plain;
-                    decryptor.decrypt(oracle, oracle_plain);
-                    encoder.decode(oracle_plain, decoded[partition - first][bundle]);
+                        decryptor.invariant_noise_budget(*client_cipher));
+                    ::seal::Plaintext client_plain;
+                    decryptor.decrypt(*client_cipher, client_plain);
+                    encoder.decode(client_plain, decoded[partition - first][bundle]);
                 }
+            if (!client_words.empty()) {
+                require(client_object == object_ids.size(), "PSI C readback missing output object");
+                std::cerr << "AUDIT_PSI_CLIENT_CIPHERTEXT_PASS objects=" << client_object
+                          << " source=target_C_DDR_export decrypt=SEAL\n";
+            }
             require(minimum_noise > 0, "APSI reply exhausted the BFV noise budget");
 
             std::vector<std::uint64_t> package_matches;
@@ -1321,7 +1419,6 @@ int main(int argc, char** argv)
             actual_intersection.insert(actual_intersection.end(),
                                        package_matches.begin(), package_matches.end());
 
-            const auto& package = compiled.package();
             if (!options.executed_image.empty()) {
                 require(per_package == partition_count && first == 0,
                         "PSI executed image requires one complete package");

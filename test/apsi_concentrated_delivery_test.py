@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument("--validator", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", choices=("small", "medium", "target"), required=True)
-    parser.add_argument("--scenario", choices=("empty", "single", "multi", "boundary"), required=True)
+    parser.add_argument("--scenario", choices=("empty", "single", "multi", "boundary", "collision-first", "collision-second", "collision-miss"), required=True)
     parser.add_argument("--optimize-resources", action="store_true")
     parser.add_argument("--executed-image", type=pathlib.Path)
     args = parser.parse_args()

@@ -768,6 +768,13 @@ if(HPU_ENABLE_SEAL_DIFFERENTIAL_ORACLE OR HPU_ENABLE_SEAL_INTEGRATION)
             set_tests_properties(hpu_bfv_apsi_concentrated_small_${apsi_scenario}
                 PROPERTIES LABELS "apsi;application;concentrated" RUN_SERIAL TRUE TIMEOUT 1800)
         endforeach()
+        foreach(apsi_collision collision-first collision-second collision-miss)
+            add_test(NAME hpu_bfv_apsi_small_${apsi_collision}
+                COMMAND hpu_bfv_apsi_concentrated_example
+                    --profile small --scenario ${apsi_collision} --match-mode trident)
+            set_tests_properties(hpu_bfv_apsi_small_${apsi_collision}
+                PROPERTIES LABELS "apsi;application;kuku-two-roots" RUN_SERIAL TRUE TIMEOUT 1800)
+        endforeach()
         add_test(NAME bfv_apsi_concentrated_small_delivery_test
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/apsi_concentrated_delivery_test.py
                 --example $<TARGET_FILE:hpu_bfv_apsi_concentrated_example>

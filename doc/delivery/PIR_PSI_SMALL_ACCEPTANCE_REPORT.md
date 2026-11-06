@@ -221,3 +221,21 @@ On the tested producer commit, `git diff --exit-code cfee951e4056660e521d55a3535
 - PSI actual encoded execution DDR: `/home/zhaozhengyi/independent-pir-psi-audit-20261026/small-acceptance-run-de9f-688a/psi/single-executed.u32.bin`. Its content is not reconstructed from Golden.
 - Full network APSI/FourQ OPRF, target-level simulation, RTL and physical HPU: **NOT RUN**. There is no hardware timing claim.
 - No unresolved Small software failure was observed. Final PSI intersection recovery remains a producer/client operation; target C checks encrypted output and memory guards.
+
+## Audit-fixes parameter clarification (2026-11-05)
+
+This historical report records the Small acceptance baseline. The follow-up
+`feature/pir-psi-audit-fixes` work uses the same dimensions. PIR has N=4096,
+128 real records of 1024 bytes, 9 records per plaintext, 15 populated
+plaintexts plus one zero padding plaintext in a 4 x 4 matrix (16 total).
+Stage 0 has 17,740 HPU instructions; Stage 1 has 26,700. The 32 CPU
+decomposition plaintexts become 96 three-modulus physical inputs.
+
+PSI Small has N=8192, 10 real Sender items and 5 real Receiver items in
+each of empty/single/multi/boundary. The real intersections have 0/1/2/2
+items respectively. Kuku has 4096 buckets; one HPU package covers a
+contiguous 1024-bucket window. The fixed source config sets
+`max_items_per_bin=16`; the independent PDF's value of 2 is inconsistent
+with the checked source. These counts describe effective sets, not any
+synthetic padding or formal-scale dataset. Target multi-window scheduling
+(F-04) and generalized PIR CPU parameters (F-05) remain outside Small scope.

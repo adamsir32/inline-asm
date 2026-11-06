@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import struct
 
 from pir_record_oracle import expected_record
 
@@ -43,23 +44,26 @@ def main():
     parser.add_argument("--example", required=True, type=Path)
     parser.add_argument("--stage1-patch-script", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--record-index", type=int, default=8)
     args = parser.parse_args()
+    require(args.record_index in range(128), "small PIR record index outside 0..127")
     root = args.output.resolve()
     require(not root.exists(), "output directory already exists")
     root.mkdir(parents=True)
     example = str(args.example.resolve())
     script = str(args.stage1_patch_script.resolve())
     stage0 = root / "stage0-executed.u32.bin"
-    command = [example, "--profile", "small", "--record-index", "8",
+    command = [example, "--profile", "small", "--record-index", str(args.record_index),
                "--stage0-executed-image", str(stage0),
                "--emit-dir", str(root / "packages"),
                "--dynamic-replay-dir", str(root / "replay"),
                "--stage1-patch-script", script]
     result = run(command, root / "main.log")
     require(result.returncode == 0, "dynamic handoff failed; see main.log")
-    require(result.stderr.count("AUDIT_STAGE1_REPLAY_PASS") == 2 and
+    require(result.stderr.count("AUDIT_STAGE1_REPLAY_PASS") == 3 and
+            "AUDIT_SENTINEL_TEMPLATE_PASS" in result.stderr and
             "AUDIT_DYNAMIC_TWO_INPUTS_PASS" in result.stderr,
-            "two fixed-instruction numerical replays did not complete")
+            "three fixed-instruction numerical replays did not complete")
     require(result.stderr.count("AUDIT_STAGE0_METADATA_NEGATIVE_PASS cases=4") == 2,
             "stage0 malformed metadata was not rejected in both executions")
 
@@ -83,12 +87,41 @@ def main():
     require(outside_changed > 0,
             "no non-output memory changed; suspected Golden-only reconstruction")
 
+    duplicate_template = root / "replay" / "duplicate-template"
+    template_package = root / "replay" / "sentinel-template-packages" / "stage1_concentrated_000"
+    template_manifest, template_initial, template_rows, _, _ = package_data(template_package)
+    require(digest((template_package / template_manifest["program_inst32"]).read_bytes()) ==
+            digest((stage1_package / stage1_manifest["program_inst32"]).read_bytes()),
+            "sentinel template changed stage1 instructions")
+    duplicate_mapping = (duplicate_template / "dynamic" / "dynamic_inputs.tsv").read_text().splitlines()
+    dynamic_ids = {line.split("\t")[0] for line in duplicate_mapping}
+    require(len(duplicate_mapping) == len(dynamic_ids) == 96,
+            "sentinel template did not map 96 physical limbs")
+    dynamic_rows = [row for row in template_rows if row["allocation_id"] in dynamic_ids]
+    require(len(dynamic_rows) == 96, "sentinel template allocation coverage")
+    def limb(image, row):
+        return image[int(row["line_offset"]) * 256:
+                     (int(row["line_offset"]) + int(row["line_count"])) * 256]
+    for modulus in range(3):
+        rows = [row for row in dynamic_rows
+                if row["allocation_id"].endswith(f"/mod{modulus}")]
+        require(len(rows) == 32 and
+                len({limb(template_initial, row) for row in rows}) == 32,
+                f"sentinels in modulus {modulus} were merged or damaged")
+    mod0_rows = [row for row in dynamic_rows
+                 if row["allocation_id"].endswith("/mod0")]
+    duplicate_image = (duplicate_template / "stage1-patched.u32.bin").read_bytes()
+    require(len({limb(duplicate_image, row) for row in mod0_rows}) == 1,
+            "duplicate replacement did not place equal content in distinct positions")
     baseline = root / "replay" / "baseline"
     changed = root / "replay" / "changed"
     baseline_image = (baseline / "stage1-patched.u32.bin").read_bytes()
     changed_image = (changed / "stage1-patched.u32.bin").read_bytes()
     require(baseline_image == initial1,
-            "baseline physical encoding differs from compiler source image")
+            "materialized package differs from patched baseline execution input")
+    require(all(limb(baseline_image, row) != limb(template_initial, row)
+                for row in dynamic_rows),
+            "a sentinel limb remains in the materialized execution image")
     require(len(changed_image) == len(initial1), "changed stage1 image length mismatch")
     mapping = dict(line.split("\t") for line in
                    (changed / "dynamic" / "dynamic_inputs.tsv").read_text().splitlines())
@@ -104,7 +137,7 @@ def main():
     require(all(a == b for a, b, mask in
                 zip(initial1, changed_image, dynamic_mask) if not mask),
             "stage1 patch altered fixed data or addresses")
-    for label in ("baseline", "changed"):
+    for label in ("baseline", "changed", "duplicate-template"):
         replay = json.loads((root / "replay" / label / "replay_summary.json").read_text())
         require(replay["status"] == "PASS" and replay["fixed_instructions"] == 26700,
                 f"{label} fixed instruction replay summary invalid")
@@ -112,14 +145,32 @@ def main():
     original_seed = int(json.loads((root / "packages" /
         "pipeline_manifest.json").read_text())["database_seed"])
     changed_seed = original_seed ^ 0x9E3779B97F4A7C15
-    require((baseline / "record.bin").read_bytes() == expected_record(8, original_seed, 1024),
+    require((baseline / "record.bin").read_bytes() == expected_record(args.record_index, original_seed, 1024),
             "baseline recovered record differs from independent record oracle")
-    require((changed / "record.bin").read_bytes() == expected_record(8, changed_seed, 1024),
+    require((changed / "record.bin").read_bytes() == expected_record(args.record_index, changed_seed, 1024),
             "changed recovered record differs from independent record oracle")
+
+    for name in ("missing-sentinel-manifest", "duplicate-sentinel", "corrupt-sentinel"):
+        bad_package = root / name / "sentinel-template-packages" / "stage1_concentrated_000"
+        shutil.copytree(template_package, bad_package)
+        sentinel_file = bad_package / "sentinel_manifest.tsv"
+        lines = sentinel_file.read_text().splitlines()
+        if name == "missing-sentinel-manifest":
+            sentinel_file.unlink()
+        elif name == "duplicate-sentinel":
+            sentinel_file.write_text("\n".join(lines[:-1] + [lines[1]]) + "\n")
+        else:
+            fields = lines[1].split("\t")
+            fields[-1] = "0"
+            sentinel_file.write_text("\n".join([lines[0], "\t".join(fields)] + lines[2:]) + "\n")
+        bad = run(["python3", script, "snapshot", "--package", str(bad_package),
+                   "--directory", str(root / name / "snapshot")],
+                  root / f"negative-{name}.log")
+        require(bad.returncode != 0, f"{name} was accepted")
 
     # Image corruption is tested here; in-memory output metadata mutations are
     # tested inside the same C++ run that compiled each stage0 package.
-    readback_command = [example, "--profile", "small", "--record-index", "8",
+    readback_command = [example, "--profile", "small", "--record-index", str(args.record_index),
                         "--stage0-readback", str(root / "invalid-readback.bin")]
     first_offset = int(golden0[0]["line_offset"]) * 256
     invalid_cases = {
@@ -155,8 +206,39 @@ def main():
         bad = run(command, root / f"negative-{name}.log")
         require(bad.returncode != 0, f"{name} stage1 patch was accepted")
 
+    # A canonical but wrongly assigned limb must fail the fixed instruction
+    # replay against the SEAL-verified execution image.
+    swapped = root / "swapped-dynamic-limbs"
+    shutil.copytree(changed / "dynamic", swapped,
+                    ignore=shutil.ignore_patterns("complete_patch"))
+    swapped_map = swapped / "dynamic_inputs.tsv"
+    swapped_rows = swapped_map.read_text().splitlines()
+    require(len(swapped_rows) == 96, "cannot exercise wrong-limb replacement")
+    left, right = swapped_rows[0].split("\t"), swapped_rows[3].split("\t")
+    left[1], right[1] = right[1], left[1]
+    swapped_rows[0], swapped_rows[3] = "\t".join(left), "\t".join(right)
+    swapped_map.write_text("\n".join(swapped_rows) + "\n")
+    wrong_image = root / "wrong-limb-stage1.u32.bin"
+    wrong_patch = run(["python3", script, "materialize", "--package",
+        str(stage1_package), "--directory", str(swapped), "--output",
+        str(wrong_image)], root / "wrong-limb-patch.log")
+    require(wrong_patch.returncode == 0, "wrong-limb negative setup failed")
+    dma_rows = list(csv.DictReader((stage1_package /
+        stage1_manifest["dma_relocation_manifest"]).open(newline="")))
+    dma_file = root / "stage1-dma-spans.u32x2.bin"
+    dma_file.write_bytes(b"".join(struct.pack("<II", int(row["line_offset"]),
+        int(row["line_count"])) for row in dma_rows))
+    replay = str(Path(example).with_name("pir_cpu_encoded_replay"))
+    require(Path(replay).is_file(), "fixed instruction replay executable missing")
+    wrong = run([replay, str(stage1_package / stage1_manifest["program_inst32"]),
+                 str(dma_file), str(wrong_image),
+                 str(changed / "stage1-executed.u32.bin")],
+                root / "negative-swapped-dynamic-limbs.log")
+    require(wrong.returncode != 0, "wrong physical input replacement was accepted")
+
     summary = {
         "status": "PASS", "model": "encoded_instruction_executor",
+        "record_index": args.record_index,
         "stage0_package_json_sha256": digest((stage0_package / "package.json").read_bytes()),
         "stage0_initial_image_sha256": digest(initial0),
         "stage0_executed_image_sha256": digest(final0),
@@ -174,10 +256,12 @@ def main():
             (changed / "stage1-executed.u32.bin").read_bytes()),
         "dynamic_input_limbs": len(mapping),
         "negative_cases": sorted(invalid_cases) +
-            ["missing-dynamic-limb", "noncanonical-dynamic-limb",
+            ["missing-sentinel-manifest", "duplicate-sentinel", "corrupt-sentinel",
+             "missing-dynamic-limb", "noncanonical-dynamic-limb", "swapped-dynamic-limbs",
              "duplicate-output-metadata", "missing-output-metadata",
              "wrong-modulus-metadata", "missing-output-object-metadata"],
         "two_input_numeric_replay": "PASS",
+        "sentinel_template_and_duplicate_content_replay": "PASS",
         "rtl": "NOT RUN", "hardware": "NOT RUN",
     }
     (root / "handoff_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
