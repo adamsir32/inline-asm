@@ -378,7 +378,7 @@ Profile small_profile()
 
 Profile medium_profile()
 {
-    return {"medium", 8192, 512, 32, 4096, 188417, 5, 3, 1638, 125, 5,
+    return {"medium", 8192, 1024, 32, 4096, 188417, 5, 3, 1638, 125, 5,
             {1,2,3,4,5,6,18,30,42,54,60},
             "Microsoft APSI 1M-1024-com parameter shape; sender/receiver counts reduced"};
 }

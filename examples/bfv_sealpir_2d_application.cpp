@@ -101,6 +101,7 @@ Options parse_options(int argc, char** argv)
             if (++i >= argc) throw std::invalid_argument("--profile requires small, full, or trident");
             const std::string value(argv[i]);
             if (value == "small") profile = {"small", 128, 0, 4096, 1024};
+            else if (value == "medium") profile = {"medium", 1024, 1023, 4096, 1024};
             else if (value == "full") profile = {"full", 65536, 65535, 4096, 1024};
             else if (value == "trident")
                 profile = {"trident", 65536, 65535, 8192, 288};
@@ -148,7 +149,7 @@ Options parse_options(int argc, char** argv)
         evaluator.compiler.optimize_resources = false;
     if (!stage0_readback.empty() && !stage0_executed_image.empty())
         throw std::invalid_argument("choose one stage0 readback source");
-    if (!dynamic_replay_dir.empty() && (profile.name != "small" ||
+    if (!dynamic_replay_dir.empty() && ((profile.name != "small" && profile.name != "medium") ||
         stage0_executed_image.empty() || stage1_patch_script.empty() ||
         !evaluator.delivery.emit_directory))
         throw std::invalid_argument("dynamic replay requires small profile, --stage0-executed-image, --stage1-patch-script and --emit-dir");
@@ -905,7 +906,7 @@ void write_words_le(const std::filesystem::path& path,
 void write_cpu_plaintext_fixture(const std::filesystem::path& path,
                                  const std::vector<::seal::Plaintext>& plains)
 {
-    require(plains.size() == 32, "CPU fixture requires 32 decomposed plaintexts");
+    require(!plains.empty(), "CPU fixture requires decomposed plaintexts");
     std::vector<std::uint32_t> words;
     words.reserve(plains.size() * gDegree);
     for (const auto& plain : plains) {
@@ -989,6 +990,7 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     const std::filesystem::path& package_path,
     const std::filesystem::path& script,
     const std::filesystem::path& output_dir,
+    std::size_t query_count,
     const std::filesystem::path& materialized_package = {})
 {
     namespace fs = std::filesystem;
@@ -996,9 +998,9 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     fs::create_directories(output_dir / "dynamic");
     const auto& package = compiled.package();
     const auto& source = *package.initial_image;
-    require(original.size() == replacement.size() && replacement.size() == 32,
-            "stage1 dynamic plaintext count must be 32");
-    const std::size_t output_count = replacement.size() / 4;
+    require(query_count > 0 && original.size() == replacement.size() && replacement.size() % query_count == 0,
+            "invalid stage1 dynamic plaintext shape");
+    const std::size_t output_count = replacement.size() / query_count;
     std::ofstream mapping(output_dir / "dynamic" / "dynamic_inputs.tsv");
     require(static_cast<bool>(mapping), "cannot create stage1 dynamic mapping");
     std::size_t changed_limbs = 0;
@@ -1006,7 +1008,7 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     std::set<std::string> assigned_ids;
     std::set<std::uint64_t> assigned_lines;
     for (std::size_t k = 0; k < output_count; ++k)
-        for (std::size_t j = 0; j < 4; ++j) {
+        for (std::size_t j = 0; j < query_count; ++j) {
             const auto index = k + j * output_count;
             const auto old_encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
                 original[index], query.parms_id(), context);
@@ -1047,13 +1049,13 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
             }
         }
     mapping.close();
-    require(encoded_limbs == 96, "stage1 must encode exactly 96 dynamic Q limbs");
+    require(encoded_limbs == replacement.size() * 3, "stage1 dynamic Q limb count mismatch");
     const auto plaintext_count = std::count_if(
         source.allocations().begin(), source.allocations().end(),
         [](const auto& allocation) {
             return allocation.kind == hpu::runtime::AllocationKind::plaintext;
         });
-    require(plaintext_count == 102 && assigned_ids.size() == 96,
+    require(plaintext_count == encoded_limbs + 6 && assigned_ids.size() == encoded_limbs,
             "stage1 requires 96 dynamic and 6 fixed plaintext allocations");
     const auto patched_path = output_dir / "stage1-patched.u32.bin";
     invoke_stage1_patch(script, package_path, output_dir / "dynamic", patched_path);
@@ -1072,7 +1074,7 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
     }
     require(replay_image.words() == patched_words,
             "replay image differs from stage1_patch.py output");
-    const auto native = native_stage1_reference(context, query, 4, keys, replacement);
+    const auto native = native_stage1_reference(context, query, query_count, keys, replacement);
     const auto execution = hpu::model::execute_instructions(
         package.program.instructions, package.program.ordered_dma_spans, replay_image);
     require(execution.report.completed(),
@@ -1450,7 +1452,7 @@ int run(int argc, char** argv)
                 std::array<std::set<std::vector<std::uint32_t>>, 3> unique_words;
                 const auto& image = *fixed_stage1->package().initial_image;
                 for (std::size_t rank = 0; rank < stage1_template.size(); ++rank) {
-                    const std::size_t index = rank / 4 + (rank % 4) * (stage1_template.size() / 4);
+                    const std::size_t index = rank / shape[1] + (rank % shape[1]) * (stage1_template.size() / shape[1]);
                     const auto encoded = hpu::seal_adapter::bfv_multiply_plaintext_to_hpu(
                         stage1_template[index], compressed_queries[1].parms_id(), context);
                     require(encoded.modulus_ids.size() == 3,
@@ -1475,7 +1477,7 @@ int run(int argc, char** argv)
             const auto baseline_replay = replay_patched_stage1(
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
                 stage1_template, decomposed, template_path, options.stage1_patch_script,
-                options.dynamic_replay_dir / "baseline", package_path);
+                options.dynamic_replay_dir / "baseline", shape[1], package_path);
             require_ciphertexts_equal(baseline_replay, native_baseline,
                                       "sentinel materialized Stage 1 versus SEAL");
             final_actual = baseline_replay;
@@ -1490,10 +1492,10 @@ int run(int argc, char** argv)
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
                 stage1_template, duplicate_replacement, template_path,
                 options.stage1_patch_script,
-                options.dynamic_replay_dir / "duplicate-template");
+                options.dynamic_replay_dir / "duplicate-template", shape[1]);
             require(duplicate_replay.size() == baseline_replay.size(),
                     "duplicate-content replay output shape changed");
-            std::cerr << "AUDIT_SENTINEL_TEMPLATE_PASS plaintexts=32 limbs=96"
+            std::cerr << "AUDIT_SENTINEL_TEMPLATE_PASS plaintexts=" << stage1_template.size() << " limbs=" << stage1_template.size()*3
                       << " fixed_instructions="
                       << fixed_stage1->package().program.instructions.size() << '\n';
             const auto original_seed = gDatabaseSeed;
@@ -1523,7 +1525,7 @@ int run(int argc, char** argv)
             const auto changed_replay = replay_patched_stage1(
                 *fixed_stage1, context, compressed_queries[1], galois_keys,
                 stage1_template, changed_decomposed, template_path,
-                options.stage1_patch_script, options.dynamic_replay_dir / "changed");
+                options.stage1_patch_script, options.dynamic_replay_dir / "changed", shape[1]);
             auto check_record = [&](const std::vector<::seal::Ciphertext>& reply,
                                     const std::filesystem::path& record_path) {
                 auto decoded_plain = decode_recursive_reply(context, keygen.secret_key(), reply);
