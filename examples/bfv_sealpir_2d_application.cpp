@@ -1022,8 +1022,9 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
                 const std::vector<std::uint32_t> old_words(
                     old_encoded.words.begin() + limb * gDegree,
                     old_encoded.words.begin() + (limb + 1) * gDegree);
-                const auto& allocation = pir_physical_binding::logical_plaintext_limb(
-                    source, encoded_limbs / 3, old_encoded.modulus_ids[limb], old_words);
+                const auto& allocation = replacement.size() == 32
+                    ? pir_physical_binding::logical_plaintext_limb(source, encoded_limbs / 3, old_encoded.modulus_ids[limb], old_words)
+                    : pir_physical_binding::unique_plaintext_limb(source, encoded_limbs / 3, old_encoded.modulus_ids[limb], old_words);
                 const auto& id = allocation.id;
                 require(assigned_ids.insert(id).second,
                         "stage1 logical plaintexts share a physical allocation: " + id);
@@ -1463,8 +1464,9 @@ int run(int argc, char** argv)
                             encoded.words.begin() + (mod + 1) * gDegree);
                         require(unique_words[mod].insert(words).second,
                                 "duplicate encoded sentinel in one modulus");
-                        const auto& allocation = pir_physical_binding::logical_plaintext_limb(
-                            image, rank, encoded.modulus_ids[mod], words);
+                        const auto& allocation = stage1_template.size() == 32
+                            ? pir_physical_binding::logical_plaintext_limb(image, rank, encoded.modulus_ids[mod], words)
+                            : pir_physical_binding::unique_plaintext_limb(image, rank, encoded.modulus_ids[mod], words);
                         sentinels << rank << '\t' << mod << '\t' << allocation.id
                                   << '\t' << allocation.span.line_offset << '\t'
                                   << std::hex << fnv1a_words(words) << std::dec << '\n';
