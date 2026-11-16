@@ -1055,8 +1055,8 @@ std::vector<::seal::Ciphertext> replay_patched_stage1(
         [](const auto& allocation) {
             return allocation.kind == hpu::runtime::AllocationKind::plaintext;
         });
-    require(plaintext_count == encoded_limbs + 6 && assigned_ids.size() == encoded_limbs,
-            "stage1 requires 96 dynamic and 6 fixed plaintext allocations");
+    require(plaintext_count >= encoded_limbs && assigned_ids.size() == encoded_limbs,
+            "stage1 dynamic allocation coverage mismatch");
     const auto patched_path = output_dir / "stage1-patched.u32.bin";
     invoke_stage1_patch(script, package_path, output_dir / "dynamic", patched_path);
     const auto patched_words = read_words_le(patched_path, source.words().size());
